@@ -57,6 +57,21 @@ enum WorkspaceRemoteSSHBatchCommandBuilder {
         return args
     }
 
+    static func controlMasterExitArguments(
+        configuration: WorkspaceRemoteConfiguration
+    ) -> [String]? {
+        guard let controlPath = sshOptionValue(named: "ControlPath", in: configuration.sshOptions)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !controlPath.isEmpty,
+              controlPath.lowercased() != "none" else {
+            return nil
+        }
+
+        var args = batchArguments(configuration: configuration)
+        args += ["-O", "exit", configuration.destination]
+        return args
+    }
+
     private static func batchArguments(configuration: WorkspaceRemoteConfiguration) -> [String] {
         let effectiveSSHOptions = backgroundSSHOptions(configuration.sshOptions)
         var args: [String] = [

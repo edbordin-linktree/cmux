@@ -6433,6 +6433,15 @@ final class WorkspaceRemoteSessionController {
                     "error=\(startupFailure)"
                 )
                 relayServer?.stop()
+                if Self.isRemoteForwardAllocationFailure(startupFailure),
+                   resetReverseRelayControlMasterLocked() {
+                    publishDaemonStatus(
+                        .bootstrapping,
+                        detail: "Remote SSH relay had a stale forward; retrying in \(retrySeconds)s"
+                    )
+                    scheduleReverseRelayRestartLocked(remotePath: remotePath, delay: retryDelay)
+                    return
+                }
                 publishDaemonStatus(
                     .error,
                     detail: "Remote SSH relay unavailable: \(startupFailure) (retry in \(retrySeconds)s)"
@@ -6817,6 +6826,36 @@ final class WorkspaceRemoteSessionController {
             debugLog("remote.relay.controlmaster.forwardFailed \(error.localizedDescription) \(debugConfigSummary())")
             return false
         }
+    }
+
+    private func resetReverseRelayControlMasterLocked() -> Bool {
+        guard let arguments = WorkspaceRemoteSSHBatchCommandBuilder.controlMasterExitArguments(
+            configuration: configuration
+        ) else {
+            return false
+        }
+
+        do {
+            let result = try sshExec(arguments: arguments, timeout: 4)
+            guard result.status == 0 else {
+                let detail = Self.bestErrorLine(stderr: result.stderr, stdout: result.stdout)
+                    ?? "ssh exited \(result.status)"
+                debugLog("remote.relay.controlmaster.exitFailed \(detail) \(debugConfigSummary())")
+                return false
+            }
+            debugLog("remote.relay.controlmaster.exit relayPort=\(configuration.relayPort.map(String.init) ?? "nil") \(debugConfigSummary())")
+            return true
+        } catch {
+            debugLog("remote.relay.controlmaster.exitFailed \(error.localizedDescription) \(debugConfigSummary())")
+            return false
+        }
+    }
+
+    private static func isRemoteForwardAllocationFailure(_ detail: String) -> Bool {
+        let lowered = detail.lowercased()
+        return lowered.contains("remote port forwarding failed") ||
+            lowered.contains("port forwarding failed") ||
+            lowered.contains("remote forward failure")
     }
 
     private func stopReverseRelayViaControlMasterLocked() {

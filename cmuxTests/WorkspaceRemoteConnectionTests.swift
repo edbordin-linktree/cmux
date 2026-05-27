@@ -2337,6 +2337,39 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
         XCTAssertTrue(arguments.contains("forward"))
     }
 
+    func testControlMasterExitArgumentsReuseConfiguredControlSocket() throws {
+        let configuration = WorkspaceRemoteConfiguration(
+            destination: "cmux-macmini",
+            port: 2222,
+            identityFile: "/Users/test/.ssh/id_ed25519",
+            sshOptions: [
+                "ControlMaster=auto",
+                "ControlPersist=600",
+                "ControlPath=/tmp/cmux-ssh-%C",
+                "StrictHostKeyChecking=accept-new",
+            ],
+            localProxyPort: nil,
+            relayPort: 64007,
+            relayID: nil,
+            relayToken: nil,
+            localSocketPath: nil,
+            terminalStartupCommand: "ssh cmux-macmini"
+        )
+
+        let arguments = try XCTUnwrap(
+            WorkspaceRemoteSSHBatchCommandBuilder.controlMasterExitArguments(
+                configuration: configuration
+            )
+        )
+
+        XCTAssertFalse(arguments.contains("-S"))
+        XCTAssertTrue(arguments.contains("ControlMaster=no"))
+        XCTAssertTrue(arguments.contains("ControlPath=/tmp/cmux-ssh-%C"))
+        XCTAssertTrue(arguments.contains("-O"))
+        XCTAssertTrue(arguments.contains("exit"))
+        XCTAssertTrue(arguments.contains("cmux-macmini"))
+    }
+
     func testDetectedSSHSessionBracketsIPv6LiteralSCPDestination() {
         let session = DetectedSSHSession(
             destination: "lawrence@2001:db8::1",
