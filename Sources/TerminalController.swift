@@ -6575,7 +6575,8 @@ class TerminalController {
             _ = try capture.workspace.storeRemoteWorkspaceSnapshot(
                 body: capture.body,
                 bodySHA256: capture.sha256,
-                detachedAt: capture.detachedAt
+                capturedAt: capture.detachedAt,
+                status: .detached
             )
             try DetachedWorkspaceHostRegistry.upsert(DetachedWorkspaceHostRegistryRecord(
                 host: capture.configuration.destination,
@@ -6689,7 +6690,12 @@ class TerminalController {
             }
         }
 
-        let clearResult = try? target.clearRemoteWorkspaceSnapshot()
+        let liveStoreResult = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
+            workspace: target,
+            status: .live,
+            force: true,
+            requireCapability: false
+        )
         if let configuration = target.remoteConfiguration {
             try? DetachedWorkspaceHostRegistry.upsert(DetachedWorkspaceHostRegistryRecord(
                 host: configuration.destination,
@@ -6712,7 +6718,9 @@ class TerminalController {
             "panes_restored": restoreResult?.panesRestored ?? 0,
             "panes_lost": restoreResult?.panesLost ?? 0,
             "snapshot_sha256": bodySHA256,
-            "cleared": (clearResult?["cleared"] as? Bool) ?? false,
+            "status": RemoteWorkspaceSnapshotStatus.live.rawValue,
+            "stored": liveStoreResult?.uploaded ?? false,
+            "cleared": false,
         ])
     }
 

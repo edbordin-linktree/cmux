@@ -101,8 +101,8 @@ Environment:
 | `ssh` | Open an SSH-backed workspace. |
 | `remote-daemon-status` | Print bundled remote daemon version, asset, checksum, and cache status. |
 | `ssh-workspace-detach` | Store a remote workspace snapshot on its persistent daemon host and remove the local workspace. Supports `--json`. |
-| `ssh-workspace-list-detached` | List detached remote workspace snapshots across known hosts, or one host with `--host`. Supports `--json`. |
-| `ssh-workspace-attach` | Restore a detached remote workspace snapshot by workspace ID, optionally disambiguated by host and slot. Supports `--json`. |
+| `ssh-workspace-list-detached` | List snapshots whose remote metadata status is `detached` across known hosts, or one host with `--host`. Supports `--json`; live checkpoints are intentionally hidden. |
+| `ssh-workspace-attach` | Restore a detached remote workspace snapshot by workspace ID, optionally disambiguated by host and slot, then rewrite the remote snapshot as `live` without clearing it. Supports `--json`. |
 | `ssh-workspace-snapshot-clear` | Clear a stored remote workspace snapshot by workspace ID or host and slot. |
 | `ssh-host-list` | Print the local detached workspace host registry. Supports `--json` and does not require a socket. |
 | `ssh-host-forget` | Remove a host from the local detached workspace host registry. |

@@ -117,7 +117,9 @@ type workspaceSnapshotMeta struct {
 	Version        int    `json:"version"`
 	WorkspaceID    string `json:"workspace_id"`
 	Title          string `json:"title"`
+	Status         string `json:"status,omitempty"`
 	DetachedAt     string `json:"detached_at"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
 	SchemaVersion  int    `json:"schema_version"`
 	SnapshotSHA256 string `json:"snapshot_sha256"`
 	BodyByteLength int    `json:"body_byte_length"`
@@ -127,7 +129,9 @@ type workspaceSnapshotListEntry struct {
 	Slot           string `json:"slot"`
 	WorkspaceID    string `json:"workspace_id,omitempty"`
 	Title          string `json:"title,omitempty"`
+	Status         string `json:"status,omitempty"`
 	DetachedAt     string `json:"detached_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
 	SchemaVersion  int    `json:"schema_version,omitempty"`
 	SnapshotSHA256 string `json:"snapshot_sha256,omitempty"`
 	BodyByteLength int    `json:"body_byte_length,omitempty"`
@@ -380,7 +384,9 @@ func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotL
 			Slot:           slot,
 			WorkspaceID:    meta.WorkspaceID,
 			Title:          meta.Title,
+			Status:         workspaceSnapshotStatusOrDetached(meta.Status),
 			DetachedAt:     meta.DetachedAt,
+			UpdatedAt:      meta.UpdatedAt,
 			SchemaVersion:  meta.SchemaVersion,
 			SnapshotSHA256: meta.SnapshotSHA256,
 			BodyByteLength: meta.BodyByteLength,
@@ -1299,6 +1305,20 @@ func (s *rpcServer) handleWorkspaceSnapshotStore(req rpcRequest) rpcResponse {
 	if !ok || !isValidRFC3339Timestamp(detachedAt) {
 		return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store requires detached_at RFC3339 timestamp")
 	}
+	status := "detached"
+	if rawStatus, ok := getStringParam(req.Params, "status"); ok {
+		status = strings.ToLower(strings.TrimSpace(rawStatus))
+	}
+	if status != "live" && status != "detached" {
+		return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store status must be live or detached")
+	}
+	updatedAt := detachedAt
+	if rawUpdatedAt, ok := getStringParam(req.Params, "updated_at"); ok {
+		if !isValidRFC3339Timestamp(rawUpdatedAt) {
+			return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store requires updated_at RFC3339 timestamp")
+		}
+		updatedAt = rawUpdatedAt
+	}
 	schemaVersion, ok := getIntParam(req.Params, "schema_version")
 	if !ok || schemaVersion <= 0 {
 		return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store requires positive schema_version")
@@ -1325,7 +1345,9 @@ func (s *rpcServer) handleWorkspaceSnapshotStore(req rpcRequest) rpcResponse {
 		Version:        1,
 		WorkspaceID:    workspaceID,
 		Title:          title,
+		Status:         status,
 		DetachedAt:     detachedAt,
+		UpdatedAt:      updatedAt,
 		SchemaVersion:  schemaVersion,
 		SnapshotSHA256: strings.ToLower(bodySHA256),
 		BodyByteLength: len(bodyBytes),
@@ -1349,6 +1371,14 @@ func (s *rpcServer) handleWorkspaceSnapshotStore(req rpcRequest) rpcResponse {
 			"byte_length": len(bodyBytes),
 		},
 	}
+}
+
+func workspaceSnapshotStatusOrDetached(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "live" || status == "detached" {
+		return status
+	}
+	return "detached"
 }
 
 func (s *rpcServer) handleWorkspaceSnapshotFetch(req rpcRequest) rpcResponse {

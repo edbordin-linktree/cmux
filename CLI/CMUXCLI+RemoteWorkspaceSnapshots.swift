@@ -44,7 +44,9 @@ private struct DetachedWorkspaceSnapshotEntry: Codable {
     var slot: String
     var workspaceID: String?
     var title: String?
+    var status: String?
     var detachedAt: Date?
+    var updatedAt: Date?
     var schemaVersion: Int?
     var snapshotSHA256: String?
     var bodyByteLength: Int?
@@ -55,7 +57,9 @@ private struct DetachedWorkspaceSnapshotEntry: Codable {
         case slot
         case workspaceID = "workspace_id"
         case title
+        case status
         case detachedAt = "detached_at"
+        case updatedAt = "updated_at"
         case schemaVersion = "schema_version"
         case snapshotSHA256 = "snapshot_sha256"
         case bodyByteLength = "body_byte_length"
@@ -494,7 +498,9 @@ extension CMUXCLI {
         var payload: [String: Any] = ["slot": snapshot.slot]
         payload["workspace_id"] = snapshot.workspaceID ?? NSNull()
         payload["title"] = snapshot.title ?? NSNull()
+        payload["status"] = snapshotStatus(snapshot)
         payload["detached_at"] = DetachedWorkspaceDates.string(snapshot.detachedAt)
+        payload["updated_at"] = DetachedWorkspaceDates.string(snapshot.updatedAt)
         payload["schema_version"] = snapshot.schemaVersion ?? NSNull()
         payload["snapshot_sha256"] = snapshot.snapshotSHA256 ?? NSNull()
         payload["body_byte_length"] = snapshot.bodyByteLength ?? NSNull()
@@ -765,7 +771,9 @@ extension CMUXCLI {
             return DetachedWorkspaceHostListResult(
                 host: host.host,
                 scannedAt: response.scannedAt,
-                snapshots: response.snapshots.sorted { $0.slot < $1.slot },
+                snapshots: response.snapshots
+                    .filter { snapshotStatus($0) == "detached" }
+                    .sorted { $0.slot < $1.slot },
                 error: nil
             )
         } catch {
@@ -900,6 +908,16 @@ extension CMUXCLI {
     private func quotedTitle(_ title: String?) -> String {
         guard let title = nonEmpty(title) else { return "\"\"" }
         return "\"\(title.replacingOccurrences(of: "\"", with: "\\\""))\""
+    }
+
+    private func snapshotStatus(_ snapshot: DetachedWorkspaceSnapshotEntry) -> String {
+        let value = snapshot.status?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if value == "live" || value == "detached" {
+            return value!
+        }
+        return "detached"
     }
 
     private func nonEmpty(_ value: String?) -> String? {

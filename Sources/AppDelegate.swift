@@ -908,6 +908,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         label: "com.cmuxterm.app.sessionPersistence",
         qos: .utility
     )
+    private let remoteWorkspaceSnapshotSyncCoordinator = RemoteWorkspaceSnapshotSyncCoordinator.shared
     private nonisolated static let launchServicesRegistrationQueue = DispatchQueue(
         label: "com.cmuxterm.app.launchServicesRegistration",
         qos: .utility
@@ -3622,9 +3623,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 #endif
 
+        let resolvedRestorableAgentIndex = restorableAgentIndex ?? RestorableAgentSessionIndex.load()
         guard let snapshot = buildSessionSnapshot(
             includeScrollback: includeScrollback,
-            restorableAgentIndex: restorableAgentIndex,
+            restorableAgentIndex: resolvedRestorableAgentIndex,
             surfaceResumeBindingIndex: surfaceResumeBindingIndex
         ) else {
             persistSessionSnapshot(
@@ -3652,6 +3654,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             persistedGeometryData: persistedGeometryData,
             synchronously: writeSynchronously
         )
+        if !includeScrollback {
+            scheduleLiveRemoteWorkspaceSnapshotSync(restorableAgentIndex: resolvedRestorableAgentIndex)
+        }
         return true
     }
 
@@ -3824,6 +3829,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             restorableAgentIndex: resumeIndexes.restorableAgentIndex,
             surfaceResumeBindingIndex: resumeIndexes.surfaceResumeBindingIndex
         )
+        scheduleLiveRemoteWorkspaceSnapshotSync(restorableAgentIndex: resumeIndexes.restorableAgentIndex)
 #if DEBUG
         fingerprintMs = (ProcessInfo.processInfo.systemUptime - fingerprintStart) * 1000.0
 #endif
@@ -3943,6 +3949,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard !isTerminatingApp, !includeScrollback else { return }
         lastSessionAutosaveFingerprint = fingerprint
         lastSessionAutosavePersistedAt = persistedAt
+    }
+
+    private func scheduleLiveRemoteWorkspaceSnapshotSync(
+        restorableAgentIndex: RestorableAgentSessionIndex
+    ) {
+        let workspaces = sortedMainWindowContextsForSessionSnapshot()
+            .flatMap { context in
+                context.tabManager.tabs.filter(\.isRemoteWorkspace)
+            }
+        guard !workspaces.isEmpty else { return }
+        remoteWorkspaceSnapshotSyncCoordinator.scheduleLiveSync(
+            workspaces: workspaces,
+            restorableAgentIndex: restorableAgentIndex,
+            force: false
+        )
     }
 
     private nonisolated static func hashFrame(_ frame: NSRect, into hasher: inout Hasher) {

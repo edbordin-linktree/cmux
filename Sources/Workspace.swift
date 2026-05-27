@@ -2429,6 +2429,8 @@ private final class WorkspaceRemoteDaemonRPCClient {
         workspaceID: String,
         title: String,
         detachedAt: String,
+        updatedAt: String,
+        status: String,
         schemaVersion: Int,
         body: String,
         bodySHA256: String
@@ -2438,7 +2440,9 @@ private final class WorkspaceRemoteDaemonRPCClient {
             params: [
                 "workspace_id": workspaceID,
                 "title": title,
+                "status": status,
                 "detached_at": detachedAt,
+                "updated_at": updatedAt,
                 "schema_version": schemaVersion,
                 "body": body,
                 "body_sha256": bodySHA256,
@@ -3937,6 +3941,8 @@ private final class WorkspaceRemoteDaemonProxyTunnel {
         workspaceID: String,
         title: String,
         detachedAt: String,
+        updatedAt: String,
+        status: String,
         schemaVersion: Int,
         body: String,
         bodySHA256: String
@@ -3951,6 +3957,8 @@ private final class WorkspaceRemoteDaemonProxyTunnel {
                 workspaceID: workspaceID,
                 title: title,
                 detachedAt: detachedAt,
+                updatedAt: updatedAt,
+                status: status,
                 schemaVersion: schemaVersion,
                 body: body,
                 bodySHA256: bodySHA256
@@ -4189,6 +4197,8 @@ private final class WorkspaceRemoteProxyBroker {
         workspaceID: String,
         title: String,
         detachedAt: String,
+        updatedAt: String,
+        status: String,
         schemaVersion: Int,
         body: String,
         bodySHA256: String
@@ -4198,6 +4208,8 @@ private final class WorkspaceRemoteProxyBroker {
                 workspaceID: workspaceID,
                 title: title,
                 detachedAt: detachedAt,
+                updatedAt: updatedAt,
+                status: status,
                 schemaVersion: schemaVersion,
                 body: body,
                 bodySHA256: bodySHA256
@@ -5814,6 +5826,8 @@ final class WorkspaceRemoteSessionController {
         workspaceID: String,
         title: String,
         detachedAt: String,
+        updatedAt: String,
+        status: String,
         schemaVersion: Int,
         body: String,
         bodySHA256: String,
@@ -5831,6 +5845,8 @@ final class WorkspaceRemoteSessionController {
                 workspaceID: workspaceID,
                 title: title,
                 detachedAt: detachedAt,
+                updatedAt: updatedAt,
+                status: status,
                 schemaVersion: schemaVersion,
                 body: body,
                 bodySHA256: bodySHA256
@@ -12013,20 +12029,42 @@ final class Workspace: Identifiable, ObservableObject {
     func storeRemoteWorkspaceSnapshot(
         body: String,
         bodySHA256: String,
-        detachedAt: Date
+        capturedAt: Date,
+        status: RemoteWorkspaceSnapshotStatus
     ) throws -> [String: Any] {
         guard let controller = remoteSessionController else {
             throw NSError(domain: "cmux.remote.workspace_snapshot", code: 10, userInfo: [
                 NSLocalizedDescriptionKey: "remote connection is not active",
             ])
         }
+        let timestamp = Self.remoteWorkspaceSnapshotDateFormatter.string(from: capturedAt)
         return try controller.storeWorkspaceSnapshot(
             workspaceID: id.uuidString,
             title: title,
-            detachedAt: Self.remoteWorkspaceSnapshotDateFormatter.string(from: detachedAt),
+            detachedAt: timestamp,
+            updatedAt: timestamp,
+            status: status.rawValue,
             schemaVersion: RemoteWorkspaceSnapshotVersion.v1.rawValue,
             body: body,
             bodySHA256: bodySHA256
+        )
+    }
+
+    nonisolated static func storePreparedRemoteWorkspaceSnapshotUpload(
+        _ upload: RemoteWorkspaceSnapshotUpload,
+        status: RemoteWorkspaceSnapshotStatus,
+        timestamp: String
+    ) throws -> [String: Any] {
+        try WorkspaceRemoteProxyBroker.shared.storeWorkspaceSnapshot(
+            configuration: upload.configuration,
+            workspaceID: upload.workspaceID.uuidString,
+            title: upload.title,
+            detachedAt: timestamp,
+            updatedAt: timestamp,
+            status: status.rawValue,
+            schemaVersion: RemoteWorkspaceSnapshotVersion.v1.rawValue,
+            body: upload.body,
+            bodySHA256: upload.sha256
         )
     }
 

@@ -119,7 +119,7 @@ func TestListAllJSONOutputShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("snapshot has unexpected shape: %T", snapshots[0])
 	}
-	for _, key := range []string{"slot", "workspace_id", "title", "detached_at", "schema_version", "snapshot_sha256", "body_byte_length", "body_present"} {
+	for _, key := range []string{"slot", "workspace_id", "title", "status", "detached_at", "updated_at", "schema_version", "snapshot_sha256", "body_byte_length", "body_present"} {
 		if _, ok := snapshot[key]; !ok {
 			t.Fatalf("snapshot missing key %q: %s", key, out.String())
 		}
@@ -161,7 +161,9 @@ func writeWorkspaceSnapshotListSlot(t *testing.T, root string, slot string, work
 		Version:        1,
 		WorkspaceID:    workspaceID,
 		Title:          "training run",
+		Status:         "detached",
 		DetachedAt:     "2026-05-27T01:02:03Z",
+		UpdatedAt:      "2026-05-27T01:02:03Z",
 		SchemaVersion:  1,
 		SnapshotSHA256: sha256Hex(body),
 		BodyByteLength: len([]byte(body)),

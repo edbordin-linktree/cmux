@@ -1818,6 +1818,9 @@ func TestWorkspaceSnapshotStoreThenFetch(t *testing.T) {
 	if got := asInt(t, meta["schema_version"], "schema_version"); got != 1 {
 		t.Fatalf("schema_version = %d, want 1", got)
 	}
+	if got, _ := meta["status"].(string); got != "detached" {
+		t.Fatalf("status = %q, want detached", got)
+	}
 }
 
 func TestWorkspaceSnapshotFetchMissing(t *testing.T) {
@@ -2044,7 +2047,9 @@ func workspaceSnapshotStoreParams(body string) map[string]any {
 	return map[string]any{
 		"workspace_id":   "3f4a8d21-6a8f-4ef9-a979-7d712f2a8d9e",
 		"title":          "training run",
+		"status":         "detached",
 		"detached_at":    "2026-05-27T01:02:03.123Z",
+		"updated_at":     "2026-05-27T01:02:03.123Z",
 		"schema_version": 1,
 		"body":           body,
 		"body_sha256":    sha256Hex(body),

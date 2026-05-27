@@ -7,6 +7,11 @@ enum RemoteWorkspaceSnapshotVersion: Int, Codable, Sendable {
     case v1 = 1
 }
 
+enum RemoteWorkspaceSnapshotStatus: String, Codable, Sendable, Equatable {
+    case live
+    case detached
+}
+
 struct RemoteWorkspaceSnapshotV1: Codable, Sendable, Equatable {
     var version: RemoteWorkspaceSnapshotVersion = .v1
     var workspaceId: UUID
@@ -205,6 +210,23 @@ struct RemoteWorkspaceRestoreResult: Equatable, Sendable {
     var panesLost: Int
 }
 
+struct RemoteWorkspaceSnapshotUpload {
+    var workspaceID: UUID
+    var title: String
+    var configuration: WorkspaceRemoteConfiguration
+    var daemonPath: String
+    var capturedAt: Date
+    var body: String
+    var sha256: String
+    var paneCount: Int
+}
+
+struct RemoteWorkspaceSnapshotSyncResult {
+    var uploaded: Bool
+    var sha256: String
+    var paneCount: Int
+}
+
 extension Workspace {
     func validateRemoteWorkspaceSnapshotEligibility() throws -> WorkspaceRemoteConfiguration {
         guard let configuration = remoteConfiguration else {
@@ -249,6 +271,34 @@ extension Workspace {
             panes: paneSnapshots,
             activePaneId: session.focusedPanelId,
             displayTarget: configuration.displayTarget + slotSuffix
+        )
+    }
+
+    func prepareRemoteWorkspaceSnapshotUpload(
+        capturedAt: Date = Date(),
+        restorableAgentIndex: RestorableAgentSessionIndex? = RestorableAgentSessionIndex.load(),
+        requireCapability: Bool = true
+    ) throws -> RemoteWorkspaceSnapshotUpload {
+        let configuration = try validateRemoteWorkspaceSnapshotEligibility()
+        if requireCapability, !remoteDaemonStatus.capabilities.contains("workspace.snapshot") {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
+                "remote cmuxd-remote does not advertise workspace.snapshot; rebuild the remote daemon for this local feature branch"
+            )
+        }
+        let snapshot = try captureRemoteWorkspaceSnapshotV1(
+            detachedAt: capturedAt,
+            restorableAgentIndex: restorableAgentIndex
+        )
+        let body = try RemoteWorkspaceSnapshotCodec.encodeString(snapshot)
+        return RemoteWorkspaceSnapshotUpload(
+            workspaceID: id,
+            title: title,
+            configuration: configuration,
+            daemonPath: remoteDaemonStatus.remotePath ?? "~/.cmux/bin/cmuxd-remote",
+            capturedAt: capturedAt,
+            body: body,
+            sha256: RemoteWorkspaceSnapshotCodec.sha256Hex(for: body),
+            paneCount: snapshot.panes.count
         )
     }
 
@@ -428,5 +478,177 @@ extension Workspace {
             }
         }
         return nil
+    }
+}
+
+final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
+    static let shared = RemoteWorkspaceSnapshotSyncCoordinator()
+
+    private struct UploadState {
+        var sha256: String
+        var uploadedAt: Date
+    }
+
+    private struct PendingUpload {
+        var key: String
+        var upload: RemoteWorkspaceSnapshotUpload
+        var status: RemoteWorkspaceSnapshotStatus
+    }
+
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.cmuxterm.remoteWorkspaceSnapshotSync", qos: .utility)
+    private var lastUploadedByKey: [String: UploadState] = [:]
+    private var inFlightKeys: Set<String> = []
+    private let minimumBackgroundUploadInterval: TimeInterval
+
+    init(minimumBackgroundUploadInterval: TimeInterval = 15.0) {
+        self.minimumBackgroundUploadInterval = minimumBackgroundUploadInterval
+    }
+
+    @discardableResult
+    @MainActor
+    func storeNow(
+        workspace: Workspace,
+        status: RemoteWorkspaceSnapshotStatus,
+        force: Bool = true,
+        restorableAgentIndex: RestorableAgentSessionIndex? = RestorableAgentSessionIndex.load(),
+        requireCapability: Bool = true
+    ) throws -> RemoteWorkspaceSnapshotSyncResult {
+        let upload = try workspace.prepareRemoteWorkspaceSnapshotUpload(
+            capturedAt: Date(),
+            restorableAgentIndex: restorableAgentIndex,
+            requireCapability: requireCapability
+        )
+        let key = Self.key(workspaceID: workspace.id, configuration: upload.configuration)
+        if !force, shouldSkipUpload(key: key, sha256: upload.sha256, now: upload.capturedAt) {
+            return RemoteWorkspaceSnapshotSyncResult(uploaded: false, sha256: upload.sha256, paneCount: upload.paneCount)
+        }
+        _ = try store(upload: upload, status: status)
+        recordUploadSuccess(key: key, sha256: upload.sha256, uploadedAt: upload.capturedAt)
+        upsertHostRegistry(configuration: upload.configuration, daemonPath: upload.daemonPath, seenAt: upload.capturedAt)
+        return RemoteWorkspaceSnapshotSyncResult(uploaded: true, sha256: upload.sha256, paneCount: upload.paneCount)
+    }
+
+    @MainActor
+    func scheduleLiveSync(
+        workspaces: [Workspace],
+        restorableAgentIndex: RestorableAgentSessionIndex? = RestorableAgentSessionIndex.load(),
+        force: Bool = false
+    ) {
+        let now = Date()
+        for workspace in workspaces {
+            guard let upload = try? workspace.prepareRemoteWorkspaceSnapshotUpload(
+                capturedAt: now,
+                restorableAgentIndex: restorableAgentIndex
+            ) else {
+                continue
+            }
+            let key = Self.key(workspaceID: workspace.id, configuration: upload.configuration)
+            guard shouldEnqueueUpload(key: key, sha256: upload.sha256, now: now, force: force) else {
+                continue
+            }
+            let pending = PendingUpload(
+                key: key,
+                upload: upload,
+                status: .live
+            )
+            queue.async { [weak self] in
+                self?.performBackgroundUpload(pending)
+            }
+        }
+    }
+
+    private func performBackgroundUpload(_ pending: PendingUpload) {
+        defer { clearInFlight(key: pending.key) }
+        do {
+            _ = try store(upload: pending.upload, status: pending.status)
+            recordUploadSuccess(
+                key: pending.key,
+                sha256: pending.upload.sha256,
+                uploadedAt: pending.upload.capturedAt
+            )
+            upsertHostRegistry(
+                configuration: pending.upload.configuration,
+                daemonPath: pending.upload.daemonPath,
+                seenAt: pending.upload.capturedAt
+            )
+        } catch {
+#if DEBUG
+            cmuxDebugLog("remote.workspace.snapshot.sync.failed key=\(pending.key) error=\(error.localizedDescription)")
+#endif
+        }
+    }
+
+    private func store(
+        upload: RemoteWorkspaceSnapshotUpload,
+        status: RemoteWorkspaceSnapshotStatus
+    ) throws -> [String: Any] {
+        let timestamp = RemoteWorkspaceSnapshotCodec.iso8601String(upload.capturedAt)
+        return try Workspace.storePreparedRemoteWorkspaceSnapshotUpload(
+            upload,
+            status: status,
+            timestamp: timestamp
+        )
+    }
+
+    private func shouldSkipUpload(key: String, sha256: String, now: Date) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let state = lastUploadedByKey[key] else { return false }
+        return state.sha256 == sha256 && now.timeIntervalSince(state.uploadedAt) < 60
+    }
+
+    private func shouldEnqueueUpload(key: String, sha256: String, now: Date, force: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if inFlightKeys.contains(key) {
+            return false
+        }
+        if !force, let state = lastUploadedByKey[key] {
+            if state.sha256 == sha256 {
+                return false
+            }
+            if now.timeIntervalSince(state.uploadedAt) < minimumBackgroundUploadInterval {
+                return false
+            }
+        }
+        inFlightKeys.insert(key)
+        return true
+    }
+
+    private func clearInFlight(key: String) {
+        lock.lock()
+        inFlightKeys.remove(key)
+        lock.unlock()
+    }
+
+    private func recordUploadSuccess(key: String, sha256: String, uploadedAt: Date) {
+        lock.lock()
+        lastUploadedByKey[key] = UploadState(sha256: sha256, uploadedAt: uploadedAt)
+        lock.unlock()
+    }
+
+    private func upsertHostRegistry(
+        configuration: WorkspaceRemoteConfiguration,
+        daemonPath: String,
+        seenAt: Date
+    ) {
+        try? DetachedWorkspaceHostRegistry.upsert(DetachedWorkspaceHostRegistryRecord(
+            host: configuration.destination,
+            port: configuration.port,
+            identityFile: configuration.identityFile,
+            sshOptions: configuration.sshOptions,
+            daemonBinPath: daemonPath,
+            addedAt: seenAt,
+            lastSeenAt: seenAt
+        ))
+    }
+
+    private static func key(workspaceID: UUID, configuration: WorkspaceRemoteConfiguration) -> String {
+        [
+            configuration.destination,
+            configuration.persistentDaemonSlot ?? "",
+            workspaceID.uuidString,
+        ].joined(separator: "|")
     }
 }
