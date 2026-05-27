@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,6 +84,7 @@ type rpcServer struct {
 	ownsPTYHub     bool
 	ptyAttachments map[string]*wsPTYAttachment
 	frameWriter    rpcFrameWriter
+	snapshotRoot   string
 }
 
 type sessionAttachment struct {
@@ -100,6 +102,38 @@ type sessionState struct {
 }
 
 const maxRPCFrameBytes = 4 * 1024 * 1024
+
+const (
+	workspaceSnapshotBodyFile     = "workspace-snapshot.json"
+	workspaceSnapshotMetaFile     = "workspace-snapshot.meta.json"
+	workspaceSnapshotMaxBytes     = 1024 * 1024
+	workspaceSnapshotMetaMaxBytes = 4 * 1024
+)
+
+var workspaceSnapshotUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+var workspaceSnapshotRename = os.Rename
+
+type workspaceSnapshotMeta struct {
+	Version        int    `json:"version"`
+	WorkspaceID    string `json:"workspace_id"`
+	Title          string `json:"title"`
+	DetachedAt     string `json:"detached_at"`
+	SchemaVersion  int    `json:"schema_version"`
+	SnapshotSHA256 string `json:"snapshot_sha256"`
+	BodyByteLength int    `json:"body_byte_length"`
+}
+
+type workspaceSnapshotListEntry struct {
+	Slot           string `json:"slot"`
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+	Title          string `json:"title,omitempty"`
+	DetachedAt     string `json:"detached_at,omitempty"`
+	SchemaVersion  int    `json:"schema_version,omitempty"`
+	SnapshotSHA256 string `json:"snapshot_sha256,omitempty"`
+	BodyByteLength int    `json:"body_byte_length,omitempty"`
+	BodyPresent    bool   `json:"body_present"`
+	Error          string `json:"error,omitempty"`
+}
 
 func main() {
 	if shouldRunCLIForInvocation(os.Args[0], os.Args[1:]) {
@@ -121,7 +155,7 @@ func shouldRunCLIForInvocation(argv0 string, args []string) bool {
 
 func isDaemonEntryCommand(arg string) bool {
 	switch arg {
-	case "version", "serve", "cli":
+	case "version", "serve", "cli", "workspace-snapshot-list-all":
 		return true
 	default:
 		return false
@@ -138,6 +172,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "version":
 		_, _ = fmt.Fprintln(stdout, version)
 		return 0
+	case "workspace-snapshot-list-all":
+		return runWorkspaceSnapshotListAll(args[1:], stdout, stderr)
 	case "serve":
 		fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 		fs.SetOutput(stderr)
@@ -222,7 +258,151 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  cmuxd-remote serve --stdio")
 	_, _ = fmt.Fprintln(w, "  cmuxd-remote serve --stdio --persistent --slot <slot>")
 	_, _ = fmt.Fprintln(w, "  cmuxd-remote serve --ws --auth-lease-file <path> [--rpc-auth-lease-file <path>] [--listen 127.0.0.1:7777]")
+	_, _ = fmt.Fprintln(w, "  cmuxd-remote workspace-snapshot-list-all [--root <dir>] [--json]")
 	_, _ = fmt.Fprintln(w, "  cmuxd-remote cli <command> [args...]")
+}
+
+func runWorkspaceSnapshotListAll(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("workspace-snapshot-list-all", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	rootFlag := fs.String("root", "", "daemon root directory")
+	jsonOutput := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	root := strings.TrimSpace(*rootFlag)
+	if root == "" {
+		var err error
+		root, err = defaultPersistentDaemonRoot()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "workspace-snapshot-list-all failed: %v\n", err)
+			return 1
+		}
+	}
+	result, err := listWorkspaceSnapshots(root, *jsonOutput)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "workspace-snapshot-list-all failed: %v\n", err)
+		return 1
+	}
+	if *jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		if err := encoder.Encode(result); err != nil {
+			_, _ = fmt.Fprintf(stderr, "workspace-snapshot-list-all failed: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	for _, snapshot := range result.Snapshots {
+		if snapshot.Error != "" {
+			continue
+		}
+		shortID := snapshot.WorkspaceID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		_, _ = fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", snapshot.Slot, shortID, snapshot.Title, snapshot.DetachedAt)
+	}
+	return 0
+}
+
+type workspaceSnapshotListResult struct {
+	Version   int                          `json:"version"`
+	HostID    string                       `json:"host_id"`
+	ScannedAt string                       `json:"scanned_at"`
+	Snapshots []workspaceSnapshotListEntry `json:"snapshots"`
+}
+
+func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotListResult, error) {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		host = "unknown"
+	}
+	result := workspaceSnapshotListResult{
+		Version:   1,
+		HostID:    host,
+		ScannedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Snapshots: []workspaceSnapshotListEntry{},
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return result, nil
+		}
+		return result, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		slot := entry.Name()
+		metaPath := filepath.Join(root, slot, workspaceSnapshotMetaFile)
+		metaBytes, err := os.ReadFile(metaPath)
+		if err != nil {
+			if includeErrors && !errors.Is(err, os.ErrNotExist) {
+				result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
+					Slot:  slot,
+					Error: err.Error(),
+				})
+			}
+			continue
+		}
+		if len(metaBytes) > workspaceSnapshotMetaMaxBytes {
+			if includeErrors {
+				result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
+					Slot:  slot,
+					Error: "metadata exceeds 4 KiB",
+				})
+			}
+			continue
+		}
+		var meta workspaceSnapshotMeta
+		if err := json.Unmarshal(metaBytes, &meta); err != nil {
+			if includeErrors {
+				result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
+					Slot:  slot,
+					Error: err.Error(),
+				})
+			}
+			continue
+		}
+		bodyPresent := true
+		if _, err := os.Stat(filepath.Join(root, slot, workspaceSnapshotBodyFile)); err != nil {
+			bodyPresent = false
+			if !errors.Is(err, os.ErrNotExist) && includeErrors {
+				result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
+					Slot:  slot,
+					Error: err.Error(),
+				})
+				continue
+			}
+		}
+		result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
+			Slot:           slot,
+			WorkspaceID:    meta.WorkspaceID,
+			Title:          meta.Title,
+			DetachedAt:     meta.DetachedAt,
+			SchemaVersion:  meta.SchemaVersion,
+			SnapshotSHA256: meta.SnapshotSHA256,
+			BodyByteLength: meta.BodyByteLength,
+			BodyPresent:    bodyPresent,
+		})
+	}
+	sort.Slice(result.Snapshots, func(i, j int) bool {
+		return result.Snapshots[i].Slot < result.Snapshots[j].Slot
+	})
+	return result, nil
+}
+
+func defaultPersistentDaemonRoot() (string, error) {
+	rootBase := strings.TrimSpace(os.Getenv("CMUX_REMOTE_DAEMON_ROOT"))
+	if rootBase != "" {
+		return rootBase, nil
+	}
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil || strings.TrimSpace(home) == "" {
+		return "", errors.New("cannot resolve remote home directory")
+	}
+	return filepath.Join(home, ".cmux", "daemon"), nil
 }
 
 func runStdioServer(stdin io.Reader, stdout io.Writer) error {
@@ -623,7 +803,7 @@ func runPersistentDaemonServer(slot string, stderr io.Writer) error {
 	_ = os.Chmod(paths.socket, 0o600)
 
 	signalPersistentDaemonReady()
-	return servePersistentDaemonWithVerifier(listener, persistentDaemonFileTokenVerifier(token, paths.tokenFile), stderr)
+	return servePersistentDaemonWithVerifierAndSnapshotRoot(listener, persistentDaemonFileTokenVerifier(token, paths.tokenFile), stderr, paths.root)
 }
 
 func signalPersistentDaemonReady() {
@@ -674,6 +854,10 @@ func persistentDaemonTokensEqual(provided string, token string) bool {
 }
 
 func servePersistentDaemonWithVerifier(listener net.Listener, verifier persistentDaemonTokenVerifier, stderr io.Writer) error {
+	return servePersistentDaemonWithVerifierAndSnapshotRoot(listener, verifier, stderr, "")
+}
+
+func servePersistentDaemonWithVerifierAndSnapshotRoot(listener net.Listener, verifier persistentDaemonTokenVerifier, stderr io.Writer, snapshotRoot string) error {
 	hub := newWebSocketPTYHub(wsPTYServerConfig{}, stderr)
 	defer hub.closeAll()
 	for {
@@ -684,7 +868,7 @@ func servePersistentDaemonWithVerifier(listener net.Listener, verifier persisten
 			}
 			return err
 		}
-		go handlePersistentDaemonConn(conn, verifier, hub)
+		go handlePersistentDaemonConnWithSnapshotRoot(conn, verifier, hub, snapshotRoot)
 	}
 }
 
@@ -702,7 +886,15 @@ func handlePersistentDaemonConn(conn net.Conn, verifier persistentDaemonTokenVer
 	handlePersistentDaemonConnWithAuthTimeout(conn, verifier, hub, persistentDaemonAuthTimeout)
 }
 
+func handlePersistentDaemonConnWithSnapshotRoot(conn net.Conn, verifier persistentDaemonTokenVerifier, hub *wsPTYHub, snapshotRoot string) {
+	handlePersistentDaemonConnWithAuthTimeoutAndSnapshotRoot(conn, verifier, hub, persistentDaemonAuthTimeout, snapshotRoot)
+}
+
 func handlePersistentDaemonConnWithAuthTimeout(conn net.Conn, verifier persistentDaemonTokenVerifier, hub *wsPTYHub, timeout time.Duration) {
+	handlePersistentDaemonConnWithAuthTimeoutAndSnapshotRoot(conn, verifier, hub, timeout, "")
+}
+
+func handlePersistentDaemonConnWithAuthTimeoutAndSnapshotRoot(conn net.Conn, verifier persistentDaemonTokenVerifier, hub *wsPTYHub, timeout time.Duration, snapshotRoot string) {
 	defer conn.Close()
 	if timeout > 0 {
 		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
@@ -719,7 +911,7 @@ func handlePersistentDaemonConnWithAuthTimeout(conn net.Conn, verifier persisten
 			return
 		}
 	}
-	_ = runRPCServerWithReader(reader, writer, hub, false)
+	_ = runRPCServerWithReaderAndSnapshotRoot(reader, writer, hub, false, snapshotRoot)
 }
 
 func authenticatePersistentDaemonConn(reader *bufio.Reader, writer *stdioFrameWriter, verifier persistentDaemonTokenVerifier) bool {
@@ -781,6 +973,10 @@ func authenticatePersistentDaemonConn(reader *bufio.Reader, writer *stdioFrameWr
 }
 
 func runRPCServerWithReader(reader *bufio.Reader, writer *stdioFrameWriter, ptyHub *wsPTYHub, ownsPTYHub bool) error {
+	return runRPCServerWithReaderAndSnapshotRoot(reader, writer, ptyHub, ownsPTYHub, "")
+}
+
+func runRPCServerWithReaderAndSnapshotRoot(reader *bufio.Reader, writer *stdioFrameWriter, ptyHub *wsPTYHub, ownsPTYHub bool, snapshotRoot string) error {
 	server := &rpcServer{
 		nextStreamID:  1,
 		nextSessionID: 1,
@@ -789,6 +985,7 @@ func runRPCServerWithReader(reader *bufio.Reader, writer *stdioFrameWriter, ptyH
 		ptyHub:        ptyHub,
 		ownsPTYHub:    ownsPTYHub,
 		frameWriter:   writer,
+		snapshotRoot:  snapshotRoot,
 	}
 	defer server.closeAll()
 	defer writer.writer.Flush()
@@ -1014,6 +1211,7 @@ func (s *rpcServer) handleRequest(req rpcRequest) rpcResponse {
 					"pty.session",
 					"pty.session.token",
 					"pty.session.persistent_daemon",
+					"workspace.snapshot",
 				},
 			},
 		}
@@ -1057,6 +1255,12 @@ func (s *rpcServer) handleRequest(req rpcRequest) rpcResponse {
 		return s.handlePTYClose(req)
 	case "pty.list":
 		return s.handlePTYList(req)
+	case "workspace.snapshot.store":
+		return s.handleWorkspaceSnapshotStore(req)
+	case "workspace.snapshot.fetch":
+		return s.handleWorkspaceSnapshotFetch(req)
+	case "workspace.snapshot.clear":
+		return s.handleWorkspaceSnapshotClear(req)
 	default:
 		return rpcResponse{
 			ID: req.ID,
@@ -1067,6 +1271,254 @@ func (s *rpcServer) handleRequest(req rpcRequest) rpcResponse {
 			},
 		}
 	}
+}
+
+func (s *rpcServer) workspaceSnapshotPaths() (string, string, bool) {
+	root := strings.TrimSpace(s.snapshotRoot)
+	if root == "" {
+		return "", "", false
+	}
+	return filepath.Join(root, workspaceSnapshotBodyFile), filepath.Join(root, workspaceSnapshotMetaFile), true
+}
+
+func (s *rpcServer) handleWorkspaceSnapshotStore(req rpcRequest) rpcResponse {
+	bodyPath, metaPath, ok := s.workspaceSnapshotPaths()
+	if !ok {
+		return workspaceSnapshotError(req.ID, "io_error", "workspace snapshot storage is available only in persistent daemon mode")
+	}
+
+	workspaceID, ok := getStringParam(req.Params, "workspace_id")
+	if !ok || !workspaceSnapshotUUIDPattern.MatchString(workspaceID) {
+		return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store requires valid workspace_id UUID")
+	}
+	title, ok := getStringParam(req.Params, "title")
+	if !ok || strings.TrimSpace(title) == "" {
+		return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store requires non-empty title")
+	}
+	detachedAt, ok := getStringParam(req.Params, "detached_at")
+	if !ok || !isValidRFC3339Timestamp(detachedAt) {
+		return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store requires detached_at RFC3339 timestamp")
+	}
+	schemaVersion, ok := getIntParam(req.Params, "schema_version")
+	if !ok || schemaVersion <= 0 {
+		return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store requires positive schema_version")
+	}
+	body, ok := getStringParam(req.Params, "body")
+	if !ok {
+		return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store requires body")
+	}
+	bodyBytes := []byte(body)
+	if len(bodyBytes) > workspaceSnapshotMaxBytes {
+		return workspaceSnapshotError(req.ID, "body_too_large", "workspace snapshot body exceeds 1 MiB")
+	}
+	bodySHA256, ok := getStringParam(req.Params, "body_sha256")
+	if !ok || !isValidSHA256Hex(bodySHA256) {
+		return workspaceSnapshotError(req.ID, "invalid_params", "workspace.snapshot.store requires body_sha256 hex")
+	}
+	computed := sha256.Sum256(bodyBytes)
+	computedHex := hex.EncodeToString(computed[:])
+	if !strings.EqualFold(computedHex, bodySHA256) {
+		return workspaceSnapshotError(req.ID, "hash_mismatch", "workspace snapshot body_sha256 does not match body")
+	}
+
+	meta := workspaceSnapshotMeta{
+		Version:        1,
+		WorkspaceID:    workspaceID,
+		Title:          title,
+		DetachedAt:     detachedAt,
+		SchemaVersion:  schemaVersion,
+		SnapshotSHA256: strings.ToLower(bodySHA256),
+		BodyByteLength: len(bodyBytes),
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		return workspaceSnapshotError(req.ID, "io_error", err.Error())
+	}
+	if len(metaBytes) > workspaceSnapshotMetaMaxBytes {
+		return workspaceSnapshotError(req.ID, "invalid_params", "workspace snapshot metadata exceeds 4 KiB")
+	}
+	if err := atomicWriteWorkspaceSnapshotPair(bodyPath, bodyBytes, metaPath, metaBytes); err != nil {
+		return workspaceSnapshotError(req.ID, "io_error", err.Error())
+	}
+	return rpcResponse{
+		ID: req.ID,
+		OK: true,
+		Result: map[string]any{
+			"stored":      true,
+			"sha256":      computedHex,
+			"byte_length": len(bodyBytes),
+		},
+	}
+}
+
+func (s *rpcServer) handleWorkspaceSnapshotFetch(req rpcRequest) rpcResponse {
+	bodyPath, metaPath, ok := s.workspaceSnapshotPaths()
+	if !ok {
+		return workspaceSnapshotError(req.ID, "io_error", "workspace snapshot storage is available only in persistent daemon mode")
+	}
+	bodyBytes, err := os.ReadFile(bodyPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return workspaceSnapshotFetchMissing(req.ID)
+		}
+		return workspaceSnapshotError(req.ID, "io_error", err.Error())
+	}
+	metaBytes, err := os.ReadFile(metaPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return workspaceSnapshotFetchMissing(req.ID)
+		}
+		return workspaceSnapshotError(req.ID, "io_error", err.Error())
+	}
+	if len(metaBytes) > workspaceSnapshotMetaMaxBytes {
+		return workspaceSnapshotError(req.ID, "io_error", "workspace snapshot metadata exceeds 4 KiB")
+	}
+	var meta workspaceSnapshotMeta
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return workspaceSnapshotError(req.ID, "io_error", err.Error())
+	}
+	return rpcResponse{
+		ID: req.ID,
+		OK: true,
+		Result: map[string]any{
+			"exists": true,
+			"body":   string(bodyBytes),
+			"meta":   meta,
+		},
+	}
+}
+
+func workspaceSnapshotFetchMissing(id any) rpcResponse {
+	return rpcResponse{
+		ID: id,
+		OK: true,
+		Result: map[string]any{
+			"exists": false,
+		},
+	}
+}
+
+func (s *rpcServer) handleWorkspaceSnapshotClear(req rpcRequest) rpcResponse {
+	bodyPath, metaPath, ok := s.workspaceSnapshotPaths()
+	if !ok {
+		return workspaceSnapshotError(req.ID, "io_error", "workspace snapshot storage is available only in persistent daemon mode")
+	}
+	cleared := false
+	for _, path := range []string{bodyPath, metaPath} {
+		if err := os.Remove(path); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return workspaceSnapshotError(req.ID, "io_error", err.Error())
+			}
+			continue
+		}
+		cleared = true
+	}
+	return rpcResponse{
+		ID: req.ID,
+		OK: true,
+		Result: map[string]any{
+			"cleared": cleared,
+		},
+	}
+}
+
+func workspaceSnapshotError(id any, code string, message string) rpcResponse {
+	return rpcResponse{
+		ID: id,
+		OK: false,
+		Error: &rpcError{
+			Code:    code,
+			Message: message,
+		},
+	}
+}
+
+func isValidRFC3339Timestamp(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
+		return false
+	}
+	return true
+}
+
+func isValidSHA256Hex(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 64 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func atomicWriteWorkspaceSnapshotPair(bodyPath string, body []byte, metaPath string, meta []byte) error {
+	if err := os.MkdirAll(filepath.Dir(bodyPath), 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(filepath.Dir(bodyPath), 0o700); err != nil {
+		return err
+	}
+	bodyTmp := fmt.Sprintf("%s.tmp.%d.%d", bodyPath, os.Getpid(), time.Now().UnixNano())
+	metaTmp := fmt.Sprintf("%s.tmp.%d.%d", metaPath, os.Getpid(), time.Now().UnixNano())
+	cleanupTemps := true
+	defer func() {
+		if cleanupTemps {
+			_ = os.Remove(bodyTmp)
+			_ = os.Remove(metaTmp)
+		}
+	}()
+	if err := writeFileSync(bodyTmp, body, 0o600); err != nil {
+		return err
+	}
+	if err := writeFileSync(metaTmp, meta, 0o600); err != nil {
+		return err
+	}
+	bodyRenamed := false
+	if err := workspaceSnapshotRename(bodyTmp, bodyPath); err != nil {
+		return err
+	}
+	bodyRenamed = true
+	if err := workspaceSnapshotRename(metaTmp, metaPath); err != nil {
+		if bodyRenamed {
+			_ = os.Remove(bodyPath)
+		}
+		return err
+	}
+	cleanupTemps = false
+	if err := fsyncDirectory(filepath.Dir(bodyPath)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeFileSync(path string, data []byte, perm os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(path, perm)
+}
+
+func fsyncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (s *rpcServer) handleProxyOpen(req rpcRequest) rpcResponse {

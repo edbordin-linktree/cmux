@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -54,6 +56,14 @@ func startPersistentDaemonForTest(t *testing.T, token string) (string, func()) {
 }
 
 func startPersistentDaemonWithVerifierForTest(t *testing.T, verifier persistentDaemonTokenVerifier) (string, func()) {
+	return startPersistentDaemonWithVerifierAndSnapshotRootForTest(t, verifier, "")
+}
+
+func startPersistentDaemonWithSnapshotRootForTest(t *testing.T, token string, snapshotRoot string) (string, func()) {
+	return startPersistentDaemonWithVerifierAndSnapshotRootForTest(t, persistentDaemonFixedTokenVerifier(token), snapshotRoot)
+}
+
+func startPersistentDaemonWithVerifierAndSnapshotRootForTest(t *testing.T, verifier persistentDaemonTokenVerifier, snapshotRoot string) (string, func()) {
 	t.Helper()
 	socketDir, err := os.MkdirTemp("/tmp", "cmuxd-remote-test-*")
 	if err != nil {
@@ -69,7 +79,7 @@ func startPersistentDaemonWithVerifierForTest(t *testing.T, verifier persistentD
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- servePersistentDaemonWithVerifier(listener, verifier, io.Discard)
+		done <- servePersistentDaemonWithVerifierAndSnapshotRoot(listener, verifier, io.Discard, snapshotRoot)
 	}()
 	stop := func() {
 		_ = listener.Close()
@@ -1777,6 +1787,195 @@ func assertEffectiveSize(t *testing.T, resp rpcResponse, wantCols, wantRows int)
 	}
 }
 
+func TestWorkspaceSnapshotStoreThenFetch(t *testing.T) {
+	client := openWorkspaceSnapshotTestClient(t)
+	defer client.close()
+
+	body := `{"version":1,"workspaceId":"3f4a8d21-6a8f-4ef9-a979-7d712f2a8d9e","panes":[]}`
+	store := client.call(t, "workspace.snapshot.store", workspaceSnapshotStoreParams(body))
+	assertWorkspaceSnapshotOK(t, store)
+	result := store["result"].(map[string]any)
+	if got := result["sha256"].(string); got != sha256Hex(body) {
+		t.Fatalf("sha256 = %q, want %q", got, sha256Hex(body))
+	}
+	if got := asInt(t, result["byte_length"], "byte_length"); got != len([]byte(body)) {
+		t.Fatalf("byte_length = %d, want %d", got, len([]byte(body)))
+	}
+
+	fetch := client.call(t, "workspace.snapshot.fetch", nil)
+	assertWorkspaceSnapshotOK(t, fetch)
+	fetchResult := fetch["result"].(map[string]any)
+	if exists, _ := fetchResult["exists"].(bool); !exists {
+		t.Fatalf("fetch exists = false, want true")
+	}
+	if got, _ := fetchResult["body"].(string); got != body {
+		t.Fatalf("fetch body = %q, want %q", got, body)
+	}
+	meta := fetchResult["meta"].(map[string]any)
+	if got, _ := meta["workspace_id"].(string); got != "3f4a8d21-6a8f-4ef9-a979-7d712f2a8d9e" {
+		t.Fatalf("meta workspace_id = %q", got)
+	}
+	if got := asInt(t, meta["schema_version"], "schema_version"); got != 1 {
+		t.Fatalf("schema_version = %d, want 1", got)
+	}
+}
+
+func TestWorkspaceSnapshotFetchMissing(t *testing.T) {
+	client := openWorkspaceSnapshotTestClient(t)
+	defer client.close()
+
+	fetch := client.call(t, "workspace.snapshot.fetch", nil)
+	assertWorkspaceSnapshotOK(t, fetch)
+	result := fetch["result"].(map[string]any)
+	if exists, _ := result["exists"].(bool); exists {
+		t.Fatalf("fetch exists = true, want false")
+	}
+}
+
+func TestWorkspaceSnapshotFetchHalfPresent(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		writeBody bool
+		writeMeta bool
+	}{
+		{name: "body_only", writeBody: true},
+		{name: "meta_only", writeMeta: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := openWorkspaceSnapshotTestClient(t)
+			defer client.close()
+			if tc.writeBody {
+				if err := os.WriteFile(filepath.Join(client.snapshotRoot, workspaceSnapshotBodyFile), []byte(`{"version":1}`), 0o600); err != nil {
+					t.Fatalf("write body: %v", err)
+				}
+			}
+			if tc.writeMeta {
+				meta := workspaceSnapshotMeta{
+					Version:        1,
+					WorkspaceID:    "3f4a8d21-6a8f-4ef9-a979-7d712f2a8d9e",
+					Title:          "test",
+					DetachedAt:     "2026-05-27T01:02:03Z",
+					SchemaVersion:  1,
+					SnapshotSHA256: sha256Hex(`{"version":1}`),
+					BodyByteLength: len(`{"version":1}`),
+				}
+				data, err := json.Marshal(meta)
+				if err != nil {
+					t.Fatalf("marshal meta: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(client.snapshotRoot, workspaceSnapshotMetaFile), data, 0o600); err != nil {
+					t.Fatalf("write meta: %v", err)
+				}
+			}
+			fetch := client.call(t, "workspace.snapshot.fetch", nil)
+			assertWorkspaceSnapshotOK(t, fetch)
+			result := fetch["result"].(map[string]any)
+			if exists, _ := result["exists"].(bool); exists {
+				t.Fatalf("fetch exists = true, want false")
+			}
+		})
+	}
+}
+
+func TestWorkspaceSnapshotClearIdempotent(t *testing.T) {
+	client := openWorkspaceSnapshotTestClient(t)
+	defer client.close()
+	body := `{"version":1}`
+	assertWorkspaceSnapshotOK(t, client.call(t, "workspace.snapshot.store", workspaceSnapshotStoreParams(body)))
+
+	first := client.call(t, "workspace.snapshot.clear", nil)
+	assertWorkspaceSnapshotOK(t, first)
+	if got, _ := first["result"].(map[string]any)["cleared"].(bool); !got {
+		t.Fatalf("first clear cleared = false, want true")
+	}
+	second := client.call(t, "workspace.snapshot.clear", nil)
+	assertWorkspaceSnapshotOK(t, second)
+	if got, _ := second["result"].(map[string]any)["cleared"].(bool); got {
+		t.Fatalf("second clear cleared = true, want false")
+	}
+}
+
+func TestWorkspaceSnapshotOverwrite(t *testing.T) {
+	client := openWorkspaceSnapshotTestClient(t)
+	defer client.close()
+	assertWorkspaceSnapshotOK(t, client.call(t, "workspace.snapshot.store", workspaceSnapshotStoreParams(`{"version":1,"title":"old"}`)))
+	newBody := `{"version":1,"title":"new"}`
+	assertWorkspaceSnapshotOK(t, client.call(t, "workspace.snapshot.store", workspaceSnapshotStoreParams(newBody)))
+
+	fetch := client.call(t, "workspace.snapshot.fetch", nil)
+	assertWorkspaceSnapshotOK(t, fetch)
+	result := fetch["result"].(map[string]any)
+	if got, _ := result["body"].(string); got != newBody {
+		t.Fatalf("fetch body = %q, want %q", got, newBody)
+	}
+	meta := result["meta"].(map[string]any)
+	if got, _ := meta["snapshot_sha256"].(string); got != sha256Hex(newBody) {
+		t.Fatalf("meta snapshot_sha256 = %q, want %q", got, sha256Hex(newBody))
+	}
+}
+
+func TestWorkspaceSnapshotHashMismatch(t *testing.T) {
+	client := openWorkspaceSnapshotTestClient(t)
+	defer client.close()
+	params := workspaceSnapshotStoreParams(`{"version":1}`)
+	params["body_sha256"] = strings.Repeat("0", 64)
+	resp := client.call(t, "workspace.snapshot.store", params)
+	assertWorkspaceSnapshotError(t, resp, "hash_mismatch")
+}
+
+func TestWorkspaceSnapshotTooLarge(t *testing.T) {
+	client := openWorkspaceSnapshotTestClient(t)
+	defer client.close()
+	body := strings.Repeat("x", workspaceSnapshotMaxBytes+1)
+	resp := client.call(t, "workspace.snapshot.store", workspaceSnapshotStoreParams(body))
+	assertWorkspaceSnapshotError(t, resp, "body_too_large")
+}
+
+func TestWorkspaceSnapshotRequiresAuth(t *testing.T) {
+	socketPath, stop := startPersistentDaemonWithSnapshotRootForTest(t, "secret", t.TempDir())
+	defer stop()
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial persistent daemon: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
+	writePersistentTestFrame(t, writer, rpcRequest{
+		ID:     "unauth",
+		Method: "workspace.snapshot.fetch",
+		Params: map[string]any{},
+	})
+	frame := readPersistentTestFrame(t, conn, reader)
+	assertWorkspaceSnapshotError(t, frame, "unauthorized")
+}
+
+func TestWorkspaceSnapshotStoreAtomicRollback(t *testing.T) {
+	client := openWorkspaceSnapshotTestClient(t)
+	defer client.close()
+	originalRename := workspaceSnapshotRename
+	renameCount := 0
+	workspaceSnapshotRename = func(oldpath, newpath string) error {
+		renameCount++
+		if renameCount == 2 {
+			return errors.New("simulated rename failure")
+		}
+		return originalRename(oldpath, newpath)
+	}
+	t.Cleanup(func() {
+		workspaceSnapshotRename = originalRename
+	})
+
+	resp := client.call(t, "workspace.snapshot.store", workspaceSnapshotStoreParams(`{"version":1}`))
+	assertWorkspaceSnapshotError(t, resp, "io_error")
+	if _, err := os.Stat(filepath.Join(client.snapshotRoot, workspaceSnapshotBodyFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("body file should be rolled back, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(client.snapshotRoot, workspaceSnapshotMetaFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("meta file should not exist, stat err=%v", err)
+	}
+}
+
 func assertAttachmentCount(t *testing.T, resp rpcResponse, want int) {
 	t.Helper()
 	if !resp.OK {
@@ -1799,6 +1998,85 @@ func assertAttachmentCount(t *testing.T, resp rpcResponse, want int) {
 	}
 	if len(attachmentsAny) != want {
 		t.Fatalf("attachments len = %d, want %d payload=%+v", len(attachmentsAny), want, result)
+	}
+}
+
+type workspaceSnapshotTestClient struct {
+	conn         net.Conn
+	reader       *bufio.Reader
+	writer       *bufio.Writer
+	stop         func()
+	snapshotRoot string
+}
+
+func openWorkspaceSnapshotTestClient(t *testing.T) *workspaceSnapshotTestClient {
+	t.Helper()
+	snapshotRoot := t.TempDir()
+	socketPath, stop := startPersistentDaemonWithSnapshotRootForTest(t, "secret", snapshotRoot)
+	conn, reader, writer := openPersistentTestClient(t, socketPath, "secret")
+	return &workspaceSnapshotTestClient{
+		conn:         conn,
+		reader:       reader,
+		writer:       writer,
+		stop:         stop,
+		snapshotRoot: snapshotRoot,
+	}
+}
+
+func (c *workspaceSnapshotTestClient) close() {
+	_ = c.conn.Close()
+	c.stop()
+}
+
+func (c *workspaceSnapshotTestClient) call(t *testing.T, method string, params map[string]any) map[string]any {
+	t.Helper()
+	if params == nil {
+		params = map[string]any{}
+	}
+	return persistentTestRPCCall(t, c.conn, c.reader, c.writer, rpcRequest{
+		ID:     method,
+		Method: method,
+		Params: params,
+	})
+}
+
+func workspaceSnapshotStoreParams(body string) map[string]any {
+	return map[string]any{
+		"workspace_id":   "3f4a8d21-6a8f-4ef9-a979-7d712f2a8d9e",
+		"title":          "training run",
+		"detached_at":    "2026-05-27T01:02:03.123Z",
+		"schema_version": 1,
+		"body":           body,
+		"body_sha256":    sha256Hex(body),
+	}
+}
+
+func sha256Hex(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func assertWorkspaceSnapshotOK(t *testing.T, frame map[string]any) {
+	t.Helper()
+	if ok, _ := frame["ok"].(bool); !ok {
+		t.Fatalf("expected ok response, got %+v", frame)
+	}
+	if _, ok := frame["result"].(map[string]any); !ok {
+		t.Fatalf("response missing result map: %+v", frame)
+	}
+}
+
+func assertWorkspaceSnapshotError(t *testing.T, frame map[string]any, code string) {
+	t.Helper()
+	if ok, _ := frame["ok"].(bool); ok {
+		t.Fatalf("expected error response %q, got %+v", code, frame)
+	}
+	errorObject, ok := frame["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("response missing error object: %+v", frame)
+	}
+	if got, _ := errorObject["code"].(string); got != code {
+		t.Fatalf("error code = %q, want %q; frame=%+v", got, code, frame)
 	}
 }
 
