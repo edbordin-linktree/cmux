@@ -3418,6 +3418,12 @@ class TerminalController {
             return v2Result(id: id, self.v2WorkspaceRemoteDisconnect(params: params))
         case "workspace.remote.status":
             return v2Result(id: id, self.v2WorkspaceRemoteStatus(params: params))
+        case "workspace.remote.snapshot_detach":
+            return v2Result(id: id, self.v2WorkspaceRemoteSnapshotDetach(params: params))
+        case "workspace.remote.snapshot_restore":
+            return v2Result(id: id, self.v2WorkspaceRemoteSnapshotRestore(params: params))
+        case "workspace.remote.snapshot_clear":
+            return v2Result(id: id, self.v2WorkspaceRemoteSnapshotClear(params: params))
         case "workspace.remote.pty_attach_end":
             return v2Result(id: id, self.v2WorkspaceRemotePTYAttachEnd(params: params))
         case "workspace.remote.terminal_session_end":
@@ -3847,6 +3853,9 @@ class TerminalController {
             "workspace.remote.reconnect",
             "workspace.remote.disconnect",
             "workspace.remote.status",
+            "workspace.remote.snapshot_detach",
+            "workspace.remote.snapshot_restore",
+            "workspace.remote.snapshot_clear",
             "workspace.remote.pty_sessions",
             "workspace.remote.pty_close",
             "workspace.remote.pty_detach",
@@ -6500,6 +6509,241 @@ class TerminalController {
         }
 
         return result
+    }
+
+    private func v2WorkspaceRemoteSnapshotDetach(params: [String: Any]) -> V2CallResult {
+        let requestedWorkspaceId = v2UUID(params, "workspace_id")
+        if v2HasNonNullParam(params, "workspace_id"), requestedWorkspaceId == nil {
+            return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
+        }
+        let fallbackTabManager = v2ResolveTabManager(params: params)
+        let workspaceId = requestedWorkspaceId ?? fallbackTabManager?.selectedTabId
+        guard let workspaceId else {
+            return .err(code: "invalid_params", message: "Missing workspace_id", data: nil)
+        }
+
+        var capture: (
+            owner: TabManager,
+            workspace: Workspace,
+            configuration: WorkspaceRemoteConfiguration,
+            daemonPath: String,
+            detachedAt: Date,
+            body: String,
+            sha256: String,
+            paneCount: Int
+        )?
+        var captureError: Error?
+        v2MainSync {
+            guard let owner = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+                  let workspace = owner.tabs.first(where: { $0.id == workspaceId }) else {
+                return
+            }
+            do {
+                let configuration = try workspace.validateRemoteWorkspaceSnapshotEligibility()
+                let detachedAt = Date()
+                let snapshot = try workspace.captureRemoteWorkspaceSnapshotV1(detachedAt: detachedAt)
+                let body = try RemoteWorkspaceSnapshotCodec.encodeString(snapshot)
+                let sha256 = RemoteWorkspaceSnapshotCodec.sha256Hex(for: body)
+                capture = (
+                    owner: owner,
+                    workspace: workspace,
+                    configuration: configuration,
+                    daemonPath: workspace.remoteDaemonStatus.remotePath ?? "~/.cmux/bin/cmuxd-remote",
+                    detachedAt: detachedAt,
+                    body: body,
+                    sha256: sha256,
+                    paneCount: snapshot.panes.count
+                )
+            } catch {
+                captureError = error
+            }
+        }
+        if let captureError {
+            return .err(code: "ineligible_workspace", message: captureError.localizedDescription, data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+            ])
+        }
+        guard let capture else {
+            return .err(code: "not_found", message: "Workspace not found", data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+            ])
+        }
+
+        do {
+            _ = try capture.workspace.storeRemoteWorkspaceSnapshot(
+                body: capture.body,
+                bodySHA256: capture.sha256,
+                detachedAt: capture.detachedAt
+            )
+            try DetachedWorkspaceHostRegistry.upsert(DetachedWorkspaceHostRegistryRecord(
+                host: capture.configuration.destination,
+                port: capture.configuration.port,
+                identityFile: capture.configuration.identityFile,
+                sshOptions: capture.configuration.sshOptions,
+                daemonBinPath: capture.daemonPath,
+                addedAt: capture.detachedAt,
+                lastSeenAt: capture.detachedAt
+            ))
+        } catch {
+            return .err(code: "store_failed", message: error.localizedDescription, data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+            ])
+        }
+
+        var windowId: UUID?
+        v2MainSync {
+            windowId = v2ResolveWindowId(tabManager: capture.owner)
+            guard capture.owner.tabs.contains(where: { $0.id == capture.workspace.id }) else { return }
+            if capture.owner.tabs.count <= 1 {
+                _ = capture.owner.addWorkspace(title: "Terminal", select: true, autoWelcomeIfNeeded: false)
+            }
+            capture.workspace.performRemoteWorkspaceDetachCloseTransaction {
+                capture.owner.closeWorkspace(capture.workspace, recordHistory: false)
+            }
+        }
+
+        return .ok([
+            "window_id": v2OrNull(windowId?.uuidString),
+            "window_ref": v2Ref(kind: .window, uuid: windowId),
+            "workspace_id": capture.workspace.id.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: capture.workspace.id),
+            "title": capture.workspace.title,
+            "host": capture.configuration.destination,
+            "persistent_daemon_slot": capture.configuration.persistentDaemonSlot ?? NSNull(),
+            "snapshot_sha256": capture.sha256,
+            "detached_at": RemoteWorkspaceSnapshotCodec.iso8601String(capture.detachedAt),
+            "panes": capture.paneCount,
+        ])
+    }
+
+    private func v2WorkspaceRemoteSnapshotRestore(params: [String: Any]) -> V2CallResult {
+        guard let workspaceId = v2UUID(params, "workspace_id") else {
+            return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
+        }
+
+        var target: Workspace?
+        var remoteSnapshot: SessionRemoteWorkspaceSnapshot?
+        var windowId: UUID?
+        v2MainSync {
+            guard let owner = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+                  let workspace = owner.tabs.first(where: { $0.id == workspaceId }) else {
+                return
+            }
+            target = workspace
+            remoteSnapshot = workspace.remoteConfiguration?.sessionSnapshot()
+            windowId = v2ResolveWindowId(tabManager: owner)
+        }
+        guard let target, let remoteSnapshot else {
+            return .err(code: "not_found", message: "Configured remote workspace not found", data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+            ])
+        }
+
+        let fetch: [String: Any]
+        do {
+            fetch = try target.fetchRemoteWorkspaceSnapshot()
+        } catch {
+            return .err(code: "fetch_failed", message: error.localizedDescription, data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+            ])
+        }
+        guard (fetch["exists"] as? Bool) == true else {
+            return .err(code: "snapshot_absent", message: "Remote workspace snapshot is absent; use ssh-workspace-snapshot-clear if stale local state remains", data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+            ])
+        }
+        guard let body = fetch["body"] as? String,
+              let meta = fetch["meta"] as? [String: Any] else {
+            return .err(code: "decode_failed", message: "Remote workspace snapshot fetch returned an invalid payload", data: nil)
+        }
+        let bodySHA256 = RemoteWorkspaceSnapshotCodec.sha256Hex(for: body)
+        if let expected = meta["snapshot_sha256"] as? String,
+           !expected.isEmpty,
+           expected.lowercased() != bodySHA256 {
+            return .err(code: "hash_mismatch", message: "Remote workspace snapshot hash mismatch; use ssh-workspace-snapshot-clear to remove it", data: [
+                "expected": expected,
+                "actual": bodySHA256,
+            ])
+        }
+
+        let snapshot: RemoteWorkspaceSnapshotV1
+        do {
+            snapshot = try RemoteWorkspaceSnapshotCodec.decodeString(body)
+        } catch {
+            return .err(code: "decode_failed", message: error.localizedDescription, data: nil)
+        }
+
+        var restoreResult: RemoteWorkspaceRestoreResult?
+        v2MainSync {
+            restoreResult = target.restoreRemoteWorkspaceSnapshotV1(snapshot, remote: remoteSnapshot)
+            target.setCustomTitle(snapshot.title)
+            if let owner = AppDelegate.shared?.tabManagerFor(tabId: target.id) {
+                owner.selectWorkspace(target)
+                windowId = v2ResolveWindowId(tabManager: owner)
+            }
+        }
+
+        let clearResult = try? target.clearRemoteWorkspaceSnapshot()
+        if let configuration = target.remoteConfiguration {
+            try? DetachedWorkspaceHostRegistry.upsert(DetachedWorkspaceHostRegistryRecord(
+                host: configuration.destination,
+                port: configuration.port,
+                identityFile: configuration.identityFile,
+                sshOptions: configuration.sshOptions,
+                daemonBinPath: target.remoteDaemonStatus.remotePath ?? "~/.cmux/bin/cmuxd-remote",
+                addedAt: Date(),
+                lastSeenAt: Date()
+            ))
+        }
+        return .ok([
+            "window_id": v2OrNull(windowId?.uuidString),
+            "window_ref": v2Ref(kind: .window, uuid: windowId),
+            "workspace_id": snapshot.workspaceId.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+            "local_workspace_id": target.id.uuidString,
+            "local_workspace_ref": v2Ref(kind: .workspace, uuid: target.id),
+            "title": snapshot.title,
+            "panes_restored": restoreResult?.panesRestored ?? 0,
+            "panes_lost": restoreResult?.panesLost ?? 0,
+            "snapshot_sha256": bodySHA256,
+            "cleared": (clearResult?["cleared"] as? Bool) ?? false,
+        ])
+    }
+
+    private func v2WorkspaceRemoteSnapshotClear(params: [String: Any]) -> V2CallResult {
+        guard let workspaceId = v2UUID(params, "workspace_id") else {
+            return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
+        }
+        var target: Workspace?
+        v2MainSync {
+            guard let owner = AppDelegate.shared?.tabManagerFor(tabId: workspaceId) else { return }
+            target = owner.tabs.first(where: { $0.id == workspaceId })
+        }
+        guard let target else {
+            return .err(code: "not_found", message: "Workspace not found", data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+            ])
+        }
+        do {
+            let result = try target.clearRemoteWorkspaceSnapshot()
+            return .ok([
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+                "cleared": (result["cleared"] as? Bool) ?? false,
+            ])
+        } catch {
+            return .err(code: "clear_failed", message: error.localizedDescription, data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+            ])
+        }
     }
 
     private nonisolated func v2RequestedRemotePTYWorkspaceID(params: [String: Any]) -> (

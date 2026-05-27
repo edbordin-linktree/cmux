@@ -2576,12 +2576,12 @@ struct CMUXCLI {
         "--dx", "--dy", "--email", "--event", "--expires", "--focus",
         "--function", "--id", "--image", "--index", "--key", "--kind",
         "--layout", "--lines", "--load-state", "--max-depth", "--name", "--os",
-        "--order", "--out", "--pane", "--panel", "--path", "--profile", "--property",
+        "--host", "--order", "--out", "--pane", "--panel", "--path", "--profile", "--property",
         "--provider", "--relay-port", "--script", "--selector", "--session",
-        "--shell", "--source", "--subtitle", "--surface", "--tab", "--target-pane",
+        "--shell", "--slot", "--source", "--subtitle", "--surface", "--tab", "--target-pane",
         "--text", "--timeout", "--timeout-ms", "--title", "--transcript",
         "--turn", "--type", "--url", "--url-contains", "--value", "--window",
-        "--workspace", "--checkpoint", "--checkpoint-id",
+        "--workspace", "--workspace-id", "--checkpoint", "--checkpoint-id",
     ]
 
     private func parsePresentationOptions(
@@ -2798,6 +2798,9 @@ struct CMUXCLI {
 
         if command == "help" { print(usage()); return }
         if command == "remote-daemon-status" { try runRemoteDaemonStatus(commandArgs: commandArgs, jsonOutput: jsonOutput); return }
+        if command == "ssh-host-list" { try runSSHHostList(commandArgs: commandArgs, jsonOutput: jsonOutput); return }
+        if command == "ssh-host-forget" { try runSSHHostForget(commandArgs: commandArgs, jsonOutput: jsonOutput); return }
+        if command == "ssh-workspace-list-detached" { try runSSHWorkspaceListDetached(commandArgs: commandArgs, jsonOutput: jsonOutput); return }
         if command == "vm-pty-connect" { try runVMPtyConnect(commandArgs: commandArgs); return }
         if command == "docs" { try runDocsCommand(commandArgs: commandArgs, jsonOutput: jsonOutput); return }
         if command == "welcome" { printWelcome(); return }
@@ -3600,6 +3603,12 @@ struct CMUXCLI {
                 idFormat: idFormat,
                 windowOverride: windowId
             )
+        case "ssh-workspace-detach":
+            try runSSHWorkspaceDetach(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
+        case "ssh-workspace-attach":
+            try runSSHWorkspaceAttach(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat, windowOverride: windowId)
+        case "ssh-workspace-snapshot-clear":
+            try runSSHWorkspaceSnapshotClear(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
         case "ssh-pty-attach":
             try runSSHPTYAttach(commandArgs: commandArgs, client: client)
         case "ssh-session-list":
@@ -12278,6 +12287,72 @@ struct CMUXCLI {
               cmux ssh-session-list
               cmux ssh-session-list --workspace workspace:2
               cmux ssh-session-list --all-workspaces
+            """
+        case "ssh-workspace-detach":
+            return """
+            Usage: cmux ssh-workspace-detach --workspace <id|ref|index> [--json]
+
+            Store a remote workspace layout snapshot on its persistent daemon host, then remove the workspace locally.
+
+            Example:
+              cmux ssh-workspace-detach --workspace workspace:2
+            """
+        case "ssh-workspace-list-detached":
+            return """
+            Usage: cmux ssh-workspace-list-detached [--host <h>] [--json] [--timeout <secs>]
+
+            List detached remote workspaces by running cmuxd-remote workspace-snapshot-list-all on known hosts.
+            This command reads the local detached host registry and does not require a running cmux app.
+
+            Flags:
+              --host <h>         Query one host only
+              --json             Print machine-readable output
+              --timeout <secs>   Per-host SSH timeout (default: 5)
+
+            Example:
+              cmux ssh-workspace-list-detached
+              cmux ssh-workspace-list-detached --host dev@example
+            """
+        case "ssh-workspace-attach":
+            return """
+            Usage: cmux ssh-workspace-attach --workspace-id <uuid> [--host <h>] [--slot <s>] [--window <id|ref|index>] [--json]
+
+            Resolve a detached workspace snapshot, create a local remote workspace, fetch the snapshot, and restore its panes.
+
+            Example:
+              cmux ssh-workspace-attach --workspace-id 3f4a0000-0000-0000-0000-000000000000
+              cmux ssh-workspace-attach --workspace-id 3f4a0000-0000-0000-0000-000000000000 --host dev@example --slot ssh-slot
+            """
+        case "ssh-workspace-snapshot-clear":
+            return """
+            Usage: cmux ssh-workspace-snapshot-clear (--workspace-id <uuid> | --host <h> --slot <s>) [--force]
+
+            Clear a stored remote workspace snapshot from a persistent daemon slot.
+
+            Example:
+              cmux ssh-workspace-snapshot-clear --workspace-id 3f4a0000-0000-0000-0000-000000000000
+              cmux ssh-workspace-snapshot-clear --host dev@example --slot ssh-slot --force
+            """
+        case "ssh-host-list":
+            return """
+            Usage: cmux ssh-host-list [--json]
+
+            Print the local detached workspace host registry without connecting to any host.
+
+            Example:
+              cmux ssh-host-list
+              cmux ssh-host-list --json
+            """
+        case "ssh-host-forget":
+            return """
+            Usage: cmux ssh-host-forget --host <h> [--force]
+
+            Remove one host from the local detached workspace host registry.
+            Without --force, cmux first checks whether the host still reports detached snapshots.
+
+            Example:
+              cmux ssh-host-forget --host dev@example
+              cmux ssh-host-forget --host dev@example --force
             """
         case "ssh-session-attach":
             return """
@@ -29801,6 +29876,12 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           list-workspaces [--window <id|ref|index>]
           new-workspace [--name <title>] [--description <text>] [--cwd <path>] [--command <text>] [--layout <json>] [--window <id|ref|index>] [--focus <true|false>]
           ssh <destination> [--name <title>] [--port <n>] [--identity <path>] [--ssh-option <opt>] [--window <id|ref|index>] [--no-focus] [-- <remote-command-args>]
+          ssh-workspace-detach --workspace <id|ref|index> [--json]
+          ssh-workspace-list-detached [--host <h>] [--json] [--timeout <secs>]
+          ssh-workspace-attach --workspace-id <uuid> [--host <h>] [--slot <s>] [--window <id|ref|index>] [--json]
+          ssh-workspace-snapshot-clear (--workspace-id <uuid> | --host <h> --slot <s>) [--force]
+          ssh-host-list [--json]
+          ssh-host-forget --host <h> [--force]
           ssh-session-list [--workspace <id|ref|index> | --all-workspaces]
           ssh-session-attach --session-id <id> [--workspace <id|ref|index>] [--pane <id|ref|index> | --split <left|right|up|down>]
           ssh-session-cleanup [--workspace <id|ref|index> | --all-workspaces] (--session-id <id> | --all)

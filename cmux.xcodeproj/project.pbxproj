@@ -365,6 +365,7 @@
 		A5001601 /* SentryHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001600 /* SentryHelper.swift */; };
 		A5001610 /* SessionPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001611 /* SessionPersistence.swift */; };
 		D7AB40000000000000000001 /* RemoteWorkspaceSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7AB40000000000000000002 /* RemoteWorkspaceSnapshot.swift */; };
+		D7C000000000000000000003 /* DetachedWorkspaceHostRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7C000000000000000000004 /* DetachedWorkspaceHostRegistry.swift */; };
 		A5001670 /* SessionRestoredTerminalCommandStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001671 /* SessionRestoredTerminalCommandStore.swift */; };
 		B35751000000000000000002 /* TmuxResumeParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B35751000000000000000001 /* TmuxResumeParser.swift */; };
 		A5001621 /* AppleScriptSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001620 /* AppleScriptSupport.swift */; };
@@ -413,6 +414,7 @@
 		C510C1E00000000000000002 /* SocketOperationTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = C510C1E00000000000000001 /* SocketOperationTelemetry.swift */; };
 		B9000034A1B2C3D4E5F60719 /* cmux_open.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000030A1B2C3D4E5F60719 /* cmux_open.swift */; };
 		B9000041A1B2C3D4E5F60719 /* CMUXCLI+SSHCommandSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000040A1B2C3D4E5F60719 /* CMUXCLI+SSHCommandSupport.swift */; };
+		D7C000000000000000000001 /* CMUXCLI+RemoteWorkspaceSnapshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7C000000000000000000002 /* CMUXCLI+RemoteWorkspaceSnapshots.swift */; };
 		D7AB0000000000000000000D /* CMUXCLI+MoveTabToNewWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7AB0000000000000000000E /* CMUXCLI+MoveTabToNewWorkspace.swift */; };
 		B9000044A1B2C3D4E5F60719 /* CMUXCLI+TmuxCompatSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000045A1B2C3D4E5F60719 /* CMUXCLI+TmuxCompatSupport.swift */; };
 		B9000046A1B2C3D4E5F60719 /* CMUXCLI+ExecutableResolution.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000047A1B2C3D4E5F60719 /* CMUXCLI+ExecutableResolution.swift */; };
@@ -947,6 +949,7 @@
 		A5001600 /* SentryHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentryHelper.swift; sourceTree = "<group>"; };
 		A5001611 /* SessionPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionPersistence.swift; sourceTree = "<group>"; };
 		D7AB40000000000000000002 /* RemoteWorkspaceSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWorkspaceSnapshot.swift; sourceTree = "<group>"; };
+		D7C000000000000000000004 /* DetachedWorkspaceHostRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetachedWorkspaceHostRegistry.swift; sourceTree = "<group>"; };
 		A5001671 /* SessionRestoredTerminalCommandStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRestoredTerminalCommandStore.swift; sourceTree = "<group>"; };
 		B35751000000000000000001 /* TmuxResumeParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxResumeParser.swift; sourceTree = "<group>"; };
 		A5001620 /* AppleScriptSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleScriptSupport.swift; sourceTree = "<group>"; };
@@ -990,6 +993,7 @@
 		C510C1E00000000000000001 /* SocketOperationTelemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocketOperationTelemetry.swift; sourceTree = "<group>"; };
 		B9000030A1B2C3D4E5F60719 /* cmux_open.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = cmux_open.swift; sourceTree = "<group>"; };
 		B9000040A1B2C3D4E5F60719 /* CMUXCLI+SSHCommandSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+SSHCommandSupport.swift"; sourceTree = "<group>"; };
+		D7C000000000000000000002 /* CMUXCLI+RemoteWorkspaceSnapshots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+RemoteWorkspaceSnapshots.swift"; sourceTree = "<group>"; };
 		D7AB0000000000000000000E /* CMUXCLI+MoveTabToNewWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+MoveTabToNewWorkspace.swift"; sourceTree = "<group>"; };
 		B9000045A1B2C3D4E5F60719 /* CMUXCLI+TmuxCompatSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+TmuxCompatSupport.swift"; sourceTree = "<group>"; };
 		B9000047A1B2C3D4E5F60719 /* CMUXCLI+ExecutableResolution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+ExecutableResolution.swift"; sourceTree = "<group>"; };
@@ -1533,6 +1537,7 @@
 				A5001222 /* WindowAccessor.swift */,
 				A5001611 /* SessionPersistence.swift */,
 				D7AB40000000000000000002 /* RemoteWorkspaceSnapshot.swift */,
+				D7C000000000000000000004 /* DetachedWorkspaceHostRegistry.swift */,
 				A5001671 /* SessionRestoredTerminalCommandStore.swift */,
 				B35751000000000000000001 /* TmuxResumeParser.swift */,
 				A5001661 /* RestorableAgentSession.swift */,
@@ -1597,6 +1602,7 @@
 				C510C1E00000000000000001 /* SocketOperationTelemetry.swift */,
 				B9000030A1B2C3D4E5F60719 /* cmux_open.swift */,
 						B9000040A1B2C3D4E5F60719 /* CMUXCLI+SSHCommandSupport.swift */,
+						D7C000000000000000000002 /* CMUXCLI+RemoteWorkspaceSnapshots.swift */,
 						D7AB0000000000000000000E /* CMUXCLI+MoveTabToNewWorkspace.swift */,
 						B9000047A1B2C3D4E5F60719 /* CMUXCLI+ExecutableResolution.swift */,
 						B9000045A1B2C3D4E5F60719 /* CMUXCLI+TmuxCompatSupport.swift */,
@@ -2310,6 +2316,7 @@
 				A500120C /* WindowAccessor.swift in Sources */,
 				A5001610 /* SessionPersistence.swift in Sources */,
 				D7AB40000000000000000001 /* RemoteWorkspaceSnapshot.swift in Sources */,
+				D7C000000000000000000003 /* DetachedWorkspaceHostRegistry.swift in Sources */,
 				A5001670 /* SessionRestoredTerminalCommandStore.swift in Sources */,
 				B35751000000000000000002 /* TmuxResumeParser.swift in Sources */,
 				A5001660 /* RestorableAgentSession.swift in Sources */,
@@ -2371,6 +2378,7 @@
 				C510C1E00000000000000002 /* SocketOperationTelemetry.swift in Sources */,
 				B9000034A1B2C3D4E5F60719 /* cmux_open.swift in Sources */,
 					B9000041A1B2C3D4E5F60719 /* CMUXCLI+SSHCommandSupport.swift in Sources */,
+					D7C000000000000000000001 /* CMUXCLI+RemoteWorkspaceSnapshots.swift in Sources */,
 					D7AB0000000000000000000D /* CMUXCLI+MoveTabToNewWorkspace.swift in Sources */,
 					B9000044A1B2C3D4E5F60719 /* CMUXCLI+TmuxCompatSupport.swift in Sources */,
 					B9000046A1B2C3D4E5F60719 /* CMUXCLI+ExecutableResolution.swift in Sources */,

@@ -1838,6 +1838,7 @@ private final class WorkspaceRemoteDaemonRPCClient {
     static let requiredPTYSessionCapability = "pty.session"
     static let requiredPTYSessionTokenCapability = "pty.session.token"
     static let requiredPTYPersistentDaemonCapability = "pty.session.persistent_daemon"
+    static let requiredWorkspaceSnapshotCapability = "workspace.snapshot"
 
     enum StreamEvent {
         case data(Data)
@@ -2416,6 +2417,36 @@ private final class WorkspaceRemoteDaemonRPCClient {
     func listPTY() throws -> [[String: Any]] {
         let result = try call(method: "pty.list", params: [:], timeout: 8.0)
         return result["sessions"] as? [[String: Any]] ?? []
+    }
+
+    func storeWorkspaceSnapshot(
+        workspaceID: String,
+        title: String,
+        detachedAt: String,
+        schemaVersion: Int,
+        body: String,
+        bodySHA256: String
+    ) throws -> [String: Any] {
+        try call(
+            method: "workspace.snapshot.store",
+            params: [
+                "workspace_id": workspaceID,
+                "title": title,
+                "detached_at": detachedAt,
+                "schema_version": schemaVersion,
+                "body": body,
+                "body_sha256": bodySHA256,
+            ],
+            timeout: 8.0
+        )
+    }
+
+    func fetchWorkspaceSnapshot() throws -> [String: Any] {
+        try call(method: "workspace.snapshot.fetch", params: [:], timeout: 8.0)
+    }
+
+    func clearWorkspaceSnapshot() throws -> [String: Any] {
+        try call(method: "workspace.snapshot.clear", params: [:], timeout: 8.0)
     }
 
     func unregisterPTY(sessionID: String, attachmentID: String, attachmentToken: String? = nil) {
@@ -3896,6 +3927,53 @@ private final class WorkspaceRemoteDaemonProxyTunnel {
         }
     }
 
+    func storeWorkspaceSnapshot(
+        workspaceID: String,
+        title: String,
+        detachedAt: String,
+        schemaVersion: Int,
+        body: String,
+        bodySHA256: String
+    ) throws -> [String: Any] {
+        try queue.sync {
+            guard let rpcClient, !isStopped else {
+                throw NSError(domain: "cmux.remote.workspace_snapshot", code: 30, userInfo: [
+                    NSLocalizedDescriptionKey: "remote daemon tunnel is not ready",
+                ])
+            }
+            return try rpcClient.storeWorkspaceSnapshot(
+                workspaceID: workspaceID,
+                title: title,
+                detachedAt: detachedAt,
+                schemaVersion: schemaVersion,
+                body: body,
+                bodySHA256: bodySHA256
+            )
+        }
+    }
+
+    func fetchWorkspaceSnapshot() throws -> [String: Any] {
+        try queue.sync {
+            guard let rpcClient, !isStopped else {
+                throw NSError(domain: "cmux.remote.workspace_snapshot", code: 31, userInfo: [
+                    NSLocalizedDescriptionKey: "remote daemon tunnel is not ready",
+                ])
+            }
+            return try rpcClient.fetchWorkspaceSnapshot()
+        }
+    }
+
+    func clearWorkspaceSnapshot() throws -> [String: Any] {
+        try queue.sync {
+            guard let rpcClient, !isStopped else {
+                throw NSError(domain: "cmux.remote.workspace_snapshot", code: 32, userInfo: [
+                    NSLocalizedDescriptionKey: "remote daemon tunnel is not ready",
+                ])
+            }
+            return try rpcClient.clearWorkspaceSnapshot()
+        }
+    }
+
     func startPTYBridge(sessionID: String, attachmentID: String, command: String?, requireExisting: Bool) throws -> WorkspaceRemotePTYBridgeServer.Endpoint {
         try queue.sync {
             guard let rpcClient, !isStopped else {
@@ -4097,6 +4175,39 @@ private final class WorkspaceRemoteProxyBroker {
     func closePTY(configuration: WorkspaceRemoteConfiguration, sessionID: String) throws {
         try withReadyTunnel(configuration: configuration) { tunnel in
             try tunnel.closePTY(sessionID: sessionID)
+        }
+    }
+
+    func storeWorkspaceSnapshot(
+        configuration: WorkspaceRemoteConfiguration,
+        workspaceID: String,
+        title: String,
+        detachedAt: String,
+        schemaVersion: Int,
+        body: String,
+        bodySHA256: String
+    ) throws -> [String: Any] {
+        try withReadyTunnel(configuration: configuration) { tunnel in
+            try tunnel.storeWorkspaceSnapshot(
+                workspaceID: workspaceID,
+                title: title,
+                detachedAt: detachedAt,
+                schemaVersion: schemaVersion,
+                body: body,
+                bodySHA256: bodySHA256
+            )
+        }
+    }
+
+    func fetchWorkspaceSnapshot(configuration: WorkspaceRemoteConfiguration) throws -> [String: Any] {
+        try withReadyTunnel(configuration: configuration) { tunnel in
+            try tunnel.fetchWorkspaceSnapshot()
+        }
+    }
+
+    func clearWorkspaceSnapshot(configuration: WorkspaceRemoteConfiguration) throws -> [String: Any] {
+        try withReadyTunnel(configuration: configuration) { tunnel in
+            try tunnel.clearWorkspaceSnapshot()
         }
     }
 
@@ -5612,6 +5723,7 @@ final class WorkspaceRemoteSessionController {
     private var proxyLease: WorkspaceRemoteProxyBroker.Lease?
     private var proxyEndpoint: BrowserProxyEndpoint?
     private var daemonReady = false
+    private var daemonCapabilities: [String] = []
     private var daemonBootstrapVersion: String?
     private var daemonRemotePath: String?
     private var reverseRelayProcess: Process?
@@ -5689,6 +5801,58 @@ final class WorkspaceRemoteSessionController {
                 ])
             }
             try WorkspaceRemoteProxyBroker.shared.closePTY(configuration: self.configuration, sessionID: sessionID)
+        }
+    }
+
+    func storeWorkspaceSnapshot(
+        workspaceID: String,
+        title: String,
+        detachedAt: String,
+        schemaVersion: Int,
+        body: String,
+        bodySHA256: String,
+        timeout: TimeInterval = 8.0
+    ) throws -> [String: Any] {
+        try runOnControllerQueue(timeout: timeout) {
+            try self.requireWorkspaceSnapshotCapabilityLocked()
+            guard self.daemonReady, self.proxyLease != nil else {
+                throw NSError(domain: "cmux.remote.workspace_snapshot", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "remote daemon is not ready",
+                ])
+            }
+            return try WorkspaceRemoteProxyBroker.shared.storeWorkspaceSnapshot(
+                configuration: self.configuration,
+                workspaceID: workspaceID,
+                title: title,
+                detachedAt: detachedAt,
+                schemaVersion: schemaVersion,
+                body: body,
+                bodySHA256: bodySHA256
+            )
+        }
+    }
+
+    func fetchWorkspaceSnapshot(timeout: TimeInterval = 8.0) throws -> [String: Any] {
+        try runOnControllerQueue(timeout: timeout) {
+            try self.requireWorkspaceSnapshotCapabilityLocked()
+            guard self.daemonReady, self.proxyLease != nil else {
+                throw NSError(domain: "cmux.remote.workspace_snapshot", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "remote daemon is not ready",
+                ])
+            }
+            return try WorkspaceRemoteProxyBroker.shared.fetchWorkspaceSnapshot(configuration: self.configuration)
+        }
+    }
+
+    func clearWorkspaceSnapshot(timeout: TimeInterval = 8.0) throws -> [String: Any] {
+        try runOnControllerQueue(timeout: timeout) {
+            try self.requireWorkspaceSnapshotCapabilityLocked()
+            guard self.daemonReady, self.proxyLease != nil else {
+                throw NSError(domain: "cmux.remote.workspace_snapshot", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "remote daemon is not ready",
+                ])
+            }
+            return try WorkspaceRemoteProxyBroker.shared.clearWorkspaceSnapshot(configuration: self.configuration)
         }
     }
 
@@ -5821,6 +5985,14 @@ final class WorkspaceRemoteSessionController {
 
     private var canStartPTYBridgeLocked: Bool {
         daemonReady && proxyLease != nil && proxyEndpoint != nil
+    }
+
+    private func requireWorkspaceSnapshotCapabilityLocked() throws {
+        guard daemonCapabilities.contains(WorkspaceRemoteDaemonRPCClient.requiredWorkspaceSnapshotCapability) else {
+            throw NSError(domain: "cmux.remote.workspace_snapshot", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "remote cmuxd-remote does not advertise workspace.snapshot; rebuild the remote daemon for this local feature branch",
+            ])
+        }
     }
 
     private func startPTYBridgeLocked(
@@ -6037,6 +6209,7 @@ final class WorkspaceRemoteSessionController {
         proxyLease = nil
         proxyEndpoint = nil
         daemonReady = false
+        daemonCapabilities = []
         daemonBootstrapVersion = nil
         daemonRemotePath = nil
         publishProxyEndpoint(nil)
@@ -6101,6 +6274,7 @@ final class WorkspaceRemoteSessionController {
                 ])
             }
             daemonReady = true
+            daemonCapabilities = hello.capabilities
             daemonBootstrapVersion = hello.version
             daemonRemotePath = hello.remotePath
             publishDaemonStatus(
@@ -11789,6 +11963,56 @@ final class Workspace: Identifiable, ObservableObject {
             ])
         }
         try controller.closePTYSession(sessionID: sessionID)
+    }
+
+    func storeRemoteWorkspaceSnapshot(
+        body: String,
+        bodySHA256: String,
+        detachedAt: Date
+    ) throws -> [String: Any] {
+        guard let controller = remoteSessionController else {
+            throw NSError(domain: "cmux.remote.workspace_snapshot", code: 10, userInfo: [
+                NSLocalizedDescriptionKey: "remote connection is not active",
+            ])
+        }
+        return try controller.storeWorkspaceSnapshot(
+            workspaceID: id.uuidString,
+            title: title,
+            detachedAt: Self.remoteWorkspaceSnapshotDateFormatter.string(from: detachedAt),
+            schemaVersion: RemoteWorkspaceSnapshotVersion.v1.rawValue,
+            body: body,
+            bodySHA256: bodySHA256
+        )
+    }
+
+    func fetchRemoteWorkspaceSnapshot() throws -> [String: Any] {
+        guard let controller = remoteSessionController else {
+            throw NSError(domain: "cmux.remote.workspace_snapshot", code: 11, userInfo: [
+                NSLocalizedDescriptionKey: "remote connection is not active",
+            ])
+        }
+        return try controller.fetchWorkspaceSnapshot()
+    }
+
+    func clearRemoteWorkspaceSnapshot() throws -> [String: Any] {
+        guard let controller = remoteSessionController else {
+            throw NSError(domain: "cmux.remote.workspace_snapshot", code: 12, userInfo: [
+                NSLocalizedDescriptionKey: "remote connection is not active",
+            ])
+        }
+        return try controller.clearWorkspaceSnapshot()
+    }
+
+    private static let remoteWorkspaceSnapshotDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    func performRemoteWorkspaceDetachCloseTransaction<T>(_ body: () throws -> T) rethrows -> T {
+        activeDetachCloseTransactions += 1
+        defer { activeDetachCloseTransactions = max(0, activeDetachCloseTransactions - 1) }
+        return try body()
     }
 
     func startRemotePTYBridge(

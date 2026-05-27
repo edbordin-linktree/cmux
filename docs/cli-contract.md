@@ -100,6 +100,12 @@ Environment:
 | `new-workspace` | Create a workspace, optionally with cwd, command, description, and layout. |
 | `ssh` | Open an SSH-backed workspace. |
 | `remote-daemon-status` | Print bundled remote daemon version, asset, checksum, and cache status. |
+| `ssh-workspace-detach` | Store a remote workspace snapshot on its persistent daemon host and remove the local workspace. Supports `--json`. |
+| `ssh-workspace-list-detached` | List detached remote workspace snapshots across known hosts, or one host with `--host`. Supports `--json`. |
+| `ssh-workspace-attach` | Restore a detached remote workspace snapshot by workspace ID, optionally disambiguated by host and slot. Supports `--json`. |
+| `ssh-workspace-snapshot-clear` | Clear a stored remote workspace snapshot by workspace ID or host and slot. |
+| `ssh-host-list` | Print the local detached workspace host registry. Supports `--json` and does not require a socket. |
+| `ssh-host-forget` | Remove a host from the local detached workspace host registry. |
 | `ssh-session-list` | List persisted SSH PTY sessions for one remote workspace or all remote workspaces. Supports `--json`. |
 | `ssh-session-attach` | Create a local terminal surface that reattaches to an existing persisted SSH PTY session. |
 | `ssh-session-cleanup` | Close one or all persisted SSH PTY sessions. Supports `--json`. |
@@ -429,6 +435,12 @@ the expected text without connecting to a cmux socket.
 - `cmux new-workspace --help` -> `Usage: cmux new-workspace`
 - `cmux list-workspaces --help` -> `Usage: cmux list-workspaces`
 - `cmux ssh --help` -> `Usage: cmux ssh <destination>`
+- `cmux ssh-workspace-detach --help` -> `Usage: cmux ssh-workspace-detach --workspace <id|ref|index>`
+- `cmux ssh-workspace-list-detached --help` -> `Usage: cmux ssh-workspace-list-detached`
+- `cmux ssh-workspace-attach --help` -> `Usage: cmux ssh-workspace-attach --workspace-id <uuid>`
+- `cmux ssh-workspace-snapshot-clear --help` -> `Usage: cmux ssh-workspace-snapshot-clear`
+- `cmux ssh-host-list --help` -> `Usage: cmux ssh-host-list`
+- `cmux ssh-host-forget --help` -> `Usage: cmux ssh-host-forget --host <h>`
 - `cmux ssh-session-list --help` -> `Usage: cmux ssh-session-list`
 - `cmux ssh-session-attach --help` -> `Usage: cmux ssh-session-attach --session-id <id>`
 - `cmux ssh-session-cleanup --help` -> `Usage: cmux ssh-session-cleanup`

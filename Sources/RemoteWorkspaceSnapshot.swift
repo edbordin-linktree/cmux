@@ -164,6 +164,10 @@ enum RemoteWorkspaceSnapshotCodec {
         sha256Hex(for: Data(string.utf8))
     }
 
+    static func iso8601String(_ date: Date) -> String {
+        iso8601Formatter().string(from: date)
+    }
+
     private static func iso8601Formatter() -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
