@@ -317,7 +317,9 @@ extension Workspace {
         from snapshot: RemoteWorkspaceSnapshotV1,
         remote: SessionRemoteWorkspaceSnapshot
     ) -> SessionWorkspaceSnapshot {
-        SessionWorkspaceSnapshot(
+        var restoreRemote = remote
+        restoreRemote.preferAutoConnectOnRestore = true
+        return SessionWorkspaceSnapshot(
             processTitle: snapshot.title,
             customTitle: snapshot.title,
             customDescription: nil,
@@ -332,7 +334,7 @@ extension Workspace {
             logEntries: [],
             progress: nil,
             gitBranch: nil,
-            remote: remote
+            remote: restoreRemote
         )
     }
 

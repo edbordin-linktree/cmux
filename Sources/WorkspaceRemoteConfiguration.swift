@@ -91,6 +91,7 @@ nonisolated struct SessionRemoteWorkspaceSnapshot: Codable, Equatable, Sendable 
     var skipDaemonBootstrap: Bool?
     var relayPort: Int?
     var persistentDaemonSlot: String?
+    var preferAutoConnectOnRestore: Bool?
 }
 
 struct WorkspaceRemoteWebSocketDaemonEndpoint: Equatable {
@@ -439,7 +440,9 @@ extension SessionRemoteWorkspaceSnapshot {
             normalizedRelayPort != nil &&
             SSHPTYAttachStartupCommandBuilder.sshOptionsSupportReusableForegroundAuth(optionsWithRestoreControlDefaults)
         let restoredSSHOptions = preservePTYSession ? optionsWithRestoreControlDefaults : normalizedOptions
-        let foregroundAuthToken = preservePTYSession ? UUID().uuidString.lowercased() : nil
+        let foregroundAuthToken = preservePTYSession && preferAutoConnectOnRestore != true
+            ? UUID().uuidString.lowercased()
+            : nil
         let foregroundAuth = foregroundAuthToken.map {
             SSHPTYAttachStartupCommandBuilder.ForegroundAuth(
                 destination: normalizedDestination,

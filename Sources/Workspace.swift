@@ -1160,6 +1160,12 @@ extension Workspace {
             let restoredRemotePTYAttachCommand = restoredRemotePTYSessionID.map {
                 remotePTYAttachStartupCommand(sessionID: $0)
             }
+            let restoredRemotePTYAttachScript = restoredRemotePTYAttachCommand.flatMap {
+                SessionRestoredTerminalCommandStore.writeLauncherScript(
+                    command: $0,
+                    workingDirectory: nil
+                )
+            }
 #if DEBUG
             if let restorableAgent {
                 let sessionPreview = String(restorableAgent.sessionId.prefix(8))
@@ -1189,9 +1195,9 @@ extension Workspace {
                 inPane: paneId,
                 focus: false,
                 workingDirectory: localWorkingDirectory,
-                initialCommand: restoredRemotePTYAttachCommand ?? restoredTmuxStartupScript?.path,
+                initialCommand: restoredRemotePTYAttachScript?.path ?? restoredTmuxStartupScript?.path,
                 tmuxStartCommand: restoredTmuxStartCommand,
-                initialInput: restoredRemotePTYAttachCommand == nil ? restoredStartupInput : nil,
+                initialInput: restoredRemotePTYAttachScript == nil ? restoredStartupInput : nil,
                 startupEnvironment: replayEnvironment,
                 remotePTYSessionID: restoredRemotePTYSessionID
             ) else {

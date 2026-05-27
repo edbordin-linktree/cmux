@@ -50,12 +50,15 @@ enum DetachedWorkspaceHostRegistry {
         var registry = try loadUnlocked()
         if let index = registry.hosts.firstIndex(where: { $0.host == record.host }) {
             let addedAt = registry.hosts[index].addedAt
+            let daemonBinPath = Self.isFallbackDaemonBinPath(record.daemonBinPath)
+                ? registry.hosts[index].daemonBinPath
+                : record.daemonBinPath
             registry.hosts[index] = DetachedWorkspaceHostRegistryRecord(
                 host: record.host,
                 port: record.port,
                 identityFile: record.identityFile,
                 sshOptions: record.sshOptions,
-                daemonBinPath: record.daemonBinPath,
+                daemonBinPath: daemonBinPath,
                 addedAt: addedAt,
                 lastSeenAt: record.lastSeenAt
             )
@@ -64,6 +67,10 @@ enum DetachedWorkspaceHostRegistry {
         }
         registry.hosts.sort { $0.host < $1.host }
         try saveUnlocked(registry)
+    }
+
+    private static func isFallbackDaemonBinPath(_ value: String) -> Bool {
+        value.trimmingCharacters(in: .whitespacesAndNewlines) == "~/.cmux/bin/cmuxd-remote"
     }
 
     private static func loadUnlocked() throws -> DetachedWorkspaceHostRegistryFile {

@@ -231,7 +231,7 @@ extension CMUXCLI {
         }
         let payload = try client.sendV2(method: "workspace.remote.snapshot_detach", params: ["workspace_id": workspaceID])
         if jsonOutput {
-            print(jsonString(formatIDs(payload, mode: idFormat)))
+            print(jsonString(payload))
             return
         }
         let title = (payload["title"] as? String) ?? "workspace"
@@ -282,7 +282,7 @@ extension CMUXCLI {
             responseTimeout: 60
         )
         if jsonOutput {
-            print(jsonString(formatIDs(restored, mode: idFormat)))
+            print(jsonString(restored))
             return
         }
         let panesRestored = (restored["panes_restored"] as? Int) ?? 0
@@ -342,7 +342,7 @@ extension CMUXCLI {
             )
             _ = try? client.sendV2(method: "workspace.close", params: ["workspace_id": localWorkspaceID])
             if jsonOutput {
-                print(jsonString(formatIDs(cleared, mode: idFormat)))
+                print(jsonString(cleared))
             } else {
                 let didClear = (cleared["cleared"] as? Bool) == true
                 print(didClear ? "Cleared snapshot \(target.host.host):\(target.slot)" : "No snapshot to clear at \(target.host.host):\(target.slot)")
@@ -626,9 +626,21 @@ extension CMUXCLI {
         if let identityFile = nonEmpty(target.host.identityFile) {
             configureParams["identity_file"] = identityFile
         }
-        if !target.host.sshOptions.isEmpty {
-            configureParams["ssh_options"] = target.host.sshOptions
+        let relayPort = Int.random(in: 49152...65535)
+        let relayID = UUID().uuidString.lowercased()
+        let relayToken = detachedWorkspaceRelayTokenHex()
+        let sshOptions = sshOptionsWithDetachedWorkspaceRestoreDefaults(
+            target.host.sshOptions,
+            relayPort: relayPort
+        )
+        if !sshOptions.isEmpty {
+            configureParams["ssh_options"] = sshOptions
         }
+        configureParams["relay_port"] = relayPort
+        configureParams["relay_id"] = relayID
+        configureParams["relay_token"] = relayToken
+        configureParams["local_socket_path"] = client.socketPath
+        configureParams["foreground_auth_token"] = UUID().uuidString.lowercased()
         do {
             _ = try client.sendV2(method: "workspace.remote.configure", params: configureParams)
             return workspaceID
@@ -636,6 +648,91 @@ extension CMUXCLI {
             _ = try? client.sendV2(method: "workspace.close", params: ["workspace_id": workspaceID])
             throw error
         }
+    }
+
+    private func detachedWorkspaceRelayTokenHex() -> String {
+        (UUID().uuidString + UUID().uuidString)
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+    }
+
+    private func sshOptionsWithDetachedWorkspaceRestoreDefaults(
+        _ options: [String],
+        relayPort: Int
+    ) -> [String] {
+        var merged = options
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { option in
+                guard let key = detachedWorkspaceSSHOptionKey(option) else { return true }
+                return !["controlmaster", "controlpersist", "controlpath"].contains(key)
+            }
+        if !hasDetachedWorkspaceSSHOptionKey(merged, key: "StrictHostKeyChecking") {
+            merged.append("StrictHostKeyChecking=accept-new")
+        }
+        let controlMaster = detachedWorkspaceSSHOptionValue(named: "ControlMaster", in: merged)
+        let controlMasterDisabled = detachedWorkspaceSSHOptionValueIsDisabled(controlMaster)
+        if controlMaster == nil {
+            merged.append("ControlMaster=auto")
+        }
+        if !controlMasterDisabled {
+            if !hasDetachedWorkspaceSSHOptionKey(merged, key: "ControlPersist") {
+                merged.append("ControlPersist=600")
+            }
+            if !hasDetachedWorkspaceSSHOptionKey(merged, key: "ControlPath") {
+                merged.append("ControlPath=/tmp/cmux-ssh-\(getuid())-\(relayPort)-%C")
+            }
+        }
+        return merged
+    }
+
+    private func detachedWorkspaceSSHOptionKey(_ option: String) -> String? {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let equals = trimmed.firstIndex(of: "=") {
+            return String(trimmed[..<equals])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        }
+        return trimmed
+            .split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            .first
+            .map(String.init)?
+            .lowercased()
+    }
+
+    private func hasDetachedWorkspaceSSHOptionKey(_ options: [String], key: String) -> Bool {
+        detachedWorkspaceSSHOptionValue(named: key, in: options) != nil
+    }
+
+    private func detachedWorkspaceSSHOptionValue(named name: String, in options: [String]) -> String? {
+        let loweredName = name.lowercased()
+        for option in options {
+            let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let equals = trimmed.firstIndex(of: "=") {
+                let key = String(trimmed[..<equals]).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard key.lowercased() == loweredName else { continue }
+                let value = String(trimmed[trimmed.index(after: equals)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                return value.isEmpty ? nil : value
+            }
+            let parts = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard parts.first.map({ String($0).lowercased() }) == loweredName else { continue }
+            guard parts.count > 1 else { return nil }
+            let value = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
+    private func detachedWorkspaceSSHOptionValueIsDisabled(
+        _ rawValue: String?,
+        zeroIsDisabled: Bool = true
+    ) -> Bool {
+        guard let normalized = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        return ["no", "false", "off"].contains(normalized) || (zeroIsDisabled && normalized == "0")
     }
 
     private func waitForRemoteDaemonReady(
