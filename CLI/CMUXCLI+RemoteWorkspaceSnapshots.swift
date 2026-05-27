@@ -573,11 +573,13 @@ extension CMUXCLI {
             throw CLIError(message: "Resolving by --host requires --slot when --workspace-id is omitted")
         }
         let results = listDetachedWorkspaces(on: hosts, timeout: timeout)
-        let matches: [(DetachedWorkspaceHostRecord, DetachedWorkspaceSnapshotEntry)] = results.flatMap { result in
-            guard result.error == nil,
-                  let host = hosts.first(where: { $0.host == result.host }) else { return [] }
-            return result.snapshots.compactMap { snapshot in
-                snapshot.workspaceID == workspaceID ? (host, snapshot) : nil
+        var matches: [(DetachedWorkspaceHostRecord, DetachedWorkspaceSnapshotEntry)] = []
+        for result in results where result.error == nil {
+            guard let host = hosts.first(where: { $0.host == result.host }) else {
+                continue
+            }
+            for snapshot in result.snapshots where snapshot.workspaceID == workspaceID {
+                matches.append((host, snapshot))
             }
         }
         if matches.isEmpty {
