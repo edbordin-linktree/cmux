@@ -1482,7 +1482,7 @@ struct SessionPanelSnapshot: Codable, Sendable {
     var rightSidebarTool: SessionRightSidebarToolPanelSnapshot?
 }
 
-enum SessionSplitOrientation: String, Codable, Sendable {
+enum SessionSplitOrientation: String, Codable, Sendable, Equatable {
     case horizontal
     case vertical
 
@@ -1505,19 +1505,19 @@ enum SessionSplitOrientation: String, Codable, Sendable {
     }
 }
 
-struct SessionPaneLayoutSnapshot: Codable, Sendable {
+struct SessionPaneLayoutSnapshot: Codable, Sendable, Equatable {
     var panelIds: [UUID]
     var selectedPanelId: UUID?
 }
 
-struct SessionSplitLayoutSnapshot: Codable, Sendable {
+struct SessionSplitLayoutSnapshot: Codable, Sendable, Equatable {
     var orientation: SessionSplitOrientation
     var dividerPosition: Double
     var first: SessionWorkspaceLayoutSnapshot
     var second: SessionWorkspaceLayoutSnapshot
 }
 
-indirect enum SessionWorkspaceLayoutSnapshot: Codable, Sendable {
+indirect enum SessionWorkspaceLayoutSnapshot: Codable, Sendable, Equatable {
     case pane(SessionPaneLayoutSnapshot)
     case split(SessionSplitLayoutSnapshot)
 
