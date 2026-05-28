@@ -459,7 +459,7 @@ Craft should not require these for detached supervisor correctness:
 
 ### Dashboard UI Actions
 
-The Craft dashboard web server should ideally run on the remote host inside the dashboard's cmux workspace. When that dashboard workspace is attached to the Mac Swift UI, the injected remote `cmux` wrapper has a live relay/socket path back to Swift. In that state, user-facing UI actions can use normal cmux commands and should behave as they do locally:
+The Craft dashboard web server should ideally run on the remote host inside the orchestrator workspace. When the orchestrator workspace is attached to the Mac Swift UI, the injected remote `cmux` wrapper has a live relay/socket path back to Swift. In that state, user-facing UI actions can use normal cmux commands and should behave as they do locally:
 
 ```bash
 cmux select-workspace --workspace <workspace>
