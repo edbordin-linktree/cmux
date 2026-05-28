@@ -6,6 +6,30 @@ Source branch:
 https://github.com/edbordin-linktree/cmux/tree/local/remote-workspace-snapshots
 ```
 
+This branch combines two layers:
+
+- an unmerged upstream remote-session base that runs a persistent `cmuxd-remote` daemon on the SSH host;
+- local additions on this branch that snapshot and restore workspace layout around that daemon.
+
+## General Model
+
+The remote host does not run the full cmux workspace UI. The Swift app on the Mac still owns the real workspace model while attached: sidebar entries, split layout, tabs, browser surfaces, focus, and most workspace commands are Swift/UI state.
+
+The remote host owns long-lived terminal processes. The unmerged base branch adds a persistent `cmuxd-remote` daemon under `~/.cmux/daemon/<slot>/`. That daemon keeps PTY sessions alive and exposes primitives such as `pty.attach` and `pty.detach`, so a terminal process can survive the Mac UI closing its surface or losing the relay.
+
+This branch builds a workspace illusion on top of that PTY layer:
+
+- while attached, Swift periodically writes a workspace snapshot to the remote daemon slot;
+- when the user detaches, Swift stores a final `detached` snapshot, detaches terminal surfaces from their PTYs, releases local browser/UI surfaces, and removes the workspace from the Mac sidebar;
+- while detached or disconnected, scripts on the remote host can perform a restricted set of mutations against that snapshot;
+- when the user attaches or reconnects, Swift fetches the remote snapshot, rebuilds the workspace UI locally, and reattaches terminal surfaces to the still-running remote PTYs.
+
+So the workspace appears to be maintained on the server, but that is mostly a snapshot/recreate mechanism. Terminal process state is genuinely server-side because the daemon owns the PTYs. Browser state, split-tree rendering, sidebar presence, focus, and most UI behavior are reconstructed by the Mac app from the saved snapshot.
+
+The snapshot layer intentionally keeps browser recovery shallow: browser surfaces reopen at the saved URL, but WKWebView cookies, scroll position, back/forward state, devtools, and local data stores are not part of the remote snapshot.
+
+## Current Branch Additions
+
 This branch adds detached remote workspace snapshots, hidden workspace metadata, a Host Manager UI, and a restricted remote-headless command path for scripts running on an SSH host.
 
 The core behavior Craft should rely on is:
