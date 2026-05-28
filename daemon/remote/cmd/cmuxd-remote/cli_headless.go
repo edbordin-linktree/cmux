@@ -31,7 +31,7 @@ var headlessStartPTYFunc = headlessStartPTY
 func runHeadlessCLICommand(commandName, method string, params map[string]any, jsonOutput bool, relayErr error) (int, bool) {
 	switch method {
 	case "metadata.set", "metadata.get", "metadata.list", "metadata.clear",
-		"workspace.lookup", "workspace.create", "system.tree",
+		"workspace.lookup", "system.tree",
 		"surface.create", "pane.create", "surface.split", "surface.close",
 		"surface.send_text", "surface.send_key",
 		"workspace.rename", "tab.action",
@@ -71,8 +71,6 @@ func runHeadlessCLIResult(method string, params map[string]any) (map[string]any,
 		return headlessMetadataClear(params)
 	case "workspace.lookup":
 		return headlessWorkspaceLookup(params)
-	case "workspace.create":
-		return headlessCreateWorkspace(params)
 	case "system.tree":
 		snap, err := loadHeadlessSnapshot(params)
 		if err != nil {
@@ -139,7 +137,7 @@ func headlessCreateWorkspace(params map[string]any) (map[string]any, error) {
 		"workspaceId":   workspaceID,
 		"title":         title,
 		"detachedAt":    now,
-		"displayTarget": headlessDisplayTarget(slot),
+		"displayTarget": headlessDisplayTarget(slot, stringFromAny(params["destination"])),
 		"splitTree": map[string]any{
 			"type": "pane",
 			"pane": map[string]any{
@@ -190,6 +188,7 @@ func headlessCreateWorkspace(params map[string]any) (map[string]any, error) {
 		"persistent_daemon_slot": slot,
 		"detached":               true,
 		"snapshot_sha256":        sha,
+		"destination":            stringFromAny(params["destination"]),
 	}, nil
 }
 
@@ -1104,7 +1103,11 @@ func headlessWorkspaceDefaultTitle(cwd string) string {
 	return base
 }
 
-func headlessDisplayTarget(slot string) string {
+func headlessDisplayTarget(slot string, destination string) string {
+	destination = strings.TrimSpace(destination)
+	if destination != "" {
+		return destination + ":" + slot
+	}
 	host, err := os.Hostname()
 	if err != nil || strings.TrimSpace(host) == "" {
 		host = "remote"

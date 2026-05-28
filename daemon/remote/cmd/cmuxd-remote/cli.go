@@ -180,8 +180,14 @@ doneFlags:
 		refreshAddr = readSocketAddrFile
 	}
 	if socketPath == "" {
+		if cmdName == "ssh" {
+			return runSSHRelay("", cmdArgs, jsonOutput, nil)
+		}
 		fmt.Fprintln(os.Stderr, "cmux: CMUX_SOCKET_PATH not set and --socket not provided")
 		return 1
+	}
+	if cmdName == "ssh" {
+		return runSSHRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
 	}
 
 	// Special case: "rpc" passthrough
@@ -388,6 +394,269 @@ func runStatusRelay(socketPath string, cmdName string, args []string, jsonOutput
 		fmt.Println()
 	}
 	return 0
+}
+
+type remoteSSHCLIOptions struct {
+	destination    string
+	name           string
+	cwd            string
+	port           string
+	identity       string
+	noFocus        bool
+	sshOptions     []string
+	extraArguments []string
+	jsonOutput     bool
+}
+
+func runSSHRelay(socketPath string, args []string, jsonOutput bool, refreshAddr func() string) int {
+	options, err := parseRemoteSSHCLIOptions(args, jsonOutput)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
+		return 2
+	}
+	params := remoteSSHWorkspaceParams(options)
+	if strings.TrimSpace(socketPath) != "" {
+		resp, err := socketRoundTripV2(socketPath, "workspace.remote.ssh_create", params, refreshAddr)
+		if err == nil {
+			if options.jsonOutput {
+				fmt.Println(resp)
+			} else {
+				fmt.Println(defaultRelayOutput(resp))
+			}
+			return 0
+		}
+	}
+	if !remoteSSHDestinationIsSameHost(options.destination) {
+		fmt.Fprintf(
+			os.Stderr,
+			"cmux: remote cmux ssh currently supports same-host workspace creation only; run cmux ssh from the Mac for %q\n",
+			options.destination,
+		)
+		return 2
+	}
+
+	result, err := headlessCreateWorkspace(params)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmux: ssh same-host detached workspace creation failed: %v\n", err)
+		return 1
+	}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmux: failed to encode ssh result: %v\n", err)
+		return 1
+	}
+	if options.jsonOutput {
+		fmt.Println(string(payload))
+	} else {
+		fmt.Println(defaultRelayOutput(string(payload)))
+	}
+	return 0
+}
+
+func remoteSSHWorkspaceParams(options remoteSSHCLIOptions) map[string]any {
+	cwd := strings.TrimSpace(options.cwd)
+	if cwd == "" {
+		if current, err := os.Getwd(); err == nil {
+			cwd = current
+		}
+	}
+	command := remoteSSHShellJoin(options.extraArguments)
+	params := map[string]any{
+		"destination":     options.destination,
+		"cwd":             cwd,
+		"initial_command": command,
+		"focus":           !options.noFocus,
+		"same_host":       remoteSSHDestinationIsSameHost(options.destination),
+	}
+	if strings.TrimSpace(options.name) != "" {
+		params["title"] = strings.TrimSpace(options.name)
+	}
+	if strings.TrimSpace(options.port) != "" {
+		params["port"] = strings.TrimSpace(options.port)
+	}
+	if strings.TrimSpace(options.identity) != "" {
+		params["identity_file"] = strings.TrimSpace(options.identity)
+	}
+	if len(options.sshOptions) > 0 {
+		params["ssh_options"] = options.sshOptions
+	}
+	return params
+}
+
+func parseRemoteSSHCLIOptions(args []string, jsonOutput bool) (remoteSSHCLIOptions, error) {
+	var options remoteSSHCLIOptions
+	options.jsonOutput = jsonOutput
+	passthrough := false
+	for i := 0; i < len(args); {
+		arg := args[i]
+		if passthrough {
+			options.extraArguments = append(options.extraArguments, arg)
+			i++
+			continue
+		}
+		switch arg {
+		case "--":
+			passthrough = true
+			i++
+		case "--json":
+			options.jsonOutput = true
+			i++
+		case "--port":
+			value, next, err := remoteSSHFlagValue(args, i, arg)
+			if err != nil {
+				return options, err
+			}
+			options.port = value
+			i = next
+		case "--identity":
+			value, next, err := remoteSSHFlagValue(args, i, arg)
+			if err != nil {
+				return options, err
+			}
+			options.identity = value
+			i = next
+		case "--name":
+			value, next, err := remoteSSHFlagValue(args, i, arg)
+			if err != nil {
+				return options, err
+			}
+			options.name = value
+			i = next
+		case "--cwd", "--working-directory":
+			value, next, err := remoteSSHFlagValue(args, i, arg)
+			if err != nil {
+				return options, err
+			}
+			options.cwd = resolveCLIPath(value)
+			i = next
+		case "--no-focus":
+			options.noFocus = true
+			i++
+		case "--ssh-option":
+			value, next, err := remoteSSHFlagValue(args, i, arg)
+			if err != nil {
+				return options, err
+			}
+			value = strings.TrimSpace(value)
+			if value != "" {
+				options.sshOptions = append(options.sshOptions, value)
+			}
+			i = next
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return options, fmt.Errorf("ssh: unknown flag %q", arg)
+			}
+			if options.destination == "" {
+				if strings.HasPrefix(arg, "-") {
+					return options, errors.New("ssh: destination must be <user@host>")
+				}
+				options.destination = arg
+			} else {
+				options.extraArguments = append(options.extraArguments, arg)
+			}
+			i++
+		}
+	}
+	if strings.TrimSpace(options.destination) == "" {
+		return options, errors.New("ssh requires a destination (example: cmux ssh user@host)")
+	}
+	return options, nil
+}
+
+func remoteSSHFlagValue(args []string, index int, flag string) (string, int, error) {
+	if index+1 >= len(args) {
+		return "", index, fmt.Errorf("ssh: %s requires a value", flag)
+	}
+	return args[index+1], index + 2, nil
+}
+
+func remoteSSHShellJoin(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, remoteSSHShellQuote(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func remoteSSHShellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			strings.ContainsRune("@%_+=:,./-", r) {
+			continue
+		}
+		safe = false
+		break
+	}
+	if safe {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func remoteSSHDestinationIsSameHost(destination string) bool {
+	host := remoteSSHHostPart(destination)
+	if host == "" {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	candidates := map[string]bool{}
+	addHostCandidate := func(value string) {
+		value = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(value), "."))
+		if value == "" {
+			return
+		}
+		candidates[value] = true
+		if dot := strings.IndexByte(value, '.'); dot > 0 {
+			candidates[value[:dot]] = true
+		}
+	}
+	if local, err := os.Hostname(); err == nil {
+		addHostCandidate(local)
+	}
+	addHostCandidate(os.Getenv("HOSTNAME"))
+	addHostCandidate(os.Getenv("HOST"))
+	return candidates[host]
+}
+
+func remoteSSHHostPart(destination string) string {
+	destination = strings.TrimSpace(destination)
+	if destination == "" {
+		return ""
+	}
+	if at := strings.LastIndex(destination, "@"); at >= 0 {
+		destination = destination[at+1:]
+	}
+	if strings.HasPrefix(destination, "[") {
+		if end := strings.Index(destination, "]"); end > 0 {
+			return destination[1:end]
+		}
+	}
+	if colon := strings.LastIndex(destination, ":"); colon > 0 && !strings.Contains(destination[colon+1:], "/") {
+		possiblePort := destination[colon+1:]
+		allDigits := possiblePort != ""
+		for _, r := range possiblePort {
+			if r < '0' || r > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			destination = destination[:colon]
+		}
+	}
+	return strings.TrimSpace(destination)
 }
 
 func parseSetStatusCommand(args []string) (string, map[string]any, error) {
@@ -1318,6 +1587,7 @@ func cliUsage() {
 	fmt.Fprintln(os.Stderr, "  list-workspaces           List all workspaces")
 	fmt.Fprintln(os.Stderr, "  new-window                Create a new window")
 	fmt.Fprintln(os.Stderr, "  new-workspace             Create a new workspace")
+	fmt.Fprintln(os.Stderr, "  ssh <host>                Create an SSH workspace; falls back to same-host detached creation")
 	fmt.Fprintln(os.Stderr, "  new-surface               Create a new surface")
 	fmt.Fprintln(os.Stderr, "  new-split                 Split an existing surface")
 	fmt.Fprintln(os.Stderr, "  close-surface             Close a surface")

@@ -3,6 +3,7 @@ import Carbon.HIToolbox
 import CMUXWorkstream
 import Foundation
 import Bonsplit
+import Security
 import WebKit
 
 extension Notification.Name {
@@ -3420,6 +3421,8 @@ class TerminalController {
             return v2Result(id: id, self.v2MetadataClear(params: params))
         case "workspace.remote.configure":
             return v2Result(id: id, self.v2WorkspaceRemoteConfigure(params: params))
+        case "workspace.remote.ssh_create":
+            return v2Result(id: id, self.v2WorkspaceRemoteSSHCreate(params: params))
         case "workspace.remote.foreground_auth_ready":
             return v2Result(id: id, self.v2WorkspaceRemoteForegroundAuthReady(params: params))
         case "workspace.remote.reconnect":
@@ -3866,6 +3869,7 @@ class TerminalController {
             "metadata.list",
             "metadata.clear",
             "workspace.remote.configure",
+            "workspace.remote.ssh_create",
             "workspace.remote.foreground_auth_ready",
             "workspace.remote.reconnect",
             "workspace.remote.disconnect",
@@ -5174,6 +5178,58 @@ class TerminalController {
             .replacingOccurrences(of: "|", with: "%7C")
             .replacingOccurrences(of: "\n", with: "%0A")
             .replacingOccurrences(of: "\r", with: "%0D")
+    }
+
+    private static func v2GenerateRemoteRelayPort() -> Int {
+        Int.random(in: 49152...65535)
+    }
+
+    private static func v2RandomHex(byteCount: Int) throws -> String {
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else {
+            throw NSError(domain: "cmux.socket", code: 71, userInfo: [
+                NSLocalizedDescriptionKey: "failed to generate random bytes",
+            ])
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func v2RemoteSSHWorkspaceTerminalCommand(
+        workspaceID: UUID,
+        surfaceID: UUID,
+        persistentDaemonSlot: String,
+        relayPort: Int,
+        cwd: String?,
+        initialCommand: String?
+    ) -> String {
+        var statements = [
+            "export CMUX_WORKSPACE_ID=\(v2ShellSingleQuoted(workspaceID.uuidString))",
+            "export CMUX_TAB_ID=\(v2ShellSingleQuoted(workspaceID.uuidString))",
+            "export CMUX_SURFACE_ID=\(v2ShellSingleQuoted(surfaceID.uuidString))",
+            "export CMUX_PANEL_ID=\(v2ShellSingleQuoted(surfaceID.uuidString))",
+            "export CMUX_REMOTE_DAEMON_SLOT=\(v2ShellSingleQuoted(persistentDaemonSlot))",
+            "export CMUX_SOCKET_PATH=\(v2ShellSingleQuoted("127.0.0.1:\(relayPort)"))",
+            #"export PATH="$HOME/.cmux/bin:$PATH""#,
+            #"export CMUX_BUNDLED_CLI_PATH="$HOME/.cmux/bin/cmux""#,
+        ]
+        if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
+            statements.append("cd -- \(v2ShellSingleQuoted(cwd))")
+        }
+        if let initialCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !initialCommand.isEmpty {
+            statements.append("exec /bin/sh -lc \(v2ShellSingleQuoted(initialCommand))")
+        } else {
+            statements.append(#"exec "${SHELL:-/bin/sh}" -l"#)
+        }
+        return statements.joined(separator: "; ")
+    }
+
+    private static func v2ShellSingleQuoted(_ value: String) -> String {
+        if value.isEmpty {
+            return "''"
+        }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
     nonisolated func v2NonEmptyString(_ raw: String?) -> String? {
@@ -7223,6 +7279,94 @@ class TerminalController {
         }
 
         return result
+    }
+
+    private func v2WorkspaceRemoteSSHCreate(params: [String: Any]) -> V2CallResult {
+        guard let destination = v2RawString(params, "destination")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !destination.isEmpty else {
+            return .err(code: "invalid_params", message: "Missing destination", data: nil)
+        }
+        let cwd = v2RawString(params, "cwd")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let initialCommand = v2RawString(params, "initial_command")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = v2RawString(params, "title")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let focus = v2Bool(params, "focus") ?? false
+        let relayPort = Self.v2GenerateRemoteRelayPort()
+        let relayID = UUID().uuidString.lowercased()
+        let relayToken: String
+        do {
+            relayToken = try Self.v2RandomHex(byteCount: 32)
+        } catch {
+            return .err(code: "internal_error", message: "failed to generate SSH relay credential", data: nil)
+        }
+
+        let createResult = v2WorkspaceCreate(params: [
+            "cwd": cwd ?? "",
+            "title": title ?? "",
+            "focus": focus,
+        ])
+        let createPayload: [String: Any]
+        switch createResult {
+        case .ok(let payload as [String: Any]):
+            createPayload = payload
+        case .ok:
+            return .err(code: "internal_error", message: "workspace.create returned invalid payload", data: nil)
+        case .err(let code, let message, let data):
+            return .err(code: code, message: message, data: data)
+        }
+        guard let workspaceIDRaw = createPayload["workspace_id"] as? String,
+              let workspaceID = UUID(uuidString: workspaceIDRaw),
+              let surfaceIDRaw = createPayload["surface_id"] as? String,
+              let surfaceID = UUID(uuidString: surfaceIDRaw) else {
+            return .err(code: "internal_error", message: "workspace.create did not return workspace and surface IDs", data: createPayload)
+        }
+
+        let persistentDaemonSlot = "ssh-\(UUID().uuidString.lowercased())"
+        let terminalStartupCommand = Self.v2RemoteSSHWorkspaceTerminalCommand(
+            workspaceID: workspaceID,
+            surfaceID: surfaceID,
+            persistentDaemonSlot: persistentDaemonSlot,
+            relayPort: relayPort,
+            cwd: cwd,
+            initialCommand: initialCommand
+        )
+        var configureParams: [String: Any] = [
+            "workspace_id": workspaceID.uuidString,
+            "destination": destination,
+            "auto_connect": true,
+            "relay_port": relayPort,
+            "relay_id": relayID,
+            "relay_token": relayToken,
+            "local_socket_path": currentSocketPathForRemoteRestore(),
+            "terminal_startup_command": terminalStartupCommand,
+            "preserve_after_terminal_exit": true,
+            "persistent_daemon_slot": persistentDaemonSlot,
+        ]
+        if let port = v2StrictInt(params, "port") {
+            configureParams["port"] = port
+        }
+        if let identityFile = v2RawString(params, "identity_file")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !identityFile.isEmpty {
+            configureParams["identity_file"] = identityFile
+        }
+        if let sshOptions = v2StringArray(params, "ssh_options"), !sshOptions.isEmpty {
+            configureParams["ssh_options"] = sshOptions
+        }
+
+        let configureResult = v2WorkspaceRemoteConfigure(params: configureParams)
+        switch configureResult {
+        case .ok(let payload as [String: Any]):
+            var merged = payload
+            merged["surface_id"] = surfaceID.uuidString
+            merged["surface_ref"] = v2Ref(kind: .surface, uuid: surfaceID)
+            merged["persistent_daemon_slot"] = persistentDaemonSlot
+            merged["remote_relay_port"] = relayPort
+            return .ok(merged)
+        case .ok(let payload):
+            return .ok(payload)
+        case .err(let code, let message, let data):
+            _ = v2WorkspaceClose(params: ["workspace_id": workspaceID.uuidString])
+            return .err(code: code, message: message, data: data)
+        }
     }
 
     private func v2WorkspaceRemoteDisconnect(params: [String: Any]) -> V2CallResult {

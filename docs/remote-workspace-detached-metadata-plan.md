@@ -346,7 +346,7 @@ When the Mac relay is gone, these commands fall back to mutating or reading the 
 cmux metadata set|get|list|clear --workspace current ...
 cmux workspace lookup --metadata <key=value> [--include-detached] --json
 cmux tree --workspace current --json
-cmux new-workspace --cwd <path> [--name <title>] [--command <cmd>] [--json]
+cmux ssh <same-host> [--cwd <path>] [--name <title>] [--json] [-- <cmd>]
 cmux new-pane --workspace current --type terminal|browser [--direction <dir>] [--url <url>] [--command <cmd>] [--focus true|false]
 cmux new-surface --workspace current --type terminal|browser [--pane <pane>] [--url <url>] [--command <cmd>] [--focus true|false]
 cmux new-split <dir> --workspace current [--surface <surface>] [--type terminal|browser] [--url <url>] [--command <cmd>] [--focus true|false]
@@ -363,7 +363,9 @@ cmux send-key [--workspace current] --surface <surface> <key>
 
 The remote wrapper accepts `--json` before or after the command for these daemon-relayed commands, so both `cmux --json new-surface ...` and `cmux new-surface ... --json` are valid.
 
-Detached `new-workspace --cwd` creates a new persistent daemon slot, starts the workspace's initial terminal PTY in that remote working directory, writes a detached workspace snapshot for the new workspace, and returns the new `workspace_id`, `surface_id`, and `persistent_daemon_slot`. This is intended for remote supervisor scripts that need to spawn task workspaces while the Mac UI is detached.
+Remote `cmux ssh <host>` is the workspace creation primitive for supervisor scripts. When the Swift relay is available, the wrapper sends `workspace.remote.ssh_create` to the Mac app so the new workspace is created through the normal attached UI path and appears in the sidebar. When the relay is unavailable, the wrapper only supports same-host destinations (`localhost`, the current hostname, or `user@current-host`) and falls back to creating a detached snapshot directly on the remote host: it creates a new persistent daemon slot, starts the workspace's initial terminal PTY in the requested remote working directory, writes `workspace-snapshot.json` / `.meta.json`, and returns the new `workspace_id`, `surface_id`, and `persistent_daemon_slot`.
+
+Remote `cmux new-workspace` remains the generic UI workspace command. It routes to Swift when attached, but it does not create detached remote snapshots when the UI is unavailable.
 
 For detached-capable mutations, `--workspace current` means the caller workspace from `CMUX_WORKSPACE_ID` / `CMUX_REMOTE_DAEMON_SLOT`. An explicit workspace ID is a target context switch: the remote CLI resolves `~/.cmux/daemon/*/workspace-snapshot.meta.json` to find the target slot, tries the target slot's `relay_socket` if Swift is currently attached to that workspace, and falls back to mutating that target snapshot if the relay is unavailable. PTY operations use the target slot's daemon. This is what lets an orchestrator running in one remote workspace create or maintain surfaces in task workspaces while the Mac UI is attached to either workspace, detached from either workspace, or temporarily disconnected.
 
@@ -542,7 +544,7 @@ The existing discoverer-specific path should become a normal agent surface with 
 
 Known raw cmux call sites to consolidate into the provider layer on the Craft `feat/refactor` branch:
 
-- `bin/orchestrator.sh`: first-run cmux workspace bootstrap currently calls `cmux new-workspace`, `rename-workspace`, `tree`, `rename-tab`, `send`, `send-key`, and `select-workspace` directly. Move workspace identity/surface recording through the provider; keep `select-workspace` as a relay-only UI action.
+- `bin/orchestrator.sh`: first-run cmux workspace bootstrap currently calls `cmux new-workspace`, `rename-workspace`, `tree`, `rename-tab`, `send`, `send-key`, and `select-workspace` directly. Replace remote task workspace creation with `cmux ssh <same-host> --cwd <task-dir> --name <title> --json`; move workspace identity/surface recording through the provider; keep `select-workspace` as a relay-only UI action.
 - `bin/lib/mux-cmux.sh`: this is the main cmux provider today, but it mixes provider primitives with title-prefix lookup, tab-title lookup, dashboard surface management, architect/task pane setup, and UI focus. Split this into metadata-based workspace/surface primitives plus thin compatibility wrappers.
 - `plugins/craft-dashboard/dashboard/cmux.ts`: dashboard focus logic shells out to `cmux` directly and still relies on title/tab matching and status reads. Keep a dashboard-specific wrapper if useful, but route identity through metadata/tree and classify focus/select/attach failures as `cmux_ui_unavailable`.
 - `plugins/craft-dashboard/scripts/set-task-state`: finds task workspaces with `cmux tree --all --json` title matching before `set-status`. Replace workspace lookup with metadata lookup; keep `set-status` for visible feedback only.

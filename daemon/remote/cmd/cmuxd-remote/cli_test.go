@@ -1287,7 +1287,41 @@ func TestCLIHeadlessWorkspaceLookupFallback(t *testing.T) {
 	}
 }
 
-func TestCLIHeadlessNewWorkspaceFallbackCreatesDetachedSnapshot(t *testing.T) {
+func TestCLISSHRoutesToSwiftWhenRelayAvailable(t *testing.T) {
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", sockPath, "--json", "ssh", "localhost", "--cwd", "/tmp/project", "--name", "Attached Task", "--", "printf", "hello world"})
+		if code != 0 {
+			t.Fatalf("ssh returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"method":"workspace.remote.ssh_create"`) {
+		t.Fatalf("ssh output should come from Swift relay: %s", output)
+	}
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "workspace.remote.ssh_create" {
+			t.Fatalf("expected workspace.remote.ssh_create, got %v", got)
+		}
+		params, _ := req["params"].(map[string]any)
+		if got := params["destination"]; got != "localhost" {
+			t.Fatalf("destination = %v, want localhost", got)
+		}
+		if got := params["cwd"]; got != "/tmp/project" {
+			t.Fatalf("cwd = %v, want /tmp/project", got)
+		}
+		if got := params["title"]; got != "Attached Task" {
+			t.Fatalf("title = %v, want Attached Task", got)
+		}
+		if got := params["initial_command"]; got != "printf 'hello world'" {
+			t.Fatalf("initial_command = %v, want printf 'hello world'", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ssh create request")
+	}
+}
+
+func TestCLIHeadlessSSHSameHostFallbackCreatesDetachedSnapshot(t *testing.T) {
 	root := t.TempDir()
 	cwd := filepath.Join(root, "project")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -1308,9 +1342,9 @@ func TestCLIHeadlessNewWorkspaceFallbackCreatesDetachedSnapshot(t *testing.T) {
 	t.Cleanup(func() { headlessStartPTYFunc = oldStartPTY })
 
 	output := captureStdout(t, func() {
-		code := runCLI([]string{"--socket", missingSocket, "--json", "new-workspace", "--cwd", cwd, "--name", "Detached Task", "--command", "printf hi"})
+		code := runCLI([]string{"--socket", missingSocket, "--json", "ssh", "localhost", "--cwd", cwd, "--name", "Detached Task", "--", "printf hi"})
 		if code != 0 {
-			t.Fatalf("new-workspace returned %d", code)
+			t.Fatalf("ssh returned %d", code)
 		}
 	})
 	var result map[string]any
@@ -1361,6 +1395,22 @@ func TestCLIHeadlessNewWorkspaceFallbackCreatesDetachedSnapshot(t *testing.T) {
 	}
 	if meta.Status != "detached" {
 		t.Fatalf("meta status = %q, want detached", meta.Status)
+	}
+}
+
+func TestCLIHeadlessNewWorkspaceDoesNotCreateDetachedSnapshot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "new-workspace", "--cwd", root, "--name", "Wrong Primitive"})
+	if code == 0 {
+		t.Fatal("new-workspace should not fall back to detached snapshot creation")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("new-workspace created daemon entries: %v", entries)
 	}
 }
 
