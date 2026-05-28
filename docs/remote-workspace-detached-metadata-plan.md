@@ -324,7 +324,7 @@ cmux workspace lookup \
   --json
 ```
 
-Attached workspaces are searched first. With `--include-detached`, cmux also searches detached remote snapshots discovered from the host registry.
+Attached workspaces are searched first. With `--include-detached`, cmux also searches detached remote snapshots. From the Mac app this uses the host registry; from a remote/headless cmux session this scans that remote host's daemon snapshots.
 
 ### Remote-Headless Commands
 
@@ -362,6 +362,8 @@ cmux send-key [--workspace current] --surface <surface> <key>
 ```
 
 The remote wrapper accepts `--json` before or after the command for these daemon-relayed commands, so both `cmux --json new-surface ...` and `cmux new-surface ... --json` are valid.
+
+Remote/headless `cmux workspace lookup` is a query command. If the Swift relay is available, it routes to Swift and searches the workspaces Swift knows about. If the relay is unavailable and `--include-detached` is absent, it returns an empty match set. If `--include-detached` is present, it scans all detached snapshots under the current remote host's daemon root and matches by metadata.
 
 Remote `cmux ssh <host>` is the workspace creation primitive for supervisor scripts. Use the canonical SSH destination that the Mac-side cmux app can also use for this host, for example `ed@tdb`, rather than `localhost`. When the Swift relay is available, the wrapper sends `workspace.remote.ssh_create` to the Mac app so the new workspace is created through the normal attached UI path and appears in the sidebar. When the relay is unavailable, the wrapper only supports same-host destinations (`localhost`, the current hostname, or `user@current-host`) and falls back to creating a detached snapshot directly on the remote host: it creates a new persistent daemon slot, starts the workspace's initial terminal PTY in the requested remote working directory, writes `workspace-snapshot.json` / `.meta.json`, and returns the new `workspace_id`, `surface_id`, and `persistent_daemon_slot`.
 

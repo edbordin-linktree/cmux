@@ -1266,7 +1266,7 @@ func TestCLIHeadlessMetadataFallbackMutatesSnapshot(t *testing.T) {
 	}
 }
 
-func TestCLIHeadlessWorkspaceLookupFallback(t *testing.T) {
+func TestCLIHeadlessWorkspaceLookupWithoutIncludeDetachedReturnsEmpty(t *testing.T) {
 	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
 	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
 	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
@@ -1282,8 +1282,58 @@ func TestCLIHeadlessWorkspaceLookupFallback(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
+	if result["count"] != float64(0) {
+		t.Fatalf("lookup count = %v, want 0", result["count"])
+	}
+	if result["detached_searched"] != false {
+		t.Fatalf("detached_searched = %v, want false", result["detached_searched"])
+	}
+}
+
+func TestCLIHeadlessWorkspaceLookupIncludeDetachedScansAllSnapshots(t *testing.T) {
+	root, callerWorkspaceID, callerSlot := writeHeadlessCLITestSnapshot(t)
+	targetWorkspaceID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	targetSlot := "slot-b"
+	targetSurfaceID := "22222222-2222-4222-8222-222222222222"
+	writeHeadlessCLITestSnapshotAtWithMetadata(t, root, targetWorkspaceID, targetSlot, "Target Workspace", targetSurfaceID, map[string]string{
+		"craft:project-id": "craft-remote",
+		"craft:task-id":    "target-task",
+	})
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", callerWorkspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", callerSlot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{
+			"--socket", filepath.Join(t.TempDir(), "missing.sock"),
+			"--json",
+			"workspace", "lookup",
+			"--include-detached",
+			"--metadata", "craft:project-id=craft-remote",
+			"--metadata", "craft:task-id=target-task",
+		})
+		if code != 0 {
+			t.Fatalf("workspace lookup returned %d", code)
+		}
+	})
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
 	if result["count"] != float64(1) {
 		t.Fatalf("lookup count = %v, want 1", result["count"])
+	}
+	matches, _ := result["matches"].([]any)
+	if len(matches) != 1 {
+		t.Fatalf("matches len = %d, want 1", len(matches))
+	}
+	match, _ := matches[0].(map[string]any)
+	if got := match["id"]; got != targetWorkspaceID {
+		t.Fatalf("match id = %v, want %s", got, targetWorkspaceID)
+	}
+	callerBody := readHeadlessCLITestBody(t, root, callerSlot)
+	if got := headlessMetadataMap(callerBody)["craft:task-id"]; got != "task-1" {
+		t.Fatalf("caller metadata changed to %q", got)
 	}
 }
 
@@ -1678,6 +1728,12 @@ func writeHeadlessCLITestSnapshot(t *testing.T) (root string, workspaceID string
 }
 
 func writeHeadlessCLITestSnapshotAt(t *testing.T, root string, workspaceID string, slot string, title string, surfaceID string) {
+	writeHeadlessCLITestSnapshotAtWithMetadata(t, root, workspaceID, slot, title, surfaceID, map[string]string{
+		"craft:task-id": "task-1",
+	})
+}
+
+func writeHeadlessCLITestSnapshotAtWithMetadata(t *testing.T, root string, workspaceID string, slot string, title string, surfaceID string, metadata map[string]string) {
 	t.Helper()
 	slotDir := filepath.Join(root, slot)
 	if err := os.MkdirAll(slotDir, 0o700); err != nil {
@@ -1704,10 +1760,8 @@ func writeHeadlessCLITestSnapshotAt(t *testing.T, root string, workspaceID strin
 				"title":              "Terminal",
 			},
 		}},
-		"activePaneId": surfaceID,
-		"metadataEntries": map[string]string{
-			"craft:task-id": "task-1",
-		},
+		"activePaneId":    surfaceID,
+		"metadataEntries": metadata,
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {

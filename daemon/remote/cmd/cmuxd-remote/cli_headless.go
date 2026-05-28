@@ -399,10 +399,6 @@ func headlessMetadataClear(params map[string]any) (map[string]any, error) {
 }
 
 func headlessWorkspaceLookup(params map[string]any) (map[string]any, error) {
-	snap, err := loadHeadlessSnapshot(params)
-	if err != nil {
-		return nil, err
-	}
 	criteria, ok := params["metadata"].(map[string]string)
 	if !ok {
 		raw, _ := params["metadata"].(map[string]any)
@@ -414,28 +410,108 @@ func headlessWorkspaceLookup(params map[string]any) (map[string]any, error) {
 	if len(criteria) == 0 {
 		return nil, errors.New("workspace.lookup requires metadata criteria")
 	}
-	metadata := headlessMetadataMap(snap.body)
-	matches := true
-	for key, value := range criteria {
-		if metadata[key] != value {
-			matches = false
-			break
-		}
-	}
+
+	includeDetached := boolFromAny(params["include_detached"])
 	result := map[string]any{
 		"criteria":          criteria,
-		"include_detached":  true,
-		"detached_searched": true,
+		"include_detached":  includeDetached,
+		"detached_searched": false,
 		"matches":           []map[string]any{},
 		"count":             0,
 	}
-	if matches {
+	if !includeDetached {
+		return result, nil
+	}
+
+	snapshots, errors := loadAllHeadlessSnapshots()
+	result["detached_searched"] = true
+	if len(errors) > 0 {
+		result["detached_errors"] = errors
+	}
+	matches := make([]map[string]any, 0)
+	for _, snap := range snapshots {
+		metadata := headlessMetadataMap(snap.body)
+		if !headlessMetadataMatches(metadata, criteria) {
+			continue
+		}
 		item := headlessWorkspaceSummary(snap)
 		item["metadata"] = metadata
-		result["matches"] = []map[string]any{item}
-		result["count"] = 1
+		matches = append(matches, item)
+	}
+	result["matches"] = matches
+	result["count"] = len(matches)
+	if len(matches) == 1 {
+		result["workspace"] = matches[0]
 	}
 	return result, nil
+}
+
+func loadAllHeadlessSnapshots() ([]*headlessSnapshot, []map[string]any) {
+	rootBase, err := headlessDaemonRoot()
+	if err != nil {
+		return nil, []map[string]any{{"error": err.Error()}}
+	}
+	entries, err := os.ReadDir(rootBase)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, []map[string]any{{"error": err.Error()}}
+	}
+	var snapshots []*headlessSnapshot
+	var loadErrors []map[string]any
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		slot := entry.Name()
+		paths, err := persistentDaemonPathsForSlot(slot)
+		if err != nil {
+			loadErrors = append(loadErrors, map[string]any{"slot": slot, "error": err.Error()})
+			continue
+		}
+		bodyPath := filepath.Join(paths.root, workspaceSnapshotBodyFile)
+		metaPath := filepath.Join(paths.root, workspaceSnapshotMetaFile)
+		bodyBytes, bodyErr := os.ReadFile(bodyPath)
+		metaBytes, metaErr := os.ReadFile(metaPath)
+		if bodyErr != nil || metaErr != nil {
+			continue
+		}
+		var meta workspaceSnapshotMeta
+		if err := json.Unmarshal(metaBytes, &meta); err != nil {
+			loadErrors = append(loadErrors, map[string]any{"slot": slot, "error": "decode detached snapshot metadata: " + err.Error()})
+			continue
+		}
+		var body map[string]any
+		if err := json.Unmarshal(bodyBytes, &body); err != nil {
+			loadErrors = append(loadErrors, map[string]any{"slot": slot, "error": "decode detached snapshot body: " + err.Error()})
+			continue
+		}
+		snapshots = append(snapshots, &headlessSnapshot{
+			slot:     slot,
+			root:     paths.root,
+			bodyPath: bodyPath,
+			metaPath: metaPath,
+			body:     body,
+			meta:     meta,
+		})
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		if snapshots[i].meta.WorkspaceID != snapshots[j].meta.WorkspaceID {
+			return snapshots[i].meta.WorkspaceID < snapshots[j].meta.WorkspaceID
+		}
+		return snapshots[i].slot < snapshots[j].slot
+	})
+	return snapshots, loadErrors
+}
+
+func headlessMetadataMatches(metadata map[string]string, criteria map[string]string) bool {
+	for key, value := range criteria {
+		if metadata[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func headlessCreateSurface(params map[string]any, splitPane bool) (map[string]any, error) {
@@ -1452,6 +1528,18 @@ func intFromAny(value any) int {
 		return i
 	default:
 		return 0
+	}
+}
+
+func boolFromAny(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, _ := strconv.ParseBool(strings.TrimSpace(typed))
+		return parsed
+	default:
+		return false
 	}
 }
 
