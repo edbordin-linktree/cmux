@@ -7317,7 +7317,7 @@ class TerminalController {
             persistentDaemonSlot: persistentDaemonSlot,
             relayPort: relayPort,
             cwd: cwd,
-            initialCommand: nil
+            initialCommand: initialCommand
         )
         let terminalStartupCommand = SSHPTYAttachStartupCommandBuilder.command(
             requireExisting: false,
@@ -7377,13 +7377,6 @@ class TerminalController {
         let configureResult = v2WorkspaceRemoteConfigure(params: configureParams)
         switch configureResult {
         case .ok(let payload as [String: Any]):
-            if let initialCommand, !initialCommand.isEmpty {
-                _ = v2SurfaceSendText(params: [
-                    "workspace_id": workspaceID.uuidString,
-                    "surface_id": surfaceID.uuidString,
-                    "text": "exec /bin/sh -lc \(Self.v2ShellSingleQuoted(initialCommand))\n",
-                ])
-            }
             var merged = payload
             merged["surface_id"] = surfaceID.uuidString
             merged["surface_ref"] = v2Ref(kind: .surface, uuid: surfaceID)

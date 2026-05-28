@@ -6657,10 +6657,22 @@ struct CMUXCLI {
         // gateway forwards shell-request PTYs but stalls on exec-channel I/O, and the bootstrap
         // script is only meaningful if cmuxd-remote is participating. Let ssh open a plain
         // interactive shell instead.
+        let remoteInitialCommand = sshOptions.extraArguments.isEmpty
+            ? nil
+            : sshRemoteInitialCommandText(sshOptions.extraArguments)
+        var initialRemoteTerminalBootstrapScript: String?
         var remoteTerminalBootstrapScript: String?
         if sshOptions.skipDaemonBootstrap {
+            initialRemoteTerminalBootstrapScript = nil
             remoteTerminalBootstrapScript = nil
         } else {
+            initialRemoteTerminalBootstrapScript = buildInteractiveRemoteShellScript(
+                remoteRelayPort: sshOptions.remoteRelayPort,
+                shellFeatures: shellFeaturesValue,
+                cwd: sshOptions.cwd,
+                initialCommand: remoteInitialCommand,
+                terminfoSource: terminfoSource
+            )
             remoteTerminalBootstrapScript = buildInteractiveRemoteShellScript(
                 remoteRelayPort: sshOptions.remoteRelayPort,
                 shellFeatures: shellFeaturesValue,
@@ -6696,6 +6708,12 @@ struct CMUXCLI {
         let persistentDaemonSlot = usesPersistentSSHPTY
             ? "ssh-\(UUID().uuidString.lowercased())"
             : nil
+        if let script = initialRemoteTerminalBootstrapScript {
+            initialRemoteTerminalBootstrapScript = script.replacingOccurrences(
+                of: "__CMUX_PERSISTENT_DAEMON_SLOT__",
+                with: persistentDaemonSlot ?? ""
+            )
+        }
         if let script = remoteTerminalBootstrapScript {
             remoteTerminalBootstrapScript = script.replacingOccurrences(
                 of: "__CMUX_PERSISTENT_DAEMON_SLOT__",
@@ -6713,10 +6731,11 @@ struct CMUXCLI {
         )
         var initialSSHStartupCommand: String
         var remoteTerminalSSHStartupCommand: String
-        if let remoteTerminalBootstrapScript, !remoteTerminalBootstrapScript.isEmpty {
+        if let initialRemoteTerminalBootstrapScript, !initialRemoteTerminalBootstrapScript.isEmpty,
+           let remoteTerminalBootstrapScript, !remoteTerminalBootstrapScript.isEmpty {
             initialSSHStartupCommand = try buildBootstrapSSHStartupCommand(
                 options: sshOptions,
-                remoteBootstrapScript: remoteTerminalBootstrapScript,
+                remoteBootstrapScript: initialRemoteTerminalBootstrapScript,
                 shellFeatures: shellFeaturesValue,
                 remoteRelayPort: sshOptions.remoteRelayPort,
                 localCommandScript: combinedLocalCommandScript,
@@ -6745,15 +6764,22 @@ struct CMUXCLI {
             )
         }
         if usesPersistentSSHPTY,
+           let initialRemoteTerminalBootstrapScript,
            let remoteTerminalBootstrapScript {
-            let ptyStartupCommand = buildReusableForegroundAuthThenSSHPTYAttachStartupCommand(
+            let initialPTYStartupCommand = buildReusableForegroundAuthThenSSHPTYAttachStartupCommand(
+                options: sshOptions,
+                remoteShellCommand: initialRemoteTerminalBootstrapScript,
+                localCommandScript: combinedLocalCommandScript,
+                controlPathPreflightShellFunction: controlPathPreflightShellFunction
+            )
+            let reusablePTYStartupCommand = buildReusableForegroundAuthThenSSHPTYAttachStartupCommand(
                 options: sshOptions,
                 remoteShellCommand: remoteTerminalBootstrapScript,
                 localCommandScript: combinedLocalCommandScript,
                 controlPathPreflightShellFunction: controlPathPreflightShellFunction
             )
-            initialSSHStartupCommand = ptyStartupCommand
-            remoteTerminalSSHStartupCommand = ptyStartupCommand
+            initialSSHStartupCommand = initialPTYStartupCommand
+            remoteTerminalSSHStartupCommand = reusablePTYStartupCommand
         }
         let reusableTerminalStartupCommand: String
         if let vmIDForSplitAttach,
@@ -6883,18 +6909,6 @@ struct CMUXCLI {
                     "workspace=\(String(workspaceId.prefix(8))) stage=workspace.select elapsedMs=\(Int(Date().timeIntervalSince(selectStartedAt) * 1000))"
                 )
             }
-            if !sshOptions.extraArguments.isEmpty {
-                guard let workspaceInitialSurfaceId else {
-                    throw CLIError(message: "cmux could not resolve the initial terminal surface for remote command startup")
-                }
-                let remoteCommand = sshRemoteInitialCommandText(sshOptions.extraArguments)
-                let sendText = "exec /bin/sh -lc \(shellQuote(remoteCommand))\n"
-                _ = try client.sendV2(method: "surface.send_text", params: [
-                    "workspace_id": workspaceId,
-                    "surface_id": workspaceInitialSurfaceId,
-                    "text": sendText,
-                ])
-            }
             let remoteState = ((configuredPayload["remote"] as? [String: Any])?["state"] as? String) ?? "unknown"
             cliDebugLog(
                 "cli.ssh.remote.configure.ok workspace=\(String(workspaceId.prefix(8))) state=\(remoteState)"
@@ -6939,6 +6953,10 @@ struct CMUXCLI {
         }
         if let persistentDaemonSlot {
             payload["persistent_daemon_slot"] = persistentDaemonSlot
+        }
+        if let workspaceInitialSurfaceId {
+            payload["surface_id"] = workspaceInitialSurfaceId
+            payload["surface_ref"] = workspaceCreate["surface_ref"] ?? "surface:\(workspaceInitialSurfaceId)"
         }
         logSSHTiming("complete", extra: "workspace=\(String(workspaceId.prefix(8)))")
         if jsonOutput {
@@ -7328,6 +7346,7 @@ struct CMUXCLI {
         remoteRelayPort: Int,
         shellFeatures: String,
         cwd: String? = nil,
+        initialCommand: String? = nil,
         terminfoSource: String? = nil
     ) -> String {
         let remoteTerminalLines = interactiveRemoteTerminalSetupLines(terminfoSource: terminfoSource)
@@ -7355,6 +7374,7 @@ struct CMUXCLI {
             "hash -r >/dev/null 2>&1 || true",
             "rehash >/dev/null 2>&1 || true",
         ])
+        let relayWarmupLines = interactiveRemoteRelayWarmupLines(remoteRelayPort: remoteRelayPort)
         var zshShellLines = commonShellExportLines
         zshShellLines.append(
             #"if [ "${CMUX_SHELL_INTEGRATION:-1}" != "0" ] && [ -r "${CMUX_SHELL_INTEGRATION_DIR}/cmux-zsh-integration.zsh" ]; then . "${CMUX_SHELL_INTEGRATION_DIR}/cmux-zsh-integration.zsh"; fi"#
@@ -7374,7 +7394,6 @@ struct CMUXCLI {
             "if [ -f \"$HOME/.bash_profile\" ]; then . \"$HOME/.bash_profile\"; elif [ -f \"$HOME/.bash_login\" ]; then . \"$HOME/.bash_login\"; elif [ -f \"$HOME/.profile\" ]; then . \"$HOME/.profile\"; fi",
             "[ -f \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"",
         ] + bashShellLines
-        let relayWarmupLines = interactiveRemoteRelayWarmupLines(remoteRelayPort: remoteRelayPort)
 
         var outerLines: [String] = [
             "mkdir -p \"$HOME/.cmux/relay\"",
@@ -7398,6 +7417,12 @@ struct CMUXCLI {
         outerLines.append(contentsOf: commonShellExportLines)
         if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
             outerLines.append("cd -- \(shellQuote(cwd)) || exit $?")
+        }
+        outerLines.append(contentsOf: relayWarmupLines)
+        if let initialCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !initialCommand.isEmpty {
+            outerLines.append("exec /bin/sh -lc \(shellQuote(initialCommand))")
+            return outerLines.joined(separator: "\n")
         }
         outerLines += [
             "CMUX_LOGIN_SHELL=\"${SHELL:-/bin/zsh}\"",
