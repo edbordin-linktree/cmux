@@ -3378,6 +3378,8 @@ class TerminalController {
         // Workspaces
         case "workspace.list":
             return v2Result(id: id, self.v2WorkspaceList(params: params))
+        case "workspace.lookup":
+            return v2Result(id: id, self.v2WorkspaceLookup(params: params))
         case "workspace.create":
             return v2Result(id: id, self.v2WorkspaceCreate(params: params))
         case "workspace.select":
@@ -3408,6 +3410,14 @@ class TerminalController {
             return v2Result(id: id, self.v2WorkspaceLast(params: params))
         case "workspace.equalize_splits":
             return v2Result(id: id, self.v2WorkspaceEqualizeSplits(params: params))
+        case "metadata.set":
+            return v2Result(id: id, self.v2MetadataSet(params: params))
+        case "metadata.get":
+            return v2Result(id: id, self.v2MetadataGet(params: params))
+        case "metadata.list":
+            return v2Result(id: id, self.v2MetadataList(params: params))
+        case "metadata.clear":
+            return v2Result(id: id, self.v2MetadataClear(params: params))
         case "workspace.remote.configure":
             return v2Result(id: id, self.v2WorkspaceRemoteConfigure(params: params))
         case "workspace.remote.foreground_auth_ready":
@@ -3418,6 +3428,8 @@ class TerminalController {
             return v2Result(id: id, self.v2WorkspaceRemoteDisconnect(params: params))
         case "workspace.remote.status":
             return v2Result(id: id, self.v2WorkspaceRemoteStatus(params: params))
+        case "workspace.remote.snapshot_find_attached":
+            return v2Result(id: id, self.v2WorkspaceRemoteSnapshotFindAttached(params: params))
         case "workspace.remote.snapshot_detach":
             return v2Result(id: id, self.v2WorkspaceRemoteSnapshotDetach(params: params))
         case "workspace.remote.snapshot_restore":
@@ -3833,6 +3845,7 @@ class TerminalController {
             "window.create",
             "window.close",
             "workspace.list",
+            "workspace.lookup",
             "workspace.create",
             "workspace.select",
             "workspace.current",
@@ -3848,6 +3861,10 @@ class TerminalController {
             "workspace.previous",
             "workspace.last",
             "workspace.equalize_splits",
+            "metadata.set",
+            "metadata.get",
+            "metadata.list",
+            "metadata.clear",
             "workspace.remote.configure",
             "workspace.remote.foreground_auth_ready",
             "workspace.remote.reconnect",
@@ -4302,6 +4319,20 @@ class TerminalController {
             return v2WindowNotFoundResult(params: params, windowId: requestedWindowId)
         }
         if let workspaceFilter, !workspaceFound {
+            if routing.requestedWindowId == nil,
+               let detached = v2DetachedWorkspaceSnapshotTarget(
+                   workspaceID: workspaceFilter,
+                   timeout: v2DetachedWorkspaceLookupTimeout(params: params)
+               ),
+               let fetched = try? v2FetchDetachedWorkspaceSnapshot(target: detached) {
+                return .ok([
+                    "active": routing.focused.isEmpty ? (NSNull() as Any) : routing.focused,
+                    "caller": routing.caller.isEmpty ? (NSNull() as Any) : routing.caller,
+                    "windows": [
+                        v2DetachedTreeWindowNode(target: detached, snapshot: fetched.snapshot)
+                    ],
+                ])
+            }
             return .err(
                 code: "not_found",
                 message: "Workspace not found",
@@ -4930,6 +4961,161 @@ class TerminalController {
         ]
     }
 
+    private func v2DetachedTreeWindowNode(
+        target: V2DetachedWorkspaceSnapshotTarget,
+        snapshot: RemoteWorkspaceSnapshotV1
+    ) -> [String: Any] {
+        let workspaceNode = v2DetachedTreeWorkspaceNode(target: target, snapshot: snapshot)
+        return [
+            "id": NSNull(),
+            "ref": NSNull(),
+            "index": 0,
+            "key": false,
+            "visible": false,
+            "detached": true,
+            "host": target.host.host,
+            "workspace_count": 1,
+            "selected_workspace_id": snapshot.workspaceId.uuidString,
+            "selected_workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+            "workspaces": [workspaceNode],
+        ]
+    }
+
+    private func v2DetachedTreeWorkspaceNode(
+        target: V2DetachedWorkspaceSnapshotTarget,
+        snapshot: RemoteWorkspaceSnapshotV1
+    ) -> [String: Any] {
+        var indexBySurfaceID: [UUID: Int] = [:]
+        let paneSnapshotsByID = snapshot.panes.reduce(into: [UUID: PaneSnapshot]()) { result, pane in
+            result[v2DetachedPaneSnapshotSurfaceID(pane)] = pane
+        }
+        let panes = v2DetachedTreePanes(
+            layout: snapshot.splitTree,
+            paneSnapshotsByID: paneSnapshotsByID,
+            activeSurfaceID: snapshot.activePaneId,
+            indexBySurfaceID: &indexBySurfaceID
+        )
+        return [
+            "id": snapshot.workspaceId.uuidString,
+            "ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+            "index": 0,
+            "title": snapshot.title,
+            "description": NSNull(),
+            "selected": false,
+            "pinned": false,
+            "attached": false,
+            "detached": true,
+            "host": target.host.host,
+            "persistent_daemon_slot": target.slot,
+            "metadata": snapshot.metadataEntries ?? [:],
+            "panes": panes,
+        ]
+    }
+
+    private func v2DetachedTreePanes(
+        layout: SessionWorkspaceLayoutSnapshot,
+        paneSnapshotsByID: [UUID: PaneSnapshot],
+        activeSurfaceID: UUID?,
+        indexBySurfaceID: inout [UUID: Int]
+    ) -> [[String: Any]] {
+        var paneIndex = 0
+        var panes: [[String: Any]] = []
+        func visit(_ node: SessionWorkspaceLayoutSnapshot) {
+            switch node {
+            case .split(let split):
+                visit(split.first)
+                visit(split.second)
+            case .pane(let pane):
+                let surfaceIDs = pane.panelIds
+                let selectedSurfaceID = pane.selectedPanelId ?? surfaceIDs.first
+                let paneID = selectedSurfaceID ?? UUID()
+                let surfaces = surfaceIDs.enumerated().map { surfaceIndex, surfaceID in
+                    indexBySurfaceID[surfaceID] = indexBySurfaceID.count
+                    return v2DetachedTreeSurfaceNode(
+                        surfaceID: surfaceID,
+                        paneSnapshot: paneSnapshotsByID[surfaceID],
+                        paneID: paneID,
+                        surfaceIndex: surfaceIndex,
+                        selected: surfaceID == selectedSurfaceID,
+                        focused: surfaceID == activeSurfaceID
+                    )
+                }
+                panes.append([
+                    "id": paneID.uuidString,
+                    "ref": v2Ref(kind: .pane, uuid: paneID),
+                    "index": paneIndex,
+                    "focused": activeSurfaceID.map { surfaceIDs.contains($0) } ?? false,
+                    "detached": true,
+                    "surface_ids": surfaceIDs.map { $0.uuidString },
+                    "surface_refs": surfaceIDs.map { v2Ref(kind: .surface, uuid: $0) },
+                    "selected_surface_id": v2OrNull(selectedSurfaceID?.uuidString),
+                    "selected_surface_ref": v2Ref(kind: .surface, uuid: selectedSurfaceID),
+                    "surface_count": surfaceIDs.count,
+                    "surfaces": surfaces,
+                ])
+                paneIndex += 1
+            }
+        }
+        visit(layout)
+        return panes
+    }
+
+    private func v2DetachedTreeSurfaceNode(
+        surfaceID: UUID,
+        paneSnapshot: PaneSnapshot?,
+        paneID: UUID,
+        surfaceIndex: Int,
+        selected: Bool,
+        focused: Bool
+    ) -> [String: Any] {
+        var item: [String: Any] = [
+            "id": surfaceID.uuidString,
+            "ref": v2Ref(kind: .surface, uuid: surfaceID),
+            "index": surfaceIndex,
+            "focused": focused,
+            "selected": selected,
+            "selected_in_pane": selected,
+            "pane_id": paneID.uuidString,
+            "pane_ref": v2Ref(kind: .pane, uuid: paneID),
+            "index_in_pane": surfaceIndex,
+            "tty": NSNull(),
+            "detached": true,
+        ]
+        switch paneSnapshot {
+        case .terminal(let terminal):
+            item["type"] = PanelType.terminal.rawValue
+            item["title"] = terminal.title ?? "Terminal"
+            item["url"] = NSNull()
+            item["remote_pty_session_id"] = terminal.remotePTYSessionId
+            item["agent_kind"] = v2OrNull(terminal.agentKind)
+        case .browser(let browser):
+            item["type"] = PanelType.browser.rawValue
+            item["title"] = browser.title ?? browser.currentURL
+            item["url"] = browser.currentURL
+        case .markdownViewer(let markdown):
+            item["type"] = PanelType.markdown.rawValue
+            item["title"] = markdown.path
+            item["url"] = NSNull()
+            item["path"] = markdown.path
+        case .none:
+            item["type"] = "unknown"
+            item["title"] = ""
+            item["url"] = NSNull()
+        }
+        return item
+    }
+
+    private func v2DetachedPaneSnapshotSurfaceID(_ pane: PaneSnapshot) -> UUID {
+        switch pane {
+        case .terminal(let terminal):
+            return terminal.paneId
+        case .browser(let browser):
+            return browser.paneId
+        case .markdownViewer(let markdown):
+            return markdown.paneId
+        }
+    }
+
     // MARK: - V2 Helpers (encoding + result plumbing)
     // MARK: - V2 Helpers (encoding + result plumbing)
 
@@ -5397,6 +5583,607 @@ class TerminalController {
         ])
     }
 
+    private struct V2DetachedWorkspaceSnapshotTarget {
+        var host: DetachedWorkspaceHostRegistryRecord
+        var slot: String
+        var workspaceID: UUID?
+        var title: String?
+        var detachedAt: Date?
+        var updatedAt: Date?
+        var status: String?
+        var bodyPresent: Bool
+    }
+
+    private struct V2DetachedWorkspaceListAllResponse: Decodable {
+        var snapshots: [V2DetachedWorkspaceSnapshotEntry]
+    }
+
+    private struct V2DetachedWorkspaceSnapshotEntry: Decodable {
+        var slot: String
+        var workspaceID: UUID?
+        var title: String?
+        var detachedAt: Date?
+        var updatedAt: Date?
+        var status: String?
+        var bodyPresent: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case slot
+            case workspaceID = "workspace_id"
+            case title
+            case detachedAt = "detached_at"
+            case updatedAt = "updated_at"
+            case status
+            case bodyPresent = "body_present"
+        }
+    }
+
+    private func v2WorkspaceLookupMetadataCriteria(params: [String: Any]) -> (criteria: [String: String], error: V2CallResult?) {
+        guard let raw = params["metadata"] else {
+            return (
+                [:],
+                .err(code: "invalid_params", message: "workspace.lookup requires metadata criteria", data: nil)
+            )
+        }
+
+        var criteria: [String: String] = [:]
+        if let dict = raw as? [String: String] {
+            criteria = dict
+        } else if let dict = raw as? [String: Any] {
+            for (key, value) in dict {
+                guard let stringValue = value as? String else {
+                    return (
+                        [:],
+                        .err(code: "invalid_params", message: "metadata values must be strings", data: ["key": key])
+                    )
+                }
+                criteria[key] = stringValue
+            }
+        } else {
+            return (
+                [:],
+                .err(code: "invalid_params", message: "metadata must be an object", data: nil)
+            )
+        }
+
+        criteria = criteria.reduce(into: [String: String]()) { result, pair in
+            let key = pair.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { return }
+            result[key] = pair.value
+        }
+        guard !criteria.isEmpty else {
+            return (
+                [:],
+                .err(code: "invalid_params", message: "workspace.lookup requires at least one metadata criterion", data: nil)
+            )
+        }
+        return (criteria, nil)
+    }
+
+    private func v2WorkspaceLookup(params: [String: Any]) -> V2CallResult {
+        let parsed = v2WorkspaceLookupMetadataCriteria(params: params)
+        if let error = parsed.error { return error }
+        let criteria = parsed.criteria
+        let includeDetached = v2Bool(params, "include_detached") ?? false
+
+        var matches: [[String: Any]] = []
+        var attachedWorkspaceIDs = Set<UUID>()
+        v2MainSync {
+            guard let app = AppDelegate.shared else { return }
+            let windows = app.listMainWindowSummaries()
+            for item in windows {
+                guard let manager = app.tabManagerFor(windowId: item.windowId) else { continue }
+                for (index, workspace) in manager.tabs.enumerated() {
+                    let matched = criteria.allSatisfy { key, value in
+                        workspace.metadataEntries[key] == value
+                    }
+                    guard matched else { continue }
+                    var payload = v2WorkspaceSummaryPayload(
+                        workspace: workspace,
+                        index: index,
+                        selected: workspace.id == manager.selectedTabId
+                    )
+                    payload["window_id"] = item.windowId.uuidString
+                    payload["window_ref"] = v2Ref(kind: .window, uuid: item.windowId)
+                    payload["attached"] = true
+                    payload["detached"] = false
+                    payload["metadata"] = workspace.metadataEntries
+                    matches.append(payload)
+                    attachedWorkspaceIDs.insert(workspace.id)
+                }
+            }
+        }
+
+        var detachedSearched = false
+        var detachedErrors: [[String: Any]] = []
+        if includeDetached {
+            detachedSearched = true
+            let targets = v2DetachedWorkspaceSnapshotTargets(timeout: v2DetachedWorkspaceLookupTimeout(params: params))
+            for target in targets where !attachedWorkspaceIDs.contains(target.workspaceID ?? UUID()) {
+                do {
+                    let fetched = try v2FetchDetachedWorkspaceSnapshot(target: target)
+                    let metadata = fetched.snapshot.metadataEntries ?? [:]
+                    guard criteria.allSatisfy({ key, value in metadata[key] == value }) else {
+                        continue
+                    }
+                    matches.append(v2DetachedWorkspaceSummaryPayload(
+                        target: target,
+                        snapshot: fetched.snapshot,
+                        metadata: metadata
+                    ))
+                } catch {
+                    detachedErrors.append([
+                        "host": target.host.host,
+                        "persistent_daemon_slot": target.slot,
+                        "error": error.localizedDescription,
+                    ])
+                }
+            }
+        }
+
+        return .ok([
+            "criteria": criteria,
+            "include_detached": includeDetached,
+            "detached_searched": detachedSearched,
+            "count": matches.count,
+            "matches": matches,
+            "workspace": matches.count == 1 ? matches[0] : NSNull(),
+            "detached_errors": detachedErrors,
+        ])
+    }
+
+    private func v2MetadataWorkspace(params: [String: Any]) -> Workspace? {
+        guard let tabManager = v2ResolveTabManager(params: params) else { return nil }
+        return v2MainSync { v2ResolveWorkspace(params: params, tabManager: tabManager) }
+    }
+
+    private func v2MetadataKey(_ params: [String: Any]) -> String? {
+        v2String(params, "key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func v2MetadataEntryPayload(workspace: Workspace, key: String, value: String) -> [String: Any] {
+        [
+            "workspace_id": workspace.id.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+            "key": key,
+            "value": value
+        ]
+    }
+
+    private func v2DetachedWorkspaceLookupTimeout(params: [String: Any]) -> TimeInterval {
+        guard let seconds = v2StrictInt(params, "timeout") else { return 5.0 }
+        return TimeInterval(max(1, min(seconds, 60)))
+    }
+
+    private func v2DetachedWorkspaceSnapshotTargets(timeout: TimeInterval) -> [V2DetachedWorkspaceSnapshotTarget] {
+        guard let registry = try? DetachedWorkspaceHostRegistry.load(), !registry.hosts.isEmpty else {
+            return []
+        }
+        var targets: [V2DetachedWorkspaceSnapshotTarget] = []
+        for host in registry.hosts {
+            let hostTargets = (try? v2ListDetachedWorkspaceSnapshotTargets(on: host, timeout: timeout)) ?? []
+            targets.append(contentsOf: hostTargets)
+        }
+        return targets.sorted {
+            if $0.host.host != $1.host.host { return $0.host.host < $1.host.host }
+            return $0.slot < $1.slot
+        }
+    }
+
+    private func v2DetachedWorkspaceSnapshotTarget(workspaceID: UUID, timeout: TimeInterval) -> V2DetachedWorkspaceSnapshotTarget? {
+        v2DetachedWorkspaceSnapshotTargets(timeout: timeout).first {
+            $0.workspaceID == workspaceID && ($0.status ?? RemoteWorkspaceSnapshotStatus.detached.rawValue) == RemoteWorkspaceSnapshotStatus.detached.rawValue
+        }
+    }
+
+    private func v2ListDetachedWorkspaceSnapshotTargets(
+        on host: DetachedWorkspaceHostRegistryRecord,
+        timeout: TimeInterval
+    ) throws -> [V2DetachedWorkspaceSnapshotTarget] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = v2DetachedWorkspaceSSHArguments(for: host, timeout: timeout) + [
+            host.host,
+            "\(host.daemonBinPath) workspace-snapshot-list-all --json",
+        ]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        if !v2WaitForProcess(process, timeout: timeout + 1) {
+            process.terminate()
+            _ = v2WaitForProcess(process, timeout: 1)
+            throw NSError(domain: "cmux.detached_workspace.lookup", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "ssh timed out after \(Int(timeout.rounded(.up)))s",
+            ])
+        }
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else {
+            let stderrText = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(domain: "cmux.detached_workspace.lookup", code: Int(process.terminationStatus), userInfo: [
+                NSLocalizedDescriptionKey: stderrText?.isEmpty == false ? stderrText! : "ssh exited \(process.terminationStatus)",
+            ])
+        }
+        let response = try RemoteWorkspaceSnapshotCodec.decoder().decode(
+            V2DetachedWorkspaceListAllResponse.self,
+            from: output
+        )
+        return response.snapshots
+            .filter { ($0.status ?? RemoteWorkspaceSnapshotStatus.detached.rawValue) == RemoteWorkspaceSnapshotStatus.detached.rawValue }
+            .map {
+                V2DetachedWorkspaceSnapshotTarget(
+                    host: host,
+                    slot: $0.slot,
+                    workspaceID: $0.workspaceID,
+                    title: $0.title,
+                    detachedAt: $0.detachedAt,
+                    updatedAt: $0.updatedAt,
+                    status: $0.status,
+                    bodyPresent: $0.bodyPresent ?? true
+                )
+            }
+    }
+
+    private func v2DetachedWorkspaceSSHArguments(
+        for host: DetachedWorkspaceHostRegistryRecord,
+        timeout: TimeInterval
+    ) -> [String] {
+        var args = [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=\(max(1, Int(timeout.rounded(.up))))",
+        ]
+        if let port = host.port, port > 0 {
+            args += ["-p", String(port)]
+        }
+        if let identity = host.identityFile?.trimmingCharacters(in: .whitespacesAndNewlines), !identity.isEmpty {
+            args += ["-i", identity]
+        }
+        for option in host.sshOptions where !option.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["-o", option]
+        }
+        return args
+    }
+
+    private func v2WaitForProcess(_ process: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(max(0.1, timeout))
+        while process.isRunning {
+            if Date() >= deadline {
+                return false
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return true
+    }
+
+    private func v2DetachedWorkspaceConfiguration(target: V2DetachedWorkspaceSnapshotTarget) -> WorkspaceRemoteConfiguration {
+        WorkspaceRemoteConfiguration(
+            transport: .ssh,
+            destination: target.host.host,
+            port: target.host.port,
+            identityFile: target.host.identityFile,
+            sshOptions: target.host.sshOptions,
+            localProxyPort: nil,
+            relayPort: nil,
+            relayID: nil,
+            relayToken: nil,
+            localSocketPath: nil,
+            terminalStartupCommand: nil,
+            foregroundAuthToken: nil,
+            daemonWebSocketEndpoint: nil,
+            preserveAfterTerminalExit: true,
+            persistentDaemonSlot: target.slot,
+            skipDaemonBootstrap: false
+        )
+    }
+
+    private func v2FetchDetachedWorkspaceSnapshot(
+        target: V2DetachedWorkspaceSnapshotTarget
+    ) throws -> (snapshot: RemoteWorkspaceSnapshotV1, sha256: String) {
+        guard target.bodyPresent else {
+            throw NSError(domain: "cmux.detached_workspace.snapshot", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Detached workspace snapshot body is missing",
+            ])
+        }
+        let configuration = v2DetachedWorkspaceConfiguration(target: target)
+        let fetch = try Workspace.fetchPreparedRemoteWorkspaceSnapshot(
+            configuration: configuration,
+            daemonPath: target.host.daemonBinPath
+        )
+        guard (fetch["exists"] as? Bool) == true,
+              let body = fetch["body"] as? String else {
+            throw NSError(domain: "cmux.detached_workspace.snapshot", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "Detached workspace snapshot is absent",
+            ])
+        }
+        let actualSHA256 = RemoteWorkspaceSnapshotCodec.sha256Hex(for: body)
+        if let meta = fetch["meta"] as? [String: Any],
+           let expectedSHA256 = meta["snapshot_sha256"] as? String,
+           !expectedSHA256.isEmpty,
+           expectedSHA256.lowercased() != actualSHA256 {
+            throw NSError(domain: "cmux.detached_workspace.snapshot", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "Detached workspace snapshot hash mismatch",
+            ])
+        }
+        return (try RemoteWorkspaceSnapshotCodec.decodeString(body), actualSHA256)
+    }
+
+    @discardableResult
+    private func v2StoreDetachedWorkspaceSnapshot(
+        _ snapshot: RemoteWorkspaceSnapshotV1,
+        target: V2DetachedWorkspaceSnapshotTarget
+    ) throws -> (stored: [String: Any], sha256: String) {
+        let body = try RemoteWorkspaceSnapshotCodec.encodeString(snapshot)
+        let sha256 = RemoteWorkspaceSnapshotCodec.sha256Hex(for: body)
+        let configuration = v2DetachedWorkspaceConfiguration(target: target)
+        let now = RemoteWorkspaceSnapshotCodec.iso8601String(Date())
+        let stored = try Workspace.storePreparedRemoteWorkspaceSnapshot(
+            configuration: configuration,
+            daemonPath: target.host.daemonBinPath,
+            workspaceID: snapshot.workspaceId.uuidString,
+            title: snapshot.title,
+            detachedAt: RemoteWorkspaceSnapshotCodec.iso8601String(snapshot.detachedAt),
+            updatedAt: now,
+            status: .detached,
+            schemaVersion: RemoteWorkspaceSnapshotVersion.v1.rawValue,
+            body: body,
+            bodySHA256: sha256
+        )
+        return (stored, sha256)
+    }
+
+    private func v2DetachedWorkspaceSummaryPayload(
+        target: V2DetachedWorkspaceSnapshotTarget,
+        snapshot: RemoteWorkspaceSnapshotV1,
+        metadata: [String: String]
+    ) -> [String: Any] {
+        [
+            "workspace_id": snapshot.workspaceId.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+            "title": snapshot.title,
+            "host": target.host.host,
+            "persistent_daemon_slot": target.slot,
+            "attached": false,
+            "detached": true,
+            "metadata": metadata,
+        ]
+    }
+
+    private func v2DetachedMetadataEntryPayload(
+        target: V2DetachedWorkspaceSnapshotTarget,
+        snapshot: RemoteWorkspaceSnapshotV1,
+        key: String,
+        value: Any,
+        exists: Bool? = nil
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "workspace_id": snapshot.workspaceId.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+            "title": snapshot.title,
+            "host": target.host.host,
+            "persistent_daemon_slot": target.slot,
+            "attached": false,
+            "detached": true,
+            "key": key,
+            "value": value,
+        ]
+        if let exists {
+            payload["exists"] = exists
+        }
+        return payload
+    }
+
+    private func v2FindDetachedMetadataTarget(params: [String: Any]) -> V2DetachedWorkspaceSnapshotTarget? {
+        guard let workspaceID = v2UUID(params, "workspace_id") else {
+            return nil
+        }
+        return v2DetachedWorkspaceSnapshotTarget(
+            workspaceID: workspaceID,
+            timeout: v2DetachedWorkspaceLookupTimeout(params: params)
+        )
+    }
+
+    private func v2MetadataSet(params: [String: Any]) -> V2CallResult {
+        guard let key = v2MetadataKey(params), !key.isEmpty else {
+            return .err(code: "invalid_params", message: "metadata.set requires key", data: nil)
+        }
+        let value = v2RawString(params, "value")
+            ?? v2RawString(params, "json_value")
+            ?? v2RawString(params, "json")
+        guard let value else {
+            return .err(code: "invalid_params", message: "metadata.set requires value", data: nil)
+        }
+        guard key.utf8.count <= 512 else {
+            return .err(code: "invalid_params", message: "metadata key is too large", data: ["limit": 512])
+        }
+        guard value.utf8.count <= 16 * 1024 else {
+            return .err(code: "invalid_params", message: "metadata value is too large", data: ["limit": 16 * 1024])
+        }
+
+        var payload: [String: Any]?
+        v2MainSync {
+            guard let workspace = v2MetadataWorkspace(params: params) else { return }
+            workspace.metadataEntries[key] = value
+            if workspace.isRemoteWorkspace {
+                _ = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
+                    workspace: workspace,
+                    status: .live,
+                    force: true,
+                    requireCapability: false
+                )
+            }
+            payload = v2MetadataEntryPayload(workspace: workspace, key: key, value: value)
+        }
+        if let payload {
+            return .ok(payload)
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            var snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            var metadata = snapshot.metadataEntries ?? [:]
+            metadata[key] = value
+            snapshot.metadataEntries = metadata
+            let stored = try v2StoreDetachedWorkspaceSnapshot(snapshot, target: target)
+            var detachedPayload = v2DetachedMetadataEntryPayload(target: target, snapshot: snapshot, key: key, value: value)
+            detachedPayload["snapshot_sha256"] = stored.sha256
+            return .ok(detachedPayload)
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2MetadataGet(params: [String: Any]) -> V2CallResult {
+        guard let key = v2MetadataKey(params), !key.isEmpty else {
+            return .err(code: "invalid_params", message: "metadata.get requires key", data: nil)
+        }
+        var result: [String: Any]?
+        v2MainSync {
+            guard let workspace = v2MetadataWorkspace(params: params) else { return }
+            if let value = workspace.metadataEntries[key] {
+                result = v2MetadataEntryPayload(workspace: workspace, key: key, value: value)
+                result?["exists"] = true
+            } else {
+                result = [
+                    "workspace_id": workspace.id.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                    "key": key,
+                    "exists": false,
+                    "value": NSNull()
+                ]
+            }
+        }
+        if let result {
+            return .ok(result)
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            let snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            if let value = snapshot.metadataEntries?[key] {
+                return .ok(v2DetachedMetadataEntryPayload(
+                    target: target,
+                    snapshot: snapshot,
+                    key: key,
+                    value: value,
+                    exists: true
+                ))
+            }
+            return .ok(v2DetachedMetadataEntryPayload(
+                target: target,
+                snapshot: snapshot,
+                key: key,
+                value: NSNull(),
+                exists: false
+            ))
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2MetadataList(params: [String: Any]) -> V2CallResult {
+        let prefix = v2RawString(params, "prefix") ?? ""
+        var result: [String: Any]?
+        v2MainSync {
+            guard let workspace = v2MetadataWorkspace(params: params) else { return }
+            let entries = workspace.metadataEntries
+                .filter { prefix.isEmpty || $0.key.hasPrefix(prefix) }
+                .sorted { lhs, rhs in lhs.key < rhs.key }
+                .map { key, value in ["key": key, "value": value] }
+            result = [
+                "workspace_id": workspace.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                "prefix": prefix.isEmpty ? NSNull() : prefix,
+                "entries": entries
+            ]
+        }
+        if let result {
+            return .ok(result)
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            let snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            let entries = (snapshot.metadataEntries ?? [:])
+                .filter { prefix.isEmpty || $0.key.hasPrefix(prefix) }
+                .sorted { lhs, rhs in lhs.key < rhs.key }
+                .map { key, value in ["key": key, "value": value] }
+            return .ok([
+                "workspace_id": snapshot.workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+                "title": snapshot.title,
+                "host": target.host.host,
+                "persistent_daemon_slot": target.slot,
+                "attached": false,
+                "detached": true,
+                "prefix": prefix.isEmpty ? NSNull() as Any : prefix,
+                "entries": entries,
+            ])
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2MetadataClear(params: [String: Any]) -> V2CallResult {
+        guard let key = v2MetadataKey(params), !key.isEmpty else {
+            return .err(code: "invalid_params", message: "metadata.clear requires key", data: nil)
+        }
+        var result: [String: Any]?
+        v2MainSync {
+            guard let workspace = v2MetadataWorkspace(params: params) else { return }
+            let removed = workspace.metadataEntries.removeValue(forKey: key) != nil
+            if removed && workspace.isRemoteWorkspace {
+                _ = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
+                    workspace: workspace,
+                    status: .live,
+                    force: true,
+                    requireCapability: false
+                )
+            }
+            result = [
+                "workspace_id": workspace.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                "key": key,
+                "cleared": removed
+            ]
+        }
+        if let result {
+            return .ok(result)
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            var snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            var metadata = snapshot.metadataEntries ?? [:]
+            let removed = metadata.removeValue(forKey: key) != nil
+            snapshot.metadataEntries = metadata
+            var payload: [String: Any] = [
+                "workspace_id": snapshot.workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+                "title": snapshot.title,
+                "host": target.host.host,
+                "persistent_daemon_slot": target.slot,
+                "attached": false,
+                "detached": true,
+                "key": key,
+                "cleared": removed,
+            ]
+            if removed {
+                let stored = try v2StoreDetachedWorkspaceSnapshot(snapshot, target: target)
+                payload["snapshot_sha256"] = stored.sha256
+            }
+            return .ok(payload)
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
     private func v2ExtensionSidebarSnapshot(params: [String: Any]) -> V2CallResult {
         guard let tabManager = v2ResolveTabManager(params: params) else {
             return .err(code: "unavailable", message: "TabManager not available", data: nil)
@@ -5488,6 +6275,14 @@ class TerminalController {
         guard let tabManager = v2ResolveTabManager(params: params) else {
             return .err(code: "unavailable", message: "TabManager not available", data: nil)
         }
+        let preferredWorkspaceId = v2UUID(params, "preferred_workspace_id")
+        if let preferredWorkspaceId,
+           tabManager.tabs.contains(where: { $0.id == preferredWorkspaceId }) {
+            return .err(code: "duplicate_workspace", message: "preferred_workspace_id is already attached", data: [
+                "workspace_id": preferredWorkspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: preferredWorkspaceId),
+            ])
+        }
 
         let requestedWorkingDirectory = v2RawString(params, "working_directory")?.trimmingCharacters(in: .whitespacesAndNewlines)
         let workingDirectory = (requestedWorkingDirectory?.isEmpty == false) ? requestedWorkingDirectory : nil
@@ -5537,6 +6332,7 @@ class TerminalController {
         let shouldFocus = v2FocusAllowed(requested: v2Bool(params, "focus") ?? false)
         v2MainSync {
             let ws = tabManager.addWorkspace(
+                id: preferredWorkspaceId ?? UUID(),
                 title: title,
                 workingDirectory: cwd,
                 initialTerminalCommand: layoutNode == nil ? initialCommand : nil,
@@ -6155,6 +6951,65 @@ class TerminalController {
         return result
     }
 
+    private func v2WorkspaceRemoteSnapshotFindAttached(params: [String: Any]) -> V2CallResult {
+        let host = (v2RawString(params, "host") ?? v2RawString(params, "destination"))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let slot = (v2RawString(params, "persistent_daemon_slot") ?? v2RawString(params, "slot"))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let host, !host.isEmpty else {
+            return .err(code: "invalid_params", message: "Missing host", data: nil)
+        }
+        guard let slot, !slot.isEmpty else {
+            return .err(code: "invalid_params", message: "Missing persistent_daemon_slot", data: nil)
+        }
+        let shouldFocus = v2Bool(params, "focus") ?? false
+
+        var payload: [String: Any]?
+        v2MainSync {
+            guard let match = RemoteWorkspaceAttachmentGuard.findAttachedWorkspace(host: host, slot: slot) else {
+                return
+            }
+            if shouldFocus {
+                RemoteWorkspaceAttachmentGuard.focus(match)
+            }
+            payload = v2AttachedRemoteWorkspacePayload(match: match, fallbackHost: host, fallbackSlot: slot)
+        }
+
+        if let payload {
+            return .ok(payload)
+        }
+        return .ok([
+            "exists": false,
+            "already_attached": false,
+            "host": host,
+            "persistent_daemon_slot": slot,
+        ])
+    }
+
+    @MainActor
+    private func v2AttachedRemoteWorkspacePayload(
+        match: RemoteWorkspaceAttachmentMatch,
+        fallbackHost: String,
+        fallbackSlot: String
+    ) -> [String: Any] {
+        let configuration = match.workspace.remoteConfiguration
+        let windowId = AppDelegate.shared?.windowId(for: match.owner)
+        return [
+            "exists": true,
+            "already_attached": true,
+            "window_id": v2OrNull(windowId?.uuidString),
+            "window_ref": v2Ref(kind: .window, uuid: windowId),
+            "workspace_id": match.workspace.id.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: match.workspace.id),
+            "local_workspace_id": match.workspace.id.uuidString,
+            "local_workspace_ref": v2Ref(kind: .workspace, uuid: match.workspace.id),
+            "title": match.workspace.title,
+            "host": configuration?.destination ?? fallbackHost,
+            "persistent_daemon_slot": configuration?.persistentDaemonSlot ?? fallbackSlot,
+            "remote": match.workspace.remoteStatusPayload(),
+        ]
+    }
+
     private func v2WorkspaceRemoteConfigure(params: [String: Any]) -> V2CallResult {
         let requestedWorkspaceId = v2UUID(params, "workspace_id")
         if v2HasNonNullParam(params, "workspace_id"), requestedWorkspaceId == nil {
@@ -6315,6 +7170,24 @@ class TerminalController {
         v2MainSync {
             guard let owner = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
                   let workspace = owner.tabs.first(where: { $0.id == workspaceId }) else {
+                return
+            }
+            if let persistentDaemonSlot,
+               let attached = RemoteWorkspaceAttachmentGuard.findAttachedWorkspace(
+                   host: destination,
+                   slot: persistentDaemonSlot,
+                   excluding: workspaceId
+               ) {
+                RemoteWorkspaceAttachmentGuard.focus(attached)
+                result = .err(
+                    code: "already_attached",
+                    message: "Remote workspace \(destination):\(persistentDaemonSlot) is already attached.",
+                    data: v2AttachedRemoteWorkspacePayload(
+                        match: attached,
+                        fallbackHost: destination,
+                        fallbackSlot: persistentDaemonSlot
+                    )
+                )
                 return
             }
 

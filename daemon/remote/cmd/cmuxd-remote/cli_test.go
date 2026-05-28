@@ -1137,3 +1137,175 @@ func TestCLIEnvVarDefaults(t *testing.T) {
 		t.Fatal("timed out waiting for close-surface payload")
 	}
 }
+
+func TestCLIHeadlessMetadataFallbackMutatesSnapshot(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "metadata", "set", "--workspace", "current", "craft:task-id", "task-2"})
+		if code != 0 {
+			t.Fatalf("metadata set returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"snapshot_sha256"`) {
+		t.Fatalf("metadata set output missing snapshot hash: %s", output)
+	}
+
+	body := readHeadlessCLITestBody(t, root, slot)
+	metadata, _ := body["metadataEntries"].(map[string]any)
+	if got := metadata["craft:task-id"]; got != "task-2" {
+		t.Fatalf("metadata value = %v, want task-2", got)
+	}
+}
+
+func TestCLIHeadlessWorkspaceLookupFallback(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "workspace", "lookup", "--metadata", "craft:task-id=task-1"})
+		if code != 0 {
+			t.Fatalf("workspace lookup returned %d", code)
+		}
+	})
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if result["count"] != float64(1) {
+		t.Fatalf("lookup count = %v, want 1", result["count"])
+	}
+}
+
+func TestCLIHeadlessNewPaneBrowserFallbackMutatesSnapshot(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "new-pane", "--workspace", "current", "--type", "browser", "--url", "https://example.com", "--direction", "right"})
+		if code != 0 {
+			t.Fatalf("new-pane returned %d", code)
+		}
+	})
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if result["type"] != "browser" {
+		t.Fatalf("created type = %v, want browser", result["type"])
+	}
+	body := readHeadlessCLITestBody(t, root, slot)
+	if stringFromAny(body["activePaneId"]) == "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("activePaneId was not updated")
+	}
+	if layout, _ := body["splitTree"].(map[string]any); stringFromAny(layout["type"]) != "split" {
+		t.Fatalf("splitTree type = %v, want split", layout["type"])
+	}
+	if got := len(headlessPaneSnapshots(body)); got != 2 {
+		t.Fatalf("pane snapshots = %d, want 2", got)
+	}
+}
+
+func TestCLIHeadlessNewPaneAcceptsFocusFalse(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "new-pane", "--workspace", "current", "--type", "browser", "--url", "https://example.com", "--direction", "right", "--focus", "false"})
+		if code != 0 {
+			t.Fatalf("new-pane returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"detached":true`) {
+		t.Fatalf("new-pane output did not look detached: %s", output)
+	}
+	body := readHeadlessCLITestBody(t, root, slot)
+	if got := stringFromAny(body["activePaneId"]); got != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("activePaneId = %q, want original pane when --focus false", got)
+	}
+}
+
+func writeHeadlessCLITestSnapshot(t *testing.T) (root string, workspaceID string, slot string) {
+	t.Helper()
+	root = t.TempDir()
+	workspaceID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	slot = "slot-a"
+	slotDir := filepath.Join(root, slot)
+	if err := os.MkdirAll(slotDir, 0o700); err != nil {
+		t.Fatalf("mkdir slot: %v", err)
+	}
+	body := map[string]any{
+		"version":       1,
+		"workspaceId":   workspaceID,
+		"title":         "Detached Test",
+		"detachedAt":    "2026-05-28T00:00:00Z",
+		"displayTarget": "test:" + slot,
+		"splitTree": map[string]any{
+			"type": "pane",
+			"pane": map[string]any{
+				"panelIds":        []string{"11111111-1111-4111-8111-111111111111"},
+				"selectedPanelId": "11111111-1111-4111-8111-111111111111",
+			},
+		},
+		"panes": []map[string]any{{
+			"type": "terminal",
+			"terminal": map[string]any{
+				"paneId":             "11111111-1111-4111-8111-111111111111",
+				"remotePTYSessionId": "sess-existing",
+				"title":              "Terminal",
+			},
+		}},
+		"activePaneId": "11111111-1111-4111-8111-111111111111",
+		"metadataEntries": map[string]string{
+			"craft:task-id": "task-1",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	sum := sha256.Sum256(bodyBytes)
+	meta := workspaceSnapshotMeta{
+		Version:        1,
+		WorkspaceID:    workspaceID,
+		Title:          "Detached Test",
+		Status:         "detached",
+		DetachedAt:     "2026-05-28T00:00:00Z",
+		SchemaVersion:  1,
+		SnapshotSHA256: hex.EncodeToString(sum[:]),
+		BodyByteLength: len(bodyBytes),
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(slotDir, workspaceSnapshotBodyFile), bodyBytes, 0o600); err != nil {
+		t.Fatalf("write body: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(slotDir, workspaceSnapshotMetaFile), metaBytes, 0o600); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	return root, workspaceID, slot
+}
+
+func readHeadlessCLITestBody(t *testing.T, root string, slot string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, slot, workspaceSnapshotBodyFile))
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	return body
+}

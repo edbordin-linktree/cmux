@@ -206,6 +206,11 @@ extension Workspace {
                     timestamp: entry.timestamp.timeIntervalSince1970
                 )
             }
+        let metadataSnapshots = metadataEntries
+            .sorted { lhs, rhs in lhs.key < rhs.key }
+            .map { key, value in
+                SessionMetadataEntrySnapshot(key: key, value: value)
+            }
         let logSnapshots = logEntries.map { entry in
             SessionLogEntrySnapshot(
                 message: entry.message,
@@ -243,6 +248,7 @@ extension Workspace {
             layout: layout,
             panels: panelSnapshots,
             statusEntries: statusSnapshots,
+            metadataEntries: metadataSnapshots,
             logEntries: logSnapshots,
             progress: progressSnapshot,
             gitBranch: gitBranchSnapshot,
@@ -314,6 +320,9 @@ extension Workspace {
         // processes (e.g. claude_code "Running"). Don't restore them across app
         // restarts because the processes that set them are gone.
         statusEntries.removeAll()
+        metadataEntries = (snapshot.metadataEntries ?? []).reduce(into: [String: String]()) { result, entry in
+            result[entry.key] = entry.value
+        }
         agentPIDs.removeAll()
         agentPIDPanelIdsByKey.removeAll()
         agentPIDKeysByPanelId.removeAll()
@@ -988,7 +997,11 @@ extension Workspace {
                 .first
 
             if anchorPanelId == nil {
-                anchorPanelId = newTerminalSurface(inPane: paneId, focus: false)?.id
+                anchorPanelId = newTerminalSurface(
+                    inPane: paneId,
+                    focus: false,
+                    inheritRemoteStartup: false
+                )?.id
             }
 
             guard let anchorPanelId,
@@ -996,7 +1009,8 @@ extension Workspace {
                     from: anchorPanelId,
                     orientation: split.orientation.splitOrientation,
                     insertFirst: false,
-                    focus: false
+                    focus: false,
+                    inheritRemoteStartup: false
                   ),
                   let secondPaneId = self.paneId(forPanelId: newSplitPanel.id) else {
                 leaves.append(
@@ -6584,6 +6598,11 @@ final class WorkspaceRemoteSessionController {
             reconnectWorkItem?.cancel()
             reconnectWorkItem = nil
             reconnectRetryCount = 0
+            publishReadyDaemonStatusAfterProxyRecoveryLocked()
+            publishState(
+                .connected,
+                detail: "Connected to \(configuration.displayTarget) via shared local proxy \(endpoint.host):\(endpoint.port)"
+            )
             guard proxyEndpoint != endpoint else {
                 recordHeartbeatActivityLocked()
                 fulfillPendingPTYBridgeStartsLocked()
@@ -6594,10 +6613,6 @@ final class WorkspaceRemoteSessionController {
             fulfillPendingPTYBridgeStartsLocked()
             updateRemotePortPollingStateLocked()
             publishPortsSnapshotLocked()
-            publishState(
-                .connected,
-                detail: "Connected to \(configuration.displayTarget) via shared local proxy \(endpoint.host):\(endpoint.port)"
-            )
             requestBootstrapRemoteTTYIfNeededLocked()
             recordHeartbeatActivityLocked()
         case .error(let detail):
@@ -6632,6 +6647,18 @@ final class WorkspaceRemoteSessionController {
                 detail: "Remote daemon transport needs re-bootstrap after proxy failure\(retrySuffix)"
             )
         }
+    }
+
+    private func publishReadyDaemonStatusAfterProxyRecoveryLocked() {
+        guard daemonReady else { return }
+        publishDaemonStatus(
+            .ready,
+            detail: "Remote daemon ready",
+            version: daemonBootstrapVersion,
+            name: "cmuxd-remote",
+            capabilities: daemonCapabilities,
+            remotePath: daemonRemotePath
+        )
     }
 
     @discardableResult
@@ -9601,6 +9628,7 @@ final class Workspace: Identifiable, ObservableObject {
     @Published private(set) var tmuxWorkspaceFlashToken: UInt64 = 0
     var manualUnreadMarkedAt: [UUID: Date] = [:]
     @Published var statusEntries: [String: SidebarStatusEntry] = [:]
+    @Published var metadataEntries: [String: String] = [:]
     @Published var metadataBlocks: [String: SidebarMetadataBlock] = [:]
     @Published private(set) var latestConversationMessage: String?
     @Published private(set) var latestSubmittedMessage: String?
@@ -9613,10 +9641,28 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var panelPullRequests: [UUID: SidebarPullRequestState] = [:]
     @Published var surfaceListeningPorts: [UUID: [Int]] = [:]
     var agentListeningPorts: [Int] = []
-    @Published var remoteConfiguration: WorkspaceRemoteConfiguration?
-    @Published var remoteConnectionState: WorkspaceRemoteConnectionState = .disconnected
+    @Published var remoteConfiguration: WorkspaceRemoteConfiguration? {
+        didSet {
+            if oldValue != remoteConfiguration {
+                NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: self)
+            }
+        }
+    }
+    @Published var remoteConnectionState: WorkspaceRemoteConnectionState = .disconnected {
+        didSet {
+            if oldValue != remoteConnectionState {
+                NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: self)
+            }
+        }
+    }
     @Published var remoteConnectionDetail: String?
-    @Published var remoteDaemonStatus: WorkspaceRemoteDaemonStatus = WorkspaceRemoteDaemonStatus()
+    @Published var remoteDaemonStatus: WorkspaceRemoteDaemonStatus = WorkspaceRemoteDaemonStatus() {
+        didSet {
+            if oldValue != remoteDaemonStatus {
+                NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: self)
+            }
+        }
+    }
     @Published var remoteDetectedPorts: [Int] = []
     @Published var remoteForwardedPorts: [Int] = []
     @Published var remotePortConflicts: [Int] = []
@@ -10115,6 +10161,7 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     init(
+        id: UUID = UUID(),
         title: String = "Terminal",
         workingDirectory: String? = nil,
         portOrdinal: Int = 0,
@@ -10123,7 +10170,7 @@ final class Workspace: Identifiable, ObservableObject {
         initialTerminalInput: String? = nil,
         initialTerminalEnvironment: [String: String] = [:], initialDetachedSurface: DetachedSurfaceTransfer? = nil
     ) {
-        self.id = UUID()
+        self.id = id
         self.portOrdinal = portOrdinal
         self.processTitle = title
         self.title = title
@@ -12068,6 +12115,104 @@ final class Workspace: Identifiable, ObservableObject {
         )
     }
 
+    nonisolated static func fetchPreparedRemoteWorkspaceSnapshot(
+        configuration: WorkspaceRemoteConfiguration,
+        daemonPath: String,
+        timeout: TimeInterval = 20.0
+    ) throws -> [String: Any] {
+        try withTemporaryRemoteWorkspaceSnapshotTunnel(
+            configuration: configuration,
+            daemonPath: daemonPath,
+            timeout: timeout
+        ) {
+            try WorkspaceRemoteProxyBroker.shared.fetchWorkspaceSnapshot(configuration: configuration)
+        }
+    }
+
+    nonisolated static func storePreparedRemoteWorkspaceSnapshot(
+        configuration: WorkspaceRemoteConfiguration,
+        daemonPath: String,
+        workspaceID: String,
+        title: String,
+        detachedAt: String,
+        updatedAt: String,
+        status: RemoteWorkspaceSnapshotStatus,
+        schemaVersion: Int,
+        body: String,
+        bodySHA256: String,
+        timeout: TimeInterval = 20.0
+    ) throws -> [String: Any] {
+        try withTemporaryRemoteWorkspaceSnapshotTunnel(
+            configuration: configuration,
+            daemonPath: daemonPath,
+            timeout: timeout
+        ) {
+            try WorkspaceRemoteProxyBroker.shared.storeWorkspaceSnapshot(
+                configuration: configuration,
+                workspaceID: workspaceID,
+                title: title,
+                detachedAt: detachedAt,
+                updatedAt: updatedAt,
+                status: status.rawValue,
+                schemaVersion: schemaVersion,
+                body: body,
+                bodySHA256: bodySHA256
+            )
+        }
+    }
+
+    nonisolated private static func withTemporaryRemoteWorkspaceSnapshotTunnel<T>(
+        configuration: WorkspaceRemoteConfiguration,
+        daemonPath: String,
+        timeout: TimeInterval,
+        _ body: () throws -> T
+    ) throws -> T {
+        let condition = NSCondition()
+        var isReady = false
+        var failure: String?
+        let lease = WorkspaceRemoteProxyBroker.shared.acquire(
+            configuration: configuration,
+            remotePath: daemonPath
+        ) { update in
+            condition.lock()
+            switch update {
+            case .connecting:
+                break
+            case .ready:
+                isReady = true
+                condition.signal()
+            case .error(let detail):
+                failure = detail
+                condition.signal()
+            }
+            condition.unlock()
+        }
+        defer { lease.release() }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        condition.lock()
+        while !isReady && failure == nil {
+            if !condition.wait(until: deadline) {
+                break
+            }
+        }
+        let ready = isReady
+        let errorDetail = failure
+        condition.unlock()
+
+        if let errorDetail {
+            throw NSError(domain: "cmux.remote.workspace_snapshot", code: 40, userInfo: [
+                NSLocalizedDescriptionKey: errorDetail,
+            ])
+        }
+        guard ready else {
+            throw NSError(domain: "cmux.remote.workspace_snapshot", code: 41, userInfo: [
+                NSLocalizedDescriptionKey: "timed out waiting for remote daemon tunnel",
+            ])
+        }
+        return try body()
+    }
+
     func fetchRemoteWorkspaceSnapshot() throws -> [String: Any] {
         guard let controller = remoteSessionController else {
             throw NSError(domain: "cmux.remote.workspace_snapshot", code: 11, userInfo: [
@@ -12702,8 +12847,27 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         remoteConnectionState = effectiveState
-        remoteConnectionDetail = detail
+        remoteConnectionDetail = (state == .error && effectiveState == .connected && proxyOnlyError) ? nil : detail
         applyBrowserRemoteWorkspaceStatusToPanels()
+
+        if effectiveState == .connected {
+            statusEntries.removeValue(forKey: Self.remoteErrorStatusKey)
+            remoteLastErrorFingerprint = nil
+            pruneResolvedRemoteLogEntries()
+            AppDelegate.shared?.notificationStore?.clearNotifications(
+                forTabId: id,
+                surfaceId: nil
+            )
+        }
+
+        guard !(state == .error && effectiveState == .connected && proxyOnlyError) else {
+#if DEBUG
+            cmuxDebugLog(
+                "remote.proxy.transientIgnored target=\(target) detail=\(trimmedDetail ?? detail ?? "unknown")"
+            )
+#endif
+            return
+        }
 
         if let trimmedDetail, !trimmedDetail.isEmpty, (state == .error || proxyOnlyError) {
             let statusPrefix = proxyOnlyError ? "Remote proxy unavailable" : "SSH error"
@@ -12742,6 +12906,7 @@ final class Workspace: Identifiable, ObservableObject {
         if state == .connected {
             statusEntries.removeValue(forKey: Self.remoteErrorStatusKey)
             remoteLastErrorFingerprint = nil
+            pruneResolvedRemoteLogEntries()
         }
     }
 
@@ -12750,6 +12915,7 @@ final class Workspace: Identifiable, ObservableObject {
         applyBrowserRemoteWorkspaceStatusToPanels()
         guard status.state == .error else {
             remoteLastDaemonErrorFingerprint = nil
+            pruneResolvedRemoteLogEntries()
             return
         }
         let trimmedDetail = status.detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "remote daemon error"
@@ -12761,6 +12927,15 @@ final class Workspace: Identifiable, ObservableObject {
             level: .error,
             source: "remote-daemon"
         )
+    }
+
+    private func pruneResolvedRemoteLogEntries() {
+        guard !logEntries.isEmpty else { return }
+        let resolvedSources: Set<String> = ["remote", "remote-daemon", "remote-proxy"]
+        logEntries.removeAll { entry in
+            guard let source = entry.source else { return false }
+            return resolvedSources.contains(source) && (entry.level == .error || entry.level == .warning)
+        }
     }
 
     fileprivate func applyRemoteProxyEndpointUpdate(_ endpoint: BrowserProxyEndpoint?) {
@@ -13032,7 +13207,8 @@ final class Workspace: Identifiable, ObservableObject {
         tmuxStartCommand: String? = nil,
         startupEnvironment: [String: String] = [:],
         initialDividerPosition: CGFloat? = nil,
-        remotePTYSessionID: String? = nil
+        remotePTYSessionID: String? = nil,
+        inheritRemoteStartup: Bool = true
     ) -> TerminalPanel? {
 #if DEBUG
         let splitTimingStart = ProcessInfo.processInfo.systemUptime
@@ -13057,7 +13233,8 @@ final class Workspace: Identifiable, ObservableObject {
         var inheritedConfig = inheritedTerminalConfig(preferredPanelId: panelId, inPane: paneId)
         let requestedInitialCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
         let explicitInitialCommand = (requestedInitialCommand?.isEmpty == false) ? requestedInitialCommand : nil
-        let remoteTerminalStartupCommand = remoteTerminalStartupCommand()
+        let rawRemoteTerminalStartupCommand = inheritRemoteStartup ? remoteTerminalStartupCommand() : nil
+        let remoteTerminalStartupCommand = remoteTerminalStartupLauncherCommand(rawRemoteTerminalStartupCommand)
         let startupCommand = explicitInitialCommand ?? remoteTerminalStartupCommand
         // Hold the pane open after the remote session ends so the user can read the
         // "ssh exited …" message the startup script prints. Otherwise Ghostty silently
@@ -13119,7 +13296,7 @@ final class Workspace: Identifiable, ObservableObject {
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         let normalizedRemotePTYSessionID = normalizedRemotePTYSessionID(remotePTYSessionID)
-        let tracksRemoteTerminalSurface = remoteTerminalStartupCommand != nil || normalizedRemotePTYSessionID != nil
+        let tracksRemoteTerminalSurface = rawRemoteTerminalStartupCommand != nil || normalizedRemotePTYSessionID != nil
         if let normalizedRemotePTYSessionID {
             remotePTYSessionIDsByPanelId[newPanel.id] = normalizedRemotePTYSessionID
         }
@@ -13223,7 +13400,8 @@ final class Workspace: Identifiable, ObservableObject {
         tmuxStartCommand: String? = nil,
         initialInput: String? = nil,
         startupEnvironment: [String: String] = [:],
-        remotePTYSessionID: String? = nil
+        remotePTYSessionID: String? = nil,
+        inheritRemoteStartup: Bool = true
     ) -> TerminalPanel? {
         let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
         let previousFocusedPanelId = focusedPanelId
@@ -13232,7 +13410,8 @@ final class Workspace: Identifiable, ObservableObject {
         var inheritedConfig = inheritedTerminalConfig(inPane: paneId)
         let requestedInitialCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
         let explicitInitialCommand = (requestedInitialCommand?.isEmpty == false) ? requestedInitialCommand : nil
-        let remoteTerminalStartupCommand = remoteTerminalStartupCommand()
+        let rawRemoteTerminalStartupCommand = inheritRemoteStartup ? remoteTerminalStartupCommand() : nil
+        let remoteTerminalStartupCommand = remoteTerminalStartupLauncherCommand(rawRemoteTerminalStartupCommand)
         let startupCommand = explicitInitialCommand ?? remoteTerminalStartupCommand
         // See the comment at the other call site: hold the PTY open after the remote
         // command exits so the user sees the error rather than a silently-respawned
@@ -13259,7 +13438,7 @@ final class Workspace: Identifiable, ObservableObject {
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         let normalizedRemotePTYSessionID = normalizedRemotePTYSessionID(remotePTYSessionID)
-        let tracksRemoteTerminalSurface = remoteTerminalStartupCommand != nil || normalizedRemotePTYSessionID != nil
+        let tracksRemoteTerminalSurface = rawRemoteTerminalStartupCommand != nil || normalizedRemotePTYSessionID != nil
         if let normalizedRemotePTYSessionID {
             remotePTYSessionIDsByPanelId[newPanel.id] = normalizedRemotePTYSessionID
         }
@@ -13321,6 +13500,17 @@ final class Workspace: Identifiable, ObservableObject {
             return nil
         }
         return command
+    }
+
+    private func remoteTerminalStartupLauncherCommand(_ command: String?) -> String? {
+        guard let command = command?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !command.isEmpty else {
+            return nil
+        }
+        return SessionRestoredTerminalCommandStore.writeLauncherScript(
+            command: command,
+            workingDirectory: nil
+        )?.path ?? command
     }
 
     /// Create a new browser panel split
@@ -14960,8 +15150,37 @@ final class Workspace: Identifiable, ObservableObject {
     /// Create a new terminal surface in the currently focused pane
     @discardableResult
     func newTerminalSurfaceInFocusedPane(focus: Bool? = nil, initialInput: String? = nil) -> TerminalPanel? {
-        guard let focusedPaneId = bonsplitController.focusedPaneId else { return nil }
-        return newTerminalSurface(inPane: focusedPaneId, focus: focus, initialInput: initialInput)
+        guard let paneId = paneForNewTerminalSurfaceShortcut() else { return nil }
+        return newTerminalSurface(inPane: paneId, focus: focus, initialInput: initialInput)
+    }
+
+    private func paneForNewTerminalSurfaceShortcut() -> PaneID? {
+        if let focusedPaneId = bonsplitController.focusedPaneId {
+            return focusedPaneId
+        }
+
+        if let focusedPanelId,
+           let paneId = paneId(forPanelId: focusedPanelId) {
+            bonsplitController.focusPane(paneId)
+            if let tabId = surfaceIdFromPanelId(focusedPanelId) {
+                bonsplitController.selectTab(tabId)
+                applyTabSelection(tabId: tabId, inPane: paneId)
+            }
+            return paneId
+        }
+
+        for paneId in bonsplitController.allPaneIds {
+            guard let tab = bonsplitController.selectedTab(inPane: paneId) ?? bonsplitController.tabs(inPane: paneId).first,
+                  panelIdFromSurfaceId(tab.id) != nil else {
+                continue
+            }
+            bonsplitController.focusPane(paneId)
+            bonsplitController.selectTab(tab.id)
+            applyTabSelection(tabId: tab.id, inPane: paneId)
+            return paneId
+        }
+
+        return bonsplitController.allPaneIds.first
     }
 
     @discardableResult
@@ -16221,7 +16440,9 @@ final class Workspace: Identifiable, ObservableObject {
     ) -> TerminalPanel? {
         var inheritedConfig = inheritedTerminalConfig(inPane: paneId)
         let requestedRemoteStartupCommand = remoteStartupCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let startupCommand = requestedRemoteStartupCommand?.isEmpty == false ? requestedRemoteStartupCommand : nil
+        let startupCommand = requestedRemoteStartupCommand?.isEmpty == false
+            ? remoteTerminalStartupLauncherCommand(requestedRemoteStartupCommand)
+            : nil
         if startupCommand != nil {
             var template = inheritedConfig ?? CmuxSurfaceConfigTemplate()
             template.waitAfterCommand = true
@@ -17434,17 +17655,28 @@ extension Workspace: BonsplitDelegate {
                     // Keep the existing placeholder tab identity and replace only the panel mapping.
                     // This avoids an extra create+close tab churn that can transiently render an
                     // empty pane during drag-to-split of a single-tab pane.
-                    let inheritedConfig = inheritedTerminalConfig(inPane: originalPane)
+                    var inheritedConfig = inheritedTerminalConfig(inPane: originalPane)
+                    let rawRemoteTerminalStartupCommand = remoteTerminalStartupCommand()
+                    let remoteTerminalStartupCommand = remoteTerminalStartupLauncherCommand(rawRemoteTerminalStartupCommand)
+                    if rawRemoteTerminalStartupCommand != nil {
+                        var template = inheritedConfig ?? CmuxSurfaceConfigTemplate()
+                        template.waitAfterCommand = true
+                        inheritedConfig = template
+                    }
 
                     let replacementPanel = TerminalPanel(
                         workspaceId: id,
                         context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
                         configTemplate: inheritedConfig,
-                        portOrdinal: portOrdinal
+                        portOrdinal: portOrdinal,
+                        initialCommand: remoteTerminalStartupCommand
                     )
                     configureTerminalPanel(replacementPanel)
                     panels[replacementPanel.id] = replacementPanel
                     panelTitles[replacementPanel.id] = replacementPanel.displayTitle
+                    if rawRemoteTerminalStartupCommand != nil {
+                        trackRemoteTerminalSurface(replacementPanel.id)
+                    }
                     seedTerminalInheritanceFontPoints(panelId: replacementPanel.id, configTemplate: inheritedConfig)
                     surfaceIdToPanelId[replacementTab.id] = replacementPanel.id
 
@@ -17499,20 +17731,31 @@ extension Workspace: BonsplitDelegate {
         )
 #endif
 
-        let inheritedConfig = inheritedTerminalConfig(
+        var inheritedConfig = inheritedTerminalConfig(
             preferredPanelId: sourcePanelId,
             inPane: originalPane
         )
+        let rawRemoteTerminalStartupCommand = remoteTerminalStartupCommand()
+        let remoteTerminalStartupCommand = remoteTerminalStartupLauncherCommand(rawRemoteTerminalStartupCommand)
+        if rawRemoteTerminalStartupCommand != nil {
+            var template = inheritedConfig ?? CmuxSurfaceConfigTemplate()
+            template.waitAfterCommand = true
+            inheritedConfig = template
+        }
 
         let newPanel = TerminalPanel(
             workspaceId: id,
             context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
             configTemplate: inheritedConfig,
-            portOrdinal: portOrdinal
+            portOrdinal: portOrdinal,
+            initialCommand: remoteTerminalStartupCommand
         )
         configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
+        if rawRemoteTerminalStartupCommand != nil {
+            trackRemoteTerminalSurface(newPanel.id)
+        }
         seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
 
         guard let newTabId = bonsplitController.createTab(
@@ -17525,6 +17768,9 @@ extension Workspace: BonsplitDelegate {
         ) else {
             panels.removeValue(forKey: newPanel.id)
             panelTitles.removeValue(forKey: newPanel.id)
+            if remoteTerminalStartupCommand != nil {
+                untrackRemoteTerminalSurface(newPanel.id)
+            }
             terminalInheritanceFontPointsByPanelId.removeValue(forKey: newPanel.id)
             return
         }

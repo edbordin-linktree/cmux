@@ -11128,6 +11128,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         titlebarAccessoryController.toggleNotificationsPopover(animated: animated, anchorView: anchorView)
     }
 
+    func toggleHostManagerPopover(animated: Bool = true, anchorView: NSView? = nil) {
+        titlebarAccessoryController.toggleHostManagerPopover(animated: animated, anchorView: anchorView)
+    }
+
     @discardableResult
     func dismissNotificationsPopoverIfShown() -> Bool {
         titlebarAccessoryController.dismissNotificationsPopoverIfShown()
@@ -12611,7 +12615,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         // New surface: Cmd+T
         if matchConfiguredShortcut(event: event, action: .newSurface) {
-            tabManager?.newSurface()
+            let routedManager = preferredMainWindowContextForShortcutRouting(event: event)?.tabManager ?? tabManager
+            routedManager?.newSurface()
             return true
         }
 

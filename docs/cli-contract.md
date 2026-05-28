@@ -95,6 +95,8 @@ Environment:
 | `reorder-workspace` | Reorder a workspace inside a window. |
 | `reorder-workspaces` | Atomically reorder workspaces inside pinned and unpinned groups. |
 | `workspace-action` | Run workspace context-menu actions from the CLI. |
+| `workspace lookup` | Look up attached workspaces, and optionally detached snapshots, by hidden metadata. |
+| `metadata` | Set, get, list, and clear hidden machine-readable workspace metadata. Detached workspace UUIDs mutate the remote snapshot directly. |
 | `move-tab-to-new-workspace` | Move a tab or surface into a newly created workspace. |
 | `list-workspaces` | List workspaces. |
 | `new-workspace` | Create a workspace, optionally with cwd, command, description, and layout. |
@@ -429,6 +431,8 @@ the expected text without connecting to a cmux socket.
 - `cmux reorder-workspace --help` -> `Usage: cmux reorder-workspace`
 - `cmux reorder-workspaces --help` -> `Usage: cmux reorder-workspaces`
 - `cmux workspace-action --help` -> `Usage: cmux workspace-action --action <name>`
+- `cmux workspace --help` -> `Usage: cmux workspace lookup`
+- `cmux metadata --help` -> `Usage: cmux metadata`
 - `cmux move-tab-to-new-workspace --help` -> `Usage: cmux move-tab-to-new-workspace`
 - `cmux tab-action --help` -> `Usage: cmux tab-action --action <name>`
 - `cmux rename-tab --help` -> `Usage: cmux rename-tab`

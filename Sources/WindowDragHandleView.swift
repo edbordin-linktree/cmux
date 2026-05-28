@@ -679,7 +679,7 @@ enum MinimalModeSidebarTitlebarControlsMetrics {
         MinimalModeTitlebarDebugSettings.leftControlsTopInset(defaults: defaults)
     }
 
-    static let hostWidth: CGFloat = 164
+    static let hostWidth: CGFloat = 192
     static let hostHeight: CGFloat = 28
     static let singleButtonHostWidth: CGFloat = hostHeight
 
@@ -782,6 +782,7 @@ private func minimalModeTrafficLightFrameInContentCoordinates(for window: NSWind
 }
 
 enum MinimalModeSidebarControlActionSlot: Int, CaseIterable {
+    case hostManager
     case toggleSidebar
     case showNotifications
     case newTab
@@ -790,6 +791,8 @@ enum MinimalModeSidebarControlActionSlot: Int, CaseIterable {
 
     var accessibilityIdentifier: String {
         switch self {
+        case .hostManager:
+            return "titlebarControl.hostManager"
         case .toggleSidebar:
             return "titlebarControl.toggleSidebar"
         case .showNotifications:
@@ -805,6 +808,8 @@ enum MinimalModeSidebarControlActionSlot: Int, CaseIterable {
 
     var accessibilityLabel: String {
         switch self {
+        case .hostManager:
+            return String(localized: "titlebar.hostManager.accessibilityLabel", defaultValue: "Host Manager")
         case .toggleSidebar:
             return String(localized: "titlebar.sidebar.accessibilityLabel", defaultValue: "Toggle Sidebar")
         case .showNotifications:
@@ -820,6 +825,8 @@ enum MinimalModeSidebarControlActionSlot: Int, CaseIterable {
 
     var debugName: String {
         switch self {
+        case .hostManager:
+            return "hostManager"
         case .toggleSidebar:
             return "toggleSidebar"
         case .showNotifications:
@@ -837,7 +844,7 @@ enum MinimalModeSidebarControlActionSlot: Int, CaseIterable {
         switch self {
         case .newTab, .focusHistoryBack, .focusHistoryForward:
             return true
-        case .toggleSidebar, .showNotifications:
+        case .hostManager, .toggleSidebar, .showNotifications:
             return false
         }
     }

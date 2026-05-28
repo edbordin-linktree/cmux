@@ -1,6 +1,10 @@
 import Foundation
 import Darwin
 
+extension Notification.Name {
+    static let remoteWorkspaceHostManagerStateDidChange = Notification.Name("cmux.remoteWorkspaceHostManagerStateDidChange")
+}
+
 struct DetachedWorkspaceHostRegistryRecord: Codable, Equatable {
     var host: String
     var port: Int?
@@ -67,6 +71,7 @@ enum DetachedWorkspaceHostRegistry {
         }
         registry.hosts.sort { $0.host < $1.host }
         try saveUnlocked(registry)
+        NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: nil)
     }
 
     private static func isFallbackDaemonBinPath(_ value: String) -> Bool {

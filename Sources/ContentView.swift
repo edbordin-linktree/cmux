@@ -2283,6 +2283,12 @@ struct ContentView: View {
         TitlebarControlsView(
             notificationStore: TerminalNotificationStore.shared,
             viewModel: fullscreenControlsViewModel,
+            onToggleHostManager: { [fullscreenControlsViewModel] in
+                AppDelegate.shared?.toggleHostManagerPopover(
+                    animated: true,
+                    anchorView: fullscreenControlsViewModel.hostManagerAnchorView
+                )
+            },
             onToggleSidebar: { sidebarState.toggle() },
             onToggleNotifications: { [fullscreenControlsViewModel] in
                 AppDelegate.shared?.toggleNotificationsPopover(
@@ -10091,6 +10097,12 @@ struct VerticalTabsSidebar: View {
                     if isMinimalMode {
                         HiddenTitlebarSidebarControlsView(
                             notificationStore: notificationStore,
+                            onToggleHostManager: { anchorView in
+                                AppDelegate.shared?.toggleHostManagerPopover(
+                                    animated: true,
+                                    anchorView: anchorView
+                                )
+                            },
                             onToggleSidebar: onToggleSidebar,
                             onToggleNotifications: { anchorView in
                                 AppDelegate.shared?.toggleNotificationsPopover(
@@ -10232,6 +10244,12 @@ struct VerticalTabsSidebar: View {
                 if isMinimalMode {
                     HiddenTitlebarSidebarControlsView(
                         notificationStore: notificationStore,
+                        onToggleHostManager: { anchorView in
+                            AppDelegate.shared?.toggleHostManagerPopover(
+                                animated: true,
+                                anchorView: anchorView
+                            )
+                        },
                         onToggleSidebar: onToggleSidebar,
                         onToggleNotifications: { anchorView in
                             AppDelegate.shared?.toggleNotificationsPopover(
@@ -14415,6 +14433,24 @@ private struct TabItemView: View, Equatable {
         }
     }
 
+    private func detachRemoteContextMenuWorkspaces() {
+        let workspaceIds = remoteContextMenuWorkspaces().map(\.id)
+        guard !workspaceIds.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        Task {
+            for workspaceId in workspaceIds {
+                do {
+                    _ = try await RemoteWorkspaceSnapshotDetachController.detach(workspaceID: workspaceId)
+                } catch {
+                    NSSound.beep()
+                    cmuxDebugLog("sidebar.contextMenu.detach.failed workspace=\(workspaceId) error=\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private var workspaceContextMenu: some View {
         let targetIds = contextMenuWorkspaceIds
@@ -14428,6 +14464,10 @@ private struct TabItemView: View, Equatable {
         let disconnectLabel = contextMenuLabel(
             multi: String(localized: "contextMenu.disconnectWorkspaces", defaultValue: "Disconnect Workspaces"),
             single: String(localized: "contextMenu.disconnectWorkspace", defaultValue: "Disconnect Workspace"),
+            isMulti: isMulti)
+        let detachLabel = contextMenuLabel(
+            multi: String(localized: "contextMenu.detachWorkspaces", defaultValue: "Detach Workspaces"),
+            single: String(localized: "contextMenu.detachWorkspace", defaultValue: "Detach Workspace"),
             isMulti: isMulti)
         let pinLabel = shouldPin
             ? contextMenuLabel(
@@ -14531,6 +14571,10 @@ private struct TabItemView: View, Equatable {
                 }
             }
             .disabled(allRemoteContextMenuTargetsDisconnected)
+
+            Button(detachLabel) {
+                detachRemoteContextMenuWorkspaces()
+            }
         }
 
         Menu(String(localized: "contextMenu.workspaceSettings", defaultValue: "Workspace Settings")) {

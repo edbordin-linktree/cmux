@@ -200,7 +200,7 @@ final class MinimalModeSidebarControlActionView: NSView {
             _ = AppDelegate.shared?.showFocusHistoryContextMenu(anchorView: self, event: event, direction: .back)
         case .focusHistoryForward:
             _ = AppDelegate.shared?.showFocusHistoryContextMenu(anchorView: self, event: event, direction: .forward)
-        case .toggleSidebar, .showNotifications:
+        case .hostManager, .toggleSidebar, .showNotifications:
             super.rightMouseDown(with: event)
         }
     }
@@ -265,6 +265,11 @@ final class MinimalModeSidebarControlActionView: NSView {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.syncButtons() }
             .store(in: &cancellables)
+
+        HostManagerPopoverVisibilityState.shared.$shownWindowNumbers
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.syncButtons() }
+            .store(in: &cancellables)
     }
 
     private func syncButtons() {
@@ -281,6 +286,7 @@ final class MinimalModeSidebarControlActionView: NSView {
         guard let window else { return false }
         return MinimalModeSidebarChromeHoverState.shared.hoveredWindowNumber == window.windowNumber
             || NotificationsPopoverVisibilityState.shared.isShown(in: window.windowNumber)
+            || HostManagerPopoverVisibilityState.shared.isShown(in: window.windowNumber)
     }
 
     private func shouldAcceptAction(at localPoint: NSPoint) -> Bool {

@@ -123,10 +123,13 @@ nonisolated enum SSHPTYAttachStartupCommandBuilder {
     static func command(
         sessionID: String? = nil,
         foregroundAuth: ForegroundAuth? = nil,
-        requireExisting: Bool = true
+        requireExisting: Bool = true,
+        preferredCLIPath: String? = defaultBundledCLIPath()
     ) -> String {
+        let preferredCLIPath = normalized(preferredCLIPath)
         var lines = [
             "cmux_ssh_attach_cli=\"${CMUX_BUNDLED_CLI_PATH:-}\"",
+            "if [ -z \"$cmux_ssh_attach_cli\" ] || [ ! -x \"$cmux_ssh_attach_cli\" ]; then cmux_ssh_attach_cli=\(shellQuote(preferredCLIPath ?? "")); fi",
             "if [ -z \"$cmux_ssh_attach_cli\" ] || [ ! -x \"$cmux_ssh_attach_cli\" ]; then cmux_ssh_attach_cli=\"$(command -v cmux 2>/dev/null || true)\"; fi",
             "if [ -z \"$cmux_ssh_attach_cli\" ]; then printf '%s\\n' '[cmux] bundled CLI not found for SSH PTY attach.' >&2; exit 127; fi",
             "if [ -z \"${CMUX_SOCKET_PATH:-}\" ]; then printf '%s\\n' '[cmux] required configuration missing for SSH PTY attach.' >&2; exit 1; fi",
@@ -260,6 +263,39 @@ nonisolated enum SSHPTYAttachStartupCommandBuilder {
             return nil
         }
         return trimmed
+    }
+
+    static func defaultBundledCLIPath(
+        bundle: Bundle = .main,
+        fileManager: FileManager = .default,
+        executableURL: URL? = processExecutableURL()
+    ) -> String? {
+        let bundleCandidate = bundle.resourceURL?.appendingPathComponent("bin/cmux")
+        if let bundleCandidate, fileManager.isExecutableFile(atPath: bundleCandidate.path) {
+            return bundleCandidate.path
+        }
+
+        guard let executableURL else { return nil }
+        let resourcesURL = executableURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources")
+        let executableCandidate = resourcesURL.appendingPathComponent("bin/cmux")
+        if fileManager.isExecutableFile(atPath: executableCandidate.path) {
+            return executableCandidate.path
+        }
+
+        return nil
+    }
+
+    private static func processExecutableURL() -> URL? {
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        guard size > 0 else { return nil }
+
+        var buffer = [CChar](repeating: 0, count: Int(size))
+        guard _NSGetExecutablePath(&buffer, &size) == 0 else { return nil }
+        return URL(fileURLWithPath: String(cString: buffer)).resolvingSymlinksInPath()
     }
 
     private static func hasSSHOptionKey(_ options: [String], key: String) -> Bool {

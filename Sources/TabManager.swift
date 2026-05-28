@@ -2493,6 +2493,7 @@ class TabManager: ObservableObject {
     }
 
     func makeWorkspaceForCreation(
+        id: UUID = UUID(),
         title: String,
         workingDirectory: String?,
         portOrdinal: Int,
@@ -2502,6 +2503,7 @@ class TabManager: ObservableObject {
         initialTerminalEnvironment: [String: String]
     ) -> Workspace {
         Workspace(
+            id: id,
             title: title,
             workingDirectory: workingDirectory,
             portOrdinal: portOrdinal,
@@ -2569,6 +2571,7 @@ class TabManager: ObservableObject {
 
     @discardableResult
     func addWorkspace(
+        id: UUID = UUID(),
         title: String? = nil,
         workingDirectory overrideWorkingDirectory: String? = nil,
         initialTerminalCommand: String? = nil,
@@ -2618,6 +2621,7 @@ class TabManager: ObservableObject {
             let ordinal = Self.nextPortOrdinal
             Self.nextPortOrdinal += 1
             let newWorkspace = makeWorkspaceForCreation(
+                id: id,
                 title: title ?? "Terminal \(nextTabCount)",
                 workingDirectory: workingDirectory,
                 portOrdinal: ordinal,

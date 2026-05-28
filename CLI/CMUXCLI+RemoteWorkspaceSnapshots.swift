@@ -272,10 +272,26 @@ extension CMUXCLI {
             slotOpt: slotOpt,
             timeout: 5
         )
+        if let attached = try findAttachedWorkspaceForSnapshot(target: target, client: client) {
+            let payload = alreadyAttachedWorkspacePayload(
+                requestedWorkspaceID: workspaceID,
+                target: target,
+                attached: attached
+            )
+            if jsonOutput {
+                print(jsonString(payload))
+            } else {
+                let localWorkspaceID = (payload["local_workspace_id"] as? String) ?? "existing workspace"
+                let title = (payload["title"] as? String) ?? "workspace"
+                print("Workspace \(workspaceID) (\(title)) is already attached as \(localWorkspaceID) from \(target.host.host):\(target.slot)")
+            }
+            return
+        }
         let title = nonEmpty(target.snapshot?.title) ?? "Detached \(String(workspaceID.prefix(8)))"
         let localWorkspaceID = try createConfiguredWorkspaceForSnapshot(
             title: title,
             target: target,
+            preferredWorkspaceID: workspaceID,
             windowRaw: windowOpt ?? windowOverride,
             client: client
         )
@@ -604,6 +620,7 @@ extension CMUXCLI {
     private func createConfiguredWorkspaceForSnapshot(
         title: String,
         target: DetachedWorkspaceResolvedTarget,
+        preferredWorkspaceID: String? = nil,
         windowRaw: String?,
         client: SocketClient
     ) throws -> String {
@@ -611,6 +628,11 @@ extension CMUXCLI {
             "title": title,
             "focus": true,
         ]
+        if let preferredWorkspaceID = nonEmpty(preferredWorkspaceID) {
+            createParams["preferred_workspace_id"] = preferredWorkspaceID
+        } else if let snapshotWorkspaceID = target.snapshot?.workspaceID {
+            createParams["preferred_workspace_id"] = snapshotWorkspaceID
+        }
         if let windowRaw = nonEmpty(windowRaw),
            let windowID = try validatedWindowHandle(windowRaw, client: client) {
             createParams["window_id"] = windowID
@@ -654,6 +676,48 @@ extension CMUXCLI {
             _ = try? client.sendV2(method: "workspace.close", params: ["workspace_id": workspaceID])
             throw error
         }
+    }
+
+    private func findAttachedWorkspaceForSnapshot(
+        target: DetachedWorkspaceResolvedTarget,
+        client: SocketClient
+    ) throws -> [String: Any]? {
+        let payload = try client.sendV2(method: "workspace.remote.snapshot_find_attached", params: [
+            "host": target.host.host,
+            "persistent_daemon_slot": target.slot,
+            "focus": true,
+        ])
+        return (payload["exists"] as? Bool) == true ? payload : nil
+    }
+
+    private func alreadyAttachedWorkspacePayload(
+        requestedWorkspaceID: String,
+        target: DetachedWorkspaceResolvedTarget,
+        attached: [String: Any]
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "workspace_id": requestedWorkspaceID,
+            "host": target.host.host,
+            "persistent_daemon_slot": target.slot,
+            "panes_restored": 0,
+            "panes_lost": 0,
+            "already_attached": true,
+        ]
+        if let localWorkspaceID = (attached["local_workspace_id"] as? String) ?? (attached["workspace_id"] as? String) {
+            payload["local_workspace_id"] = localWorkspaceID
+        }
+        if let title = attached["title"] as? String {
+            payload["title"] = title
+        } else if let title = target.snapshot?.title {
+            payload["title"] = title
+        }
+        if let windowID = attached["window_id"] {
+            payload["window_id"] = windowID
+        }
+        if let remote = attached["remote"] {
+            payload["remote"] = remote
+        }
+        return payload
     }
 
     private func detachedWorkspaceRelayTokenHex() -> String {

@@ -132,12 +132,43 @@ func titlebarControlPressedScale(isPressed _: Bool) -> CGFloat {
 }
 
 final class TitlebarControlsViewModel: ObservableObject {
+    weak var hostManagerAnchorView: NSView?
     weak var notificationsAnchorView: NSView?
 }
 
 @MainActor
 final class NotificationsAnchorRegistry {
     static let shared = NotificationsAnchorRegistry()
+
+    private let anchors = NSHashTable<NSView>.weakObjects()
+
+    private init() {}
+
+    func register(_ view: NSView) {
+        guard !anchors.contains(view) else { return }
+        anchors.add(view)
+    }
+
+    func closestAnchor(in window: NSWindow, to pointInWindow: NSPoint) -> NSView? {
+        anchors.allObjects
+            .compactMap { view -> (view: NSView, distance: CGFloat)? in
+                guard view.window === window else { return nil }
+                guard notificationsPopoverAnchorIsVisible(view) else { return nil }
+                let frameInWindow = view.convert(view.bounds, to: nil)
+                guard !frameInWindow.isEmpty else { return nil }
+                let center = NSPoint(x: frameInWindow.midX, y: frameInWindow.midY)
+                let dx = center.x - pointInWindow.x
+                let dy = center.y - pointInWindow.y
+                return (view, (dx * dx) + (dy * dy))
+            }
+            .min { $0.distance < $1.distance }?
+            .view
+    }
+}
+
+@MainActor
+final class HostManagerAnchorRegistry {
+    static let shared = HostManagerAnchorRegistry()
 
     private let anchors = NSHashTable<NSView>.weakObjects()
 
@@ -311,6 +342,22 @@ struct NotificationsAnchorView: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
+struct HostManagerAnchorView: NSViewRepresentable {
+    let onResolve: (NSView) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = AnchorNSView()
+        view.onLayout = { [weak view] in
+            guard let view else { return }
+            HostManagerAnchorRegistry.shared.register(view)
+            onResolve(view)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 final class AnchorNSView: NSView {
     var onLayout: (() -> Void)?
 
@@ -395,6 +442,7 @@ func titlebarShortcutHintVerticalOffset(for config: TitlebarControlsStyleConfig)
 }
 
 enum TitlebarShortcutHintActionSlot: Int, CaseIterable {
+    case hostManager
     case toggleSidebar
     case showNotifications
     case newTab
@@ -403,6 +451,8 @@ enum TitlebarShortcutHintActionSlot: Int, CaseIterable {
 
     var action: KeyboardShortcutSettings.Action {
         switch self {
+        case .hostManager:
+            return .toggleSidebar
         case .toggleSidebar:
             return .toggleSidebar
         case .showNotifications:
@@ -703,6 +753,7 @@ private final class TitlebarControlRightClickNSView: NSView {
 struct TitlebarControlsView: View {
     @ObservedObject var notificationStore: TerminalNotificationStore
     @ObservedObject var viewModel: TitlebarControlsViewModel
+    let onToggleHostManager: () -> Void
     let onToggleSidebar: () -> Void
     let onToggleNotifications: () -> Void
     let onNewTab: () -> Void
@@ -824,6 +875,26 @@ struct TitlebarControlsView: View {
         let hintLayoutItems = titlebarHintLayoutItems(config: config)
         let focusHistoryAvailability = focusHistoryNavigationAvailabilitySnapshot
         let content = HStack(spacing: config.spacing) {
+            TitlebarControlButton(
+                config: config,
+                foregroundColor: foregroundColor,
+                accessibilityIdentifier: "titlebarControl.hostManager",
+                accessibilityLabel: String(localized: "titlebar.hostManager.accessibilityLabel", defaultValue: "Host Manager"),
+                action: {
+                #if DEBUG
+                cmuxDebugLog("titlebar.hostManager")
+                #endif
+                onToggleHostManager()
+            }) {
+                iconLabel(
+                    systemName: "server.rack",
+                    config: config,
+                    iconGeometryKeyPrefix: "titlebarControl_hostManagerIcon"
+                )
+            }
+            .background(HostManagerAnchorView { viewModel.hostManagerAnchorView = $0 })
+            .safeHelp(String(localized: "titlebar.hostManager.tooltip", defaultValue: "Host Manager"))
+
             TitlebarControlButton(
                 config: config,
                 foregroundColor: foregroundColor,
@@ -1000,6 +1071,7 @@ struct TitlebarControlsView: View {
         guard shouldShowTitlebarShortcutHints else { return [] }
 
         return TitlebarShortcutHintActionSlot.allCases.compactMap { slot in
+            guard slot != .hostManager else { return nil }
             let shortcut = KeyboardShortcutSettings.shortcut(for: slot.action)
             guard titlebarShortcutHintShouldShow(
                 shortcut: shortcut,
@@ -1226,6 +1298,7 @@ private struct MinimalModeTitlebarButtonHitRegionView: NSViewRepresentable {
 
 struct HiddenTitlebarSidebarControlsView: View {
     @ObservedObject var notificationStore: TerminalNotificationStore
+    let onToggleHostManager: (NSView?) -> Void
     let onToggleSidebar: () -> Void
     let onToggleNotifications: (NSView?) -> Void
     let onNewTab: () -> Void
@@ -1240,6 +1313,7 @@ struct HiddenTitlebarSidebarControlsView: View {
 
     private var shouldPinControls: Bool {
         isHoveringHost || isHoveringWindowChrome || popoverVisibilityState.isShown(in: hostWindowNumber)
+            || HostManagerPopoverVisibilityState.shared.isShown(in: hostWindowNumber)
     }
 
     var body: some View {
@@ -1278,6 +1352,9 @@ struct HiddenTitlebarSidebarControlsView: View {
             TitlebarControlsView(
                 notificationStore: notificationStore,
                 viewModel: viewModel,
+                onToggleHostManager: { [viewModel] in
+                    onToggleHostManager(viewModel.hostManagerAnchorView)
+                },
                 onToggleSidebar: onToggleSidebar,
                 onToggleNotifications: { [viewModel] in
                     onToggleNotifications(viewModel.notificationsAnchorView)
@@ -1308,6 +1385,8 @@ struct HiddenTitlebarSidebarControlsView: View {
                 requiresRevealedState: true
             ) { slot, anchorView, _ in
                 switch slot {
+                case .hostManager:
+                    onToggleHostManager(anchorView)
                 case .toggleSidebar:
                     onToggleSidebar()
                 case .showNotifications:
@@ -1796,6 +1875,7 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
     private let containerView: NSView
     private let notificationStore: TerminalNotificationStore
     private lazy var notificationsPopover: NSPopover = makeNotificationsPopover()
+    private lazy var hostManagerPopover: NSPopover = makeHostManagerPopover()
     private var pendingSizeUpdate = false
     private var intrinsicSizeNeedsRefresh = true
     private var cachedContentSize: NSSize?
@@ -1806,6 +1886,7 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
     private let viewModel = TitlebarControlsViewModel()
     private var userDefaultsObserver: NSObjectProtocol?
     var popoverIsShownForTesting: Bool { notificationsPopover.isShown }
+    var hostManagerPopoverIsShownForTesting: Bool { hostManagerPopover.isShown }
     private var showsWorkspaceTitlebar: Bool { !WorkspacePresentationModeSettings.isMinimal() }
 
     init(notificationStore: TerminalNotificationStore) {
@@ -1818,6 +1899,9 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
         let toggleNotifications: () -> Void = { [weak containerView] in
             _ = AppDelegate.shared?.toggleNotificationsPopover(animated: true, anchorView: containerView)
         }
+        let toggleHostManager: () -> Void = { [weak containerView] in
+            _ = AppDelegate.shared?.toggleHostManagerPopover(animated: true, anchorView: containerView)
+        }
         let newTab = { _ = AppDelegate.shared?.performNewWorkspaceAction(debugSource: "titlebar.accessoryNewWorkspace") }
         let focusHistoryBack = { [weak containerView] in
             _ = AppDelegate.shared?.activeTabManagerForCommands(preferredWindow: containerView?.window)?.navigateBack()
@@ -1829,6 +1913,7 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
             rootView: TitlebarControlsView(
                 notificationStore: notificationStore,
                 viewModel: viewModel,
+                onToggleHostManager: toggleHostManager,
                 onToggleSidebar: toggleSidebar,
                 onToggleNotifications: toggleNotifications,
                 onNewTab: newTab,
@@ -2098,9 +2183,88 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
         )
     }
 
+    func toggleHostManagerPopover(animated: Bool = true, externalAnchor: NSView? = nil) {
+        if hostManagerPopover.isShown {
+            hostManagerPopover.animates = animated
+            hostManagerPopover.performClose(nil)
+            return
+        }
+
+        let preferredWindow = externalAnchor?.window ?? view.window ?? hostingView.window ?? NSApp.keyWindow
+        let hostingController = NSHostingController(
+            rootView: HostManagerPopoverView(
+                preferredWindow: preferredWindow,
+                onDismiss: { [weak hostManagerPopover] in
+                    hostManagerPopover?.performClose(nil)
+                }
+            )
+        )
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = .clear
+        hostManagerPopover.contentViewController = hostingController
+
+        guard let window = preferredWindow,
+              let contentView = window.contentView else {
+            return
+        }
+        contentView.layoutSubtreeIfNeeded()
+
+        if let externalAnchor, externalAnchor.window != nil {
+            let anchorView = preferredNotificationsPopoverAnchor(
+                buttonAnchor: viewModel.hostManagerAnchorView,
+                fallbackAnchor: externalAnchor
+            ) ?? externalAnchor
+            let anchorContentView = anchorView.window?.contentView ?? contentView
+            anchorContentView.layoutSubtreeIfNeeded()
+            anchorView.superview?.layoutSubtreeIfNeeded()
+            let anchorRect = anchorView.convert(anchorView.bounds, to: anchorContentView)
+            if !anchorRect.isEmpty {
+                hostManagerPopover.animates = animated
+                hostManagerPopover.show(relativeTo: anchorRect, of: anchorContentView, preferredEdge: .maxY)
+                postHostManagerPopoverVisibilityDidChange(
+                    isShown: true,
+                    source: hostManagerPopover,
+                    windowNumber: anchorView.window?.windowNumber ?? window.windowNumber
+                )
+                return
+            }
+        }
+
+        if let anchorView = viewModel.hostManagerAnchorView, anchorView.window != nil, !isHidden {
+            anchorView.superview?.layoutSubtreeIfNeeded()
+            let anchorRect = anchorView.convert(anchorView.bounds, to: contentView)
+            if !anchorRect.isEmpty {
+                hostManagerPopover.animates = animated
+                hostManagerPopover.show(relativeTo: anchorRect, of: contentView, preferredEdge: .maxY)
+                postHostManagerPopoverVisibilityDidChange(
+                    isShown: true,
+                    source: hostManagerPopover,
+                    windowNumber: window.windowNumber
+                )
+                return
+            }
+        }
+
+        let bounds = contentView.bounds
+        let anchorRect = NSRect(x: 12, y: bounds.maxY - 8, width: 1, height: 1)
+        hostManagerPopover.animates = animated
+        hostManagerPopover.show(relativeTo: anchorRect, of: contentView, preferredEdge: .maxY)
+        postHostManagerPopoverVisibilityDidChange(
+            isShown: true,
+            source: hostManagerPopover,
+            windowNumber: window.windowNumber
+        )
+    }
+
     func dismissNotificationsPopover() {
         if notificationsPopover.isShown {
             notificationsPopover.performClose(nil)
+        }
+    }
+
+    func dismissHostManagerPopover() {
+        if hostManagerPopover.isShown {
+            hostManagerPopover.performClose(nil)
         }
     }
 
@@ -2113,12 +2277,25 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
         return popover
     }
 
+    private func makeHostManagerPopover() -> NSPopover {
+        let popover = NSPopover()
+        popover.behavior = .semitransient
+        popover.animates = true
+        popover.delegate = self
+        return popover
+    }
+
     // MARK: - NSPopoverDelegate
 
     func popoverDidClose(_ notification: Notification) {
-        // Clear the content view controller to stop SwiftUI observers when popover is hidden
-        notificationsPopover.contentViewController = nil
-        postNotificationsPopoverVisibilityDidChange(isShown: false, source: notificationsPopover)
+        if let popover = notification.object as? NSPopover, popover === hostManagerPopover {
+            hostManagerPopover.contentViewController = nil
+            postHostManagerPopoverVisibilityDidChange(isShown: false, source: hostManagerPopover)
+        } else {
+            // Clear the content view controller to stop SwiftUI observers when popover is hidden
+            notificationsPopover.contentViewController = nil
+            postNotificationsPopoverVisibilityDidChange(isShown: false, source: notificationsPopover)
+        }
     }
 }
 
@@ -2315,6 +2492,8 @@ final class UpdateTitlebarAccessoryController {
     private var lastKnownPresentationMode: WorkspacePresentationModeSettings.Mode = WorkspacePresentationModeSettings.mode()
     private var detachedNotificationsPopover: NSPopover?
     private var detachedNotificationsPopoverDelegate: DetachedNotificationsPopoverDelegate?
+    private var detachedHostManagerPopover: NSPopover?
+    private var detachedHostManagerPopoverDelegate: DetachedNotificationsPopoverDelegate?
 
     init(viewModel: UpdateViewModel) {
         self.updateViewModel = viewModel
@@ -2514,6 +2693,7 @@ final class UpdateTitlebarAccessoryController {
             let accessory = window.titlebarAccessoryViewControllers[index]
             if let controls = accessory as? TitlebarControlsAccessoryViewController {
                 controls.dismissNotificationsPopover()
+                controls.dismissHostManagerPopover()
             }
             window.removeTitlebarAccessoryViewController(at: index)
         }
@@ -2602,6 +2782,29 @@ final class UpdateTitlebarAccessoryController {
         target?.toggleNotificationsPopover(animated: animated)
     }
 
+    func toggleHostManagerPopover(animated: Bool = true, anchorView: NSView? = nil) {
+        let controllers = controlsControllers.allObjects
+        if let anchorView, anchorView.window != nil {
+            let target = preferredNotificationsController(from: controllers, preferShownPopover: true)
+            guard let target else {
+                toggleDetachedHostManagerPopover(animated: animated, anchorView: anchorView)
+                return
+            }
+            for controller in controllers where controller !== target {
+                controller.dismissHostManagerPopover()
+            }
+            target.toggleHostManagerPopover(animated: animated, externalAnchor: anchorView)
+            return
+        }
+
+        guard !controllers.isEmpty else { return }
+        let target = preferredNotificationsController(from: controllers, preferShownPopover: true)
+        for controller in controllers where controller !== target {
+            controller.dismissHostManagerPopover()
+        }
+        target?.toggleHostManagerPopover(animated: animated)
+    }
+
     private func toggleDetachedNotificationsPopover(animated: Bool, anchorView: NSView) {
         if let popover = detachedNotificationsPopover, popover.isShown {
             popover.animates = animated
@@ -2652,9 +2855,64 @@ final class UpdateTitlebarAccessoryController {
         )
     }
 
+    private func toggleDetachedHostManagerPopover(animated: Bool, anchorView: NSView) {
+        if let popover = detachedHostManagerPopover, popover.isShown {
+            popover.animates = animated
+            popover.performClose(nil)
+            return
+        }
+        guard let window = anchorView.window,
+              let contentView = window.contentView else {
+            return
+        }
+
+        let popover = NSPopover()
+        let delegate = DetachedNotificationsPopoverDelegate { [weak self, weak popover] in
+            popover?.contentViewController = nil
+            guard let self, self.detachedHostManagerPopover === popover else { return }
+            self.detachedHostManagerPopover = nil
+            self.detachedHostManagerPopoverDelegate = nil
+            if let popover {
+                postHostManagerPopoverVisibilityDidChange(isShown: false, source: popover)
+            } else {
+                postHostManagerPopoverVisibilityDidChange(isShown: false)
+            }
+        }
+        popover.behavior = .semitransient
+        popover.animates = animated
+        popover.delegate = delegate
+        popover.contentViewController = NSHostingController(
+            rootView: HostManagerPopoverView(
+                preferredWindow: window,
+                onDismiss: { [weak popover] in
+                    popover?.performClose(nil)
+                }
+            )
+        )
+
+        contentView.layoutSubtreeIfNeeded()
+        anchorView.superview?.layoutSubtreeIfNeeded()
+        let anchorRect = anchorView.convert(anchorView.bounds, to: contentView)
+        guard !anchorRect.isEmpty else { return }
+
+        detachedHostManagerPopover = popover
+        detachedHostManagerPopoverDelegate = delegate
+        popover.show(relativeTo: anchorRect, of: contentView, preferredEdge: .maxY)
+        postHostManagerPopoverVisibilityDidChange(
+            isShown: true,
+            source: popover,
+            windowNumber: window.windowNumber
+        )
+    }
+
     func isNotificationsPopoverShown() -> Bool {
         detachedNotificationsPopover?.isShown == true ||
             controlsControllers.allObjects.contains(where: { $0.popoverIsShownForTesting })
+    }
+
+    func isHostManagerPopoverShown() -> Bool {
+        detachedHostManagerPopover?.isShown == true ||
+            controlsControllers.allObjects.contains(where: { $0.hostManagerPopoverIsShownForTesting })
     }
 
     @discardableResult
@@ -2665,9 +2923,19 @@ final class UpdateTitlebarAccessoryController {
             popover.performClose(nil)
             dismissed = true
         }
+        if let popover = detachedHostManagerPopover, popover.isShown {
+            popover.performClose(nil)
+            dismissed = true
+        }
         for controller in controllers where controller.popoverIsShownForTesting {
             controller.dismissNotificationsPopover()
             dismissed = true
+        }
+        for controller in controllers {
+            if controller.hostManagerPopoverIsShownForTesting {
+                dismissed = true
+            }
+            controller.dismissHostManagerPopover()
         }
         return dismissed
     }

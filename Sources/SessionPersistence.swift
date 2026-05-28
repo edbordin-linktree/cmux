@@ -236,6 +236,11 @@ struct SessionStatusEntrySnapshot: Codable, Sendable {
     var timestamp: TimeInterval
 }
 
+struct SessionMetadataEntrySnapshot: Codable, Sendable {
+    var key: String
+    var value: String
+}
+
 struct SessionLogEntrySnapshot: Codable, Sendable {
     var message: String
     var level: String
@@ -1568,6 +1573,7 @@ struct SessionWorkspaceSnapshot: Codable, Sendable {
     var layout: SessionWorkspaceLayoutSnapshot
     var panels: [SessionPanelSnapshot]
     var statusEntries: [SessionStatusEntrySnapshot]
+    var metadataEntries: [SessionMetadataEntrySnapshot]? = nil
     var logEntries: [SessionLogEntrySnapshot]
     var progress: SessionProgressSnapshot?
     var gitBranch: SessionGitBranchSnapshot?

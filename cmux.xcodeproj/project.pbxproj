@@ -366,6 +366,7 @@
 		A5001610 /* SessionPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001611 /* SessionPersistence.swift */; };
 		D7AB40000000000000000001 /* RemoteWorkspaceSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7AB40000000000000000002 /* RemoteWorkspaceSnapshot.swift */; };
 		D7C000000000000000000003 /* DetachedWorkspaceHostRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7C000000000000000000004 /* DetachedWorkspaceHostRegistry.swift */; };
+		D7C000000000000000000005 /* HostManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7C000000000000000000006 /* HostManager.swift */; };
 		A5001670 /* SessionRestoredTerminalCommandStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001671 /* SessionRestoredTerminalCommandStore.swift */; };
 		B35751000000000000000002 /* TmuxResumeParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B35751000000000000000001 /* TmuxResumeParser.swift */; };
 		A5001621 /* AppleScriptSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001620 /* AppleScriptSupport.swift */; };
@@ -950,6 +951,7 @@
 		A5001611 /* SessionPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionPersistence.swift; sourceTree = "<group>"; };
 		D7AB40000000000000000002 /* RemoteWorkspaceSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWorkspaceSnapshot.swift; sourceTree = "<group>"; };
 		D7C000000000000000000004 /* DetachedWorkspaceHostRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetachedWorkspaceHostRegistry.swift; sourceTree = "<group>"; };
+		D7C000000000000000000006 /* HostManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostManager.swift; sourceTree = "<group>"; };
 		A5001671 /* SessionRestoredTerminalCommandStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRestoredTerminalCommandStore.swift; sourceTree = "<group>"; };
 		B35751000000000000000001 /* TmuxResumeParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxResumeParser.swift; sourceTree = "<group>"; };
 		A5001620 /* AppleScriptSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleScriptSupport.swift; sourceTree = "<group>"; };
@@ -1538,6 +1540,7 @@
 				A5001611 /* SessionPersistence.swift */,
 				D7AB40000000000000000002 /* RemoteWorkspaceSnapshot.swift */,
 				D7C000000000000000000004 /* DetachedWorkspaceHostRegistry.swift */,
+				D7C000000000000000000006 /* HostManager.swift */,
 				A5001671 /* SessionRestoredTerminalCommandStore.swift */,
 				B35751000000000000000001 /* TmuxResumeParser.swift */,
 				A5001661 /* RestorableAgentSession.swift */,
@@ -2317,6 +2320,7 @@
 				A5001610 /* SessionPersistence.swift in Sources */,
 				D7AB40000000000000000001 /* RemoteWorkspaceSnapshot.swift in Sources */,
 				D7C000000000000000000003 /* DetachedWorkspaceHostRegistry.swift in Sources */,
+				D7C000000000000000000005 /* HostManager.swift in Sources */,
 				A5001670 /* SessionRestoredTerminalCommandStore.swift in Sources */,
 				B35751000000000000000002 /* TmuxResumeParser.swift in Sources */,
 				A5001660 /* RestorableAgentSession.swift in Sources */,

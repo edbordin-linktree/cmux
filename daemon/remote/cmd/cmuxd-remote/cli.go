@@ -71,6 +71,7 @@ var commands = []commandSpec{
 
 	// V2 JSON-RPC commands
 	{name: "capabilities", proto: protoV2, v2Method: "system.capabilities", noParams: true},
+	{name: "tree", proto: protoV2, v2Method: "system.tree", flagKeys: []string{"workspace"}},
 	{name: "list-workspaces", proto: protoV2, v2Method: "workspace.list", noParams: true},
 	{name: "new-workspace", proto: protoV2, v2Method: "workspace.create", flagKeys: []string{"command", "working-directory", "name"}},
 	{name: "close-workspace", proto: protoV2, v2Method: "workspace.close", flagKeys: []string{"workspace"}},
@@ -80,9 +81,9 @@ var commands = []commandSpec{
 	{name: "focus-panel", proto: protoV2, v2Method: "surface.focus", flagKeys: []string{"panel", "workspace"}, paramKeyOverrides: map[string]string{"panel": "surface_id"}},
 	{name: "list-panes", proto: protoV2, v2Method: "pane.list", flagKeys: []string{"workspace"}},
 	{name: "list-pane-surfaces", proto: protoV2, v2Method: "pane.surfaces", flagKeys: []string{"pane"}},
-	{name: "new-pane", proto: protoV2, v2Method: "pane.create", flagKeys: []string{"workspace", "direction", "type", "url"}, defaultParams: map[string]any{"direction": "right"}},
-	{name: "new-surface", proto: protoV2, v2Method: "surface.create", flagKeys: []string{"workspace", "pane", "type", "url"}},
-	{name: "new-split", proto: protoV2, v2Method: "surface.split", flagKeys: []string{"surface", "direction"}},
+	{name: "new-pane", proto: protoV2, v2Method: "pane.create", flagKeys: []string{"workspace", "surface", "direction", "type", "url", "command", "focus"}, defaultParams: map[string]any{"direction": "right"}},
+	{name: "new-surface", proto: protoV2, v2Method: "surface.create", flagKeys: []string{"workspace", "pane", "type", "url", "command", "focus"}},
+	{name: "new-split", proto: protoV2, v2Method: "surface.split", flagKeys: []string{"workspace", "surface", "direction", "type", "url", "command", "focus"}},
 	{name: "close-surface", proto: protoV2, v2Method: "surface.close", flagKeys: []string{"surface"}},
 	{name: "send", proto: protoV2, v2Method: "surface.send_text", flagKeys: []string{"surface", "text"}},
 	{name: "send-key", proto: protoV2, v2Method: "surface.send_key", flagKeys: []string{"surface", "key"}},
@@ -189,6 +190,15 @@ doneFlags:
 	if cmdName == "browser" {
 		return runBrowserRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
 	}
+	if cmdName == "tree" {
+		return runTreeRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
+	}
+	if cmdName == "metadata" {
+		return runMetadataRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
+	}
+	if cmdName == "workspace" {
+		return runWorkspaceRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
+	}
 
 	// Agent launch commands
 	if cmdName == "claude-teams" {
@@ -290,6 +300,9 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 
 	resp, err := socketRoundTripV2(socketPath, spec.v2Method, params, refreshAddr)
 	if err != nil {
+		if code, handled := runHeadlessCLICommand(spec.name, spec.v2Method, params, jsonOutput, err); handled {
+			return code
+		}
 		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
 		return 1
 	}
@@ -300,6 +313,185 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 		fmt.Println(defaultRelayOutput(resp))
 	}
 	return 0
+}
+
+func runTreeRelay(socketPath string, args []string, jsonOutput bool, refreshAddr func() string) int {
+	args, trailingJSON := stripStandaloneFlag(args, "--json")
+	jsonOutput = jsonOutput || trailingJSON
+	parsed, err := parseFlags(args, []string{"workspace"})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmux tree: %v\n", err)
+		return 2
+	}
+	if len(parsed.positional) > 0 {
+		fmt.Fprintf(os.Stderr, "cmux tree: unexpected argument %q\n", parsed.positional[0])
+		return 2
+	}
+	params := map[string]any{}
+	if workspace, ok := parsed.flags["workspace"]; ok {
+		params["workspace_id"] = workspace
+	}
+	applyWorkspaceEnvFallback(params)
+	resp, err := socketRoundTripV2(socketPath, "system.tree", params, refreshAddr)
+	if err != nil {
+		if code, handled := runHeadlessCLICommand("tree", "system.tree", params, jsonOutput, err); handled {
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
+		return 1
+	}
+	if jsonOutput {
+		fmt.Println(resp)
+	} else {
+		fmt.Println(defaultRelayOutput(resp))
+	}
+	return 0
+}
+
+func runMetadataRelay(socketPath string, args []string, jsonOutput bool, refreshAddr func() string) int {
+	args, trailingJSON := stripStandaloneFlag(args, "--json")
+	jsonOutput = jsonOutput || trailingJSON
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "cmux metadata: requires a subcommand (set, get, list, clear)")
+		return 2
+	}
+	sub := args[0]
+	parsed, err := parseFlags(args[1:], []string{"workspace", "prefix", "value", "value-json"})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmux metadata: %v\n", err)
+		return 2
+	}
+	params := map[string]any{}
+	if workspace, ok := parsed.flags["workspace"]; ok {
+		params["workspace_id"] = workspace
+	}
+	applyWorkspaceEnvFallback(params)
+
+	var method string
+	switch sub {
+	case "set":
+		method = "metadata.set"
+		if len(parsed.positional) == 0 {
+			fmt.Fprintln(os.Stderr, "cmux metadata set: requires <key> <value>")
+			return 2
+		}
+		params["key"] = parsed.positional[0]
+		if value, ok := parsed.flags["value-json"]; ok {
+			params["json_value"] = value
+		} else if value, ok := parsed.flags["value"]; ok {
+			params["value"] = value
+		} else if len(parsed.positional) > 1 {
+			params["value"] = strings.Join(parsed.positional[1:], " ")
+		} else {
+			fmt.Fprintln(os.Stderr, "cmux metadata set: requires a value")
+			return 2
+		}
+	case "get":
+		method = "metadata.get"
+		if len(parsed.positional) != 1 {
+			fmt.Fprintln(os.Stderr, "cmux metadata get: requires <key>")
+			return 2
+		}
+		params["key"] = parsed.positional[0]
+	case "list":
+		method = "metadata.list"
+		if prefix, ok := parsed.flags["prefix"]; ok {
+			params["prefix"] = prefix
+		}
+	case "clear":
+		method = "metadata.clear"
+		if len(parsed.positional) != 1 {
+			fmt.Fprintln(os.Stderr, "cmux metadata clear: requires <key>")
+			return 2
+		}
+		params["key"] = parsed.positional[0]
+	default:
+		fmt.Fprintf(os.Stderr, "cmux metadata: unknown subcommand %q\n", sub)
+		return 2
+	}
+
+	resp, err := socketRoundTripV2(socketPath, method, params, refreshAddr)
+	if err != nil {
+		if code, handled := runHeadlessCLICommand("metadata "+sub, method, params, jsonOutput, err); handled {
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
+		return 1
+	}
+	if jsonOutput {
+		fmt.Println(resp)
+	} else {
+		fmt.Println(defaultRelayOutput(resp))
+	}
+	return 0
+}
+
+func runWorkspaceRelay(socketPath string, args []string, jsonOutput bool, refreshAddr func() string) int {
+	if len(args) == 0 || args[0] != "lookup" {
+		fmt.Fprintln(os.Stderr, "cmux workspace: supported subcommand: lookup")
+		return 2
+	}
+	args, trailingJSON := stripStandaloneFlag(args, "--json")
+	jsonOutput = jsonOutput || trailingJSON
+	criteria := map[string]string{}
+	includeDetached := false
+	remaining := args[1:]
+	for i := 0; i < len(remaining); i++ {
+		switch remaining[i] {
+		case "--metadata":
+			if i+1 >= len(remaining) {
+				fmt.Fprintln(os.Stderr, "cmux workspace lookup: --metadata requires key=value")
+				return 2
+			}
+			parts := strings.SplitN(remaining[i+1], "=", 2)
+			if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+				fmt.Fprintln(os.Stderr, "cmux workspace lookup: --metadata requires key=value")
+				return 2
+			}
+			criteria[strings.TrimSpace(parts[0])] = parts[1]
+			i++
+		case "--include-detached":
+			includeDetached = true
+		default:
+			fmt.Fprintf(os.Stderr, "cmux workspace lookup: unknown argument %q\n", remaining[i])
+			return 2
+		}
+	}
+	if len(criteria) == 0 {
+		fmt.Fprintln(os.Stderr, "cmux workspace lookup: requires at least one --metadata key=value")
+		return 2
+	}
+	params := map[string]any{"metadata": criteria}
+	if includeDetached {
+		params["include_detached"] = true
+	}
+	resp, err := socketRoundTripV2(socketPath, "workspace.lookup", params, refreshAddr)
+	if err != nil {
+		if code, handled := runHeadlessCLICommand("workspace lookup", "workspace.lookup", params, jsonOutput, err); handled {
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
+		return 1
+	}
+	if jsonOutput {
+		fmt.Println(resp)
+	} else {
+		fmt.Println(defaultRelayOutput(resp))
+	}
+	return 0
+}
+
+func stripStandaloneFlag(args []string, flag string) ([]string, bool) {
+	var stripped []string
+	found := false
+	for _, arg := range args {
+		if arg == flag {
+			found = true
+			continue
+		}
+		stripped = append(stripped, arg)
+	}
+	return stripped, found
 }
 
 // runRPC sends an arbitrary JSON-RPC method with optional JSON params.

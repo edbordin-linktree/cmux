@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import AppKit
 
 typealias BonsplitTreeSerialized = SessionWorkspaceLayoutSnapshot
 
@@ -21,6 +22,7 @@ struct RemoteWorkspaceSnapshotV1: Codable, Sendable, Equatable {
     var panes: [PaneSnapshot]
     var activePaneId: UUID?
     var displayTarget: String
+    var metadataEntries: [String: String]? = nil
 }
 
 enum PaneSnapshot: Codable, Sendable, Equatable {
@@ -227,6 +229,366 @@ struct RemoteWorkspaceSnapshotSyncResult {
     var paneCount: Int
 }
 
+struct RemoteWorkspaceSnapshotDetachResult {
+    var workspaceID: UUID
+    var title: String
+    var host: String
+    var persistentDaemonSlot: String?
+    var snapshotSHA256: String
+    var detachedAt: Date
+    var paneCount: Int
+}
+
+struct RemoteWorkspaceSnapshotAttachResult {
+    var workspaceID: UUID
+    var localWorkspaceID: UUID
+    var title: String
+    var host: String
+    var persistentDaemonSlot: String
+    var panesRestored: Int
+    var panesLost: Int
+    var snapshotSHA256: String
+    var alreadyAttached: Bool = false
+}
+
+struct RemoteWorkspaceAttachmentMatch {
+    var owner: TabManager
+    var workspace: Workspace
+}
+
+enum RemoteWorkspaceAttachmentGuard {
+    @MainActor
+    static func findAttachedWorkspace(
+        host: String,
+        slot: String,
+        excluding excludedWorkspaceID: UUID? = nil
+    ) -> RemoteWorkspaceAttachmentMatch? {
+        let normalizedHost = normalizedRemoteIdentityPart(host)
+        let normalizedSlot = normalizedRemoteIdentityPart(slot)
+        guard !normalizedHost.isEmpty, !normalizedSlot.isEmpty else { return nil }
+        guard let app = AppDelegate.shared else { return nil }
+
+        var visitedManagers = Set<ObjectIdentifier>()
+        func search(_ owner: TabManager?) -> RemoteWorkspaceAttachmentMatch? {
+            guard let owner else { return nil }
+            let identifier = ObjectIdentifier(owner)
+            guard visitedManagers.insert(identifier).inserted else { return nil }
+            for workspace in owner.tabs {
+                if workspace.id == excludedWorkspaceID {
+                    continue
+                }
+                guard let configuration = workspace.remoteConfiguration,
+                      configuration.transport == .ssh,
+                      normalizedRemoteIdentityPart(configuration.destination) == normalizedHost,
+                      normalizedRemoteIdentityPart(configuration.persistentDaemonSlot) == normalizedSlot else {
+                    continue
+                }
+                return RemoteWorkspaceAttachmentMatch(owner: owner, workspace: workspace)
+            }
+            return nil
+        }
+
+        if let match = search(app.tabManager) {
+            return match
+        }
+        for context in app.mainWindowContexts.values {
+            if let match = search(context.tabManager) {
+                return match
+            }
+        }
+        for route in app.recoverableMainWindowRoutes() {
+            if let match = search(route.tabManager) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    @MainActor
+    static func focus(_ match: RemoteWorkspaceAttachmentMatch) {
+        match.owner.selectWorkspace(match.workspace)
+        if let windowID = AppDelegate.shared?.windowId(for: match.owner) {
+            _ = AppDelegate.shared?.focusMainWindow(windowId: windowID)
+        }
+    }
+
+    private static func normalizedRemoteIdentityPart(_ value: String?) -> String {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+}
+
+enum RemoteWorkspaceSnapshotDetachController {
+    @MainActor
+    static func detach(workspaceID: UUID) async throws -> RemoteWorkspaceSnapshotDetachResult {
+        guard let owner = AppDelegate.shared?.tabManagerFor(tabId: workspaceID),
+              let workspace = owner.tabs.first(where: { $0.id == workspaceID }) else {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace("Workspace not found.")
+        }
+
+        let upload = try workspace.prepareRemoteWorkspaceSnapshotUpload(capturedAt: Date(), requireCapability: true)
+        _ = try workspace.storeRemoteWorkspaceSnapshot(
+            body: upload.body,
+            bodySHA256: upload.sha256,
+            capturedAt: upload.capturedAt,
+            status: .detached
+        )
+        NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: workspace)
+        try DetachedWorkspaceHostRegistry.upsert(DetachedWorkspaceHostRegistryRecord(
+            host: upload.configuration.destination,
+            port: upload.configuration.port,
+            identityFile: upload.configuration.identityFile,
+            sshOptions: upload.configuration.sshOptions,
+            daemonBinPath: upload.daemonPath,
+            addedAt: upload.capturedAt,
+            lastSeenAt: upload.capturedAt
+        ))
+
+        guard owner.tabs.contains(where: { $0.id == workspace.id }) else {
+            return RemoteWorkspaceSnapshotDetachResult(
+                workspaceID: upload.workspaceID,
+                title: upload.title,
+                host: upload.configuration.destination,
+                persistentDaemonSlot: upload.configuration.persistentDaemonSlot,
+                snapshotSHA256: upload.sha256,
+                detachedAt: upload.capturedAt,
+                paneCount: upload.paneCount
+            )
+        }
+        if owner.tabs.count <= 1 {
+            _ = owner.addWorkspace(title: "Terminal", select: true, autoWelcomeIfNeeded: false)
+        }
+        workspace.performRemoteWorkspaceDetachCloseTransaction {
+            owner.closeWorkspace(workspace, recordHistory: false)
+        }
+
+        return RemoteWorkspaceSnapshotDetachResult(
+            workspaceID: upload.workspaceID,
+            title: upload.title,
+            host: upload.configuration.destination,
+            persistentDaemonSlot: upload.configuration.persistentDaemonSlot,
+            snapshotSHA256: upload.sha256,
+            detachedAt: upload.capturedAt,
+            paneCount: upload.paneCount
+        )
+    }
+}
+
+enum RemoteWorkspaceSnapshotAttachController {
+    @MainActor
+    static func attach(
+        host: String,
+        slot: String,
+        title: String?,
+        preferredWorkspaceID: UUID? = nil,
+        preferredWindow: NSWindow? = nil
+    ) async throws -> RemoteWorkspaceSnapshotAttachResult {
+        let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedSlot = slot.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedHost.isEmpty, !normalizedSlot.isEmpty else {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace("Detached workspace host and slot are required.")
+        }
+        if let attached = RemoteWorkspaceAttachmentGuard.findAttachedWorkspace(host: normalizedHost, slot: normalizedSlot) {
+            RemoteWorkspaceAttachmentGuard.focus(attached)
+            let configuration = attached.workspace.remoteConfiguration
+            return RemoteWorkspaceSnapshotAttachResult(
+                workspaceID: attached.workspace.id,
+                localWorkspaceID: attached.workspace.id,
+                title: attached.workspace.title,
+                host: configuration?.destination ?? normalizedHost,
+                persistentDaemonSlot: configuration?.persistentDaemonSlot ?? normalizedSlot,
+                panesRestored: 0,
+                panesLost: 0,
+                snapshotSHA256: "",
+                alreadyAttached: true
+            )
+        }
+        let registry = try DetachedWorkspaceHostRegistry.load()
+        guard let record = registry.hosts.first(where: { $0.host == normalizedHost }) else {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace("Host is no longer in the detached workspace registry: \(normalizedHost)")
+        }
+        guard let owner = AppDelegate.shared?.activeTabManagerForCommands(preferredWindow: preferredWindow) else {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace("No cmux window is available for attaching the workspace.")
+        }
+
+        let initialTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlankForRemoteSnapshotAttach
+            ?? "Detached \(String(normalizedSlot.prefix(8)))"
+        let workspace = owner.addWorkspace(
+            id: preferredWorkspaceID ?? UUID(),
+            title: initialTitle,
+            select: true,
+            autoWelcomeIfNeeded: false
+        )
+        do {
+            let configuration = try workspaceConfiguration(for: record, slot: normalizedSlot)
+            workspace.configureRemoteConnection(configuration, autoConnect: true)
+            try await waitForRemoteDaemonReady(workspace: workspace, timeout: 45)
+            let remoteSnapshot = try configuration.sessionSnapshot()
+                .requiredForRemoteSnapshotAttach("Configured remote workspace cannot be snapshotted.")
+            let (snapshot, restoreResult, snapshotSHA256) = try restoreSnapshot(into: workspace, remote: remoteSnapshot)
+            workspace.setCustomTitle(snapshot.title)
+            owner.selectWorkspace(workspace)
+            _ = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
+                workspace: workspace,
+                status: .live,
+                force: true,
+                requireCapability: false
+            )
+            NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: workspace)
+            try? DetachedWorkspaceHostRegistry.upsert(DetachedWorkspaceHostRegistryRecord(
+                host: configuration.destination,
+                port: configuration.port,
+                identityFile: configuration.identityFile,
+                sshOptions: configuration.sshOptions,
+                daemonBinPath: workspace.remoteDaemonStatus.remotePath ?? record.daemonBinPath,
+                addedAt: record.addedAt,
+                lastSeenAt: Date()
+            ))
+            return RemoteWorkspaceSnapshotAttachResult(
+                workspaceID: snapshot.workspaceId,
+                localWorkspaceID: workspace.id,
+                title: snapshot.title,
+                host: configuration.destination,
+                persistentDaemonSlot: normalizedSlot,
+                panesRestored: restoreResult.panesRestored,
+                panesLost: restoreResult.panesLost,
+                snapshotSHA256: snapshotSHA256
+            )
+        } catch {
+            if owner.tabs.contains(where: { $0.id == workspace.id }) {
+                owner.closeWorkspace(workspace, recordHistory: false)
+            }
+            throw error
+        }
+    }
+
+    private static func workspaceConfiguration(
+        for record: DetachedWorkspaceHostRegistryRecord,
+        slot: String
+    ) throws -> WorkspaceRemoteConfiguration {
+        let relayPort = Int.random(in: 49152...65535)
+        let options = sshOptionsWithDetachedWorkspaceRestoreDefaults(record.sshOptions, relayPort: relayPort)
+        let session = SessionRemoteWorkspaceSnapshot(
+            transport: .ssh,
+            destination: record.host,
+            port: record.port,
+            identityFile: record.identityFile,
+            sshOptions: options,
+            preserveAfterTerminalExit: true,
+            skipDaemonBootstrap: false,
+            relayPort: relayPort,
+            persistentDaemonSlot: slot,
+            preferAutoConnectOnRestore: false
+        )
+        guard let configuration = session.workspaceConfiguration(
+            localSocketPath: TerminalController.shared.activeSocketPath(
+                preferredPath: SocketControlSettings.socketPath()
+            ),
+            allowPersistentPTYRestore: true,
+            preserveSSHOptions: true
+        ) else {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace("Could not build remote configuration for \(record.host):\(slot).")
+        }
+        return configuration
+    }
+
+    @MainActor
+    private static func waitForRemoteDaemonReady(workspace: Workspace, timeout: TimeInterval) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastState = workspace.remoteDaemonStatus.state.rawValue
+        var lastDetail = workspace.remoteDaemonStatus.detail ?? ""
+        while Date() < deadline {
+            lastState = workspace.remoteDaemonStatus.state.rawValue
+            lastDetail = workspace.remoteDaemonStatus.detail ?? ""
+            if workspace.remoteDaemonStatus.state == .ready {
+                return
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        let suffix = lastDetail.isEmpty ? "" : " detail=\(lastDetail)"
+        throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
+            "remote daemon did not become ready before timeout (state=\(lastState)\(suffix))"
+        )
+    }
+
+    @MainActor
+    private static func restoreSnapshot(
+        into workspace: Workspace,
+        remote: SessionRemoteWorkspaceSnapshot
+    ) throws -> (RemoteWorkspaceSnapshotV1, RemoteWorkspaceRestoreResult, String) {
+        let fetch = try workspace.fetchRemoteWorkspaceSnapshot()
+        guard (fetch["exists"] as? Bool) == true else {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
+                "Remote workspace snapshot is absent; use ssh-workspace-snapshot-clear if stale local state remains."
+            )
+        }
+        guard let body = fetch["body"] as? String,
+              let meta = fetch["meta"] as? [String: Any] else {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace("Remote workspace snapshot fetch returned an invalid payload.")
+        }
+        let bodySHA256 = RemoteWorkspaceSnapshotCodec.sha256Hex(for: body)
+        if let expected = meta["snapshot_sha256"] as? String,
+           !expected.isEmpty,
+           expected.lowercased() != bodySHA256 {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
+                "Remote workspace snapshot hash mismatch; use ssh-workspace-snapshot-clear to remove it."
+            )
+        }
+        let snapshot = try RemoteWorkspaceSnapshotCodec.decodeString(body)
+        let result = workspace.restoreRemoteWorkspaceSnapshotV1(snapshot, remote: remote)
+        return (snapshot, result, bodySHA256)
+    }
+
+    private static func sshOptionsWithDetachedWorkspaceRestoreDefaults(
+        _ options: [String],
+        relayPort: Int
+    ) -> [String] {
+        var merged = options
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { option in
+                guard let key = sshOptionKey(option) else { return true }
+                return !["controlmaster", "controlpersist", "controlpath"].contains(key)
+            }
+        if !hasSSHOptionKey(merged, key: "StrictHostKeyChecking") {
+            merged.append("StrictHostKeyChecking=accept-new")
+        }
+        return SSHPTYAttachStartupCommandBuilder.sshOptionsWithRestoreControlDefaults(
+            merged,
+            relayPort: relayPort
+        )
+    }
+
+    private static func hasSSHOptionKey(_ options: [String], key: String) -> Bool {
+        let lowered = key.lowercased()
+        return options.contains { sshOptionKey($0) == lowered }
+    }
+
+    private static func sshOptionKey(_ option: String) -> String? {
+        option
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0 == "=" || $0.isWhitespace })
+            .first
+            .map(String.init)?
+            .lowercased()
+    }
+}
+
+private extension Optional {
+    func requiredForRemoteSnapshotAttach(_ message: String) throws -> Wrapped {
+        guard let value = self else {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(message)
+        }
+        return value
+    }
+}
+
+private extension String {
+    var nilIfBlankForRemoteSnapshotAttach: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 extension Workspace {
     func validateRemoteWorkspaceSnapshotEligibility() throws -> WorkspaceRemoteConfiguration {
         guard let configuration = remoteConfiguration else {
@@ -270,7 +632,10 @@ extension Workspace {
             splitTree: session.layout,
             panes: paneSnapshots,
             activePaneId: session.focusedPanelId,
-            displayTarget: configuration.displayTarget + slotSuffix
+            displayTarget: configuration.displayTarget + slotSuffix,
+            metadataEntries: session.metadataEntries.map { entries in
+                Dictionary(uniqueKeysWithValues: entries.map { ($0.key, $0.value) })
+            }
         )
     }
 
@@ -381,6 +746,9 @@ extension Workspace {
             layout: snapshot.splitTree,
             panels: snapshot.panes.map(Self.sessionPanelSnapshot(from:)),
             statusEntries: [],
+            metadataEntries: snapshot.metadataEntries?.map {
+                SessionMetadataEntrySnapshot(key: $0.key, value: $0.value)
+            },
             logEntries: [],
             progress: nil,
             gitBranch: nil,
@@ -524,6 +892,7 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
             return RemoteWorkspaceSnapshotSyncResult(uploaded: false, sha256: upload.sha256, paneCount: upload.paneCount)
         }
         _ = try store(upload: upload, status: status)
+        NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: nil)
         recordUploadSuccess(key: key, sha256: upload.sha256, uploadedAt: upload.capturedAt)
         upsertHostRegistry(configuration: upload.configuration, daemonPath: upload.daemonPath, seenAt: upload.capturedAt)
         return RemoteWorkspaceSnapshotSyncResult(uploaded: true, sha256: upload.sha256, paneCount: upload.paneCount)
@@ -562,6 +931,7 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
         defer { clearInFlight(key: pending.key) }
         do {
             _ = try store(upload: pending.upload, status: pending.status)
+            NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: nil)
             recordUploadSuccess(
                 key: pending.key,
                 sha256: pending.upload.sha256,

@@ -2576,11 +2576,11 @@ struct CMUXCLI {
         "--dx", "--dy", "--email", "--event", "--expires", "--focus",
         "--function", "--id", "--image", "--index", "--key", "--kind",
         "--layout", "--lines", "--load-state", "--max-depth", "--name", "--os",
-        "--host", "--order", "--out", "--pane", "--panel", "--path", "--profile", "--property",
+        "--host", "--metadata", "--order", "--out", "--pane", "--panel", "--path", "--prefix", "--profile", "--property",
         "--provider", "--relay-port", "--script", "--selector", "--session",
         "--shell", "--slot", "--source", "--subtitle", "--surface", "--tab", "--target-pane",
         "--text", "--timeout", "--timeout-ms", "--title", "--transcript",
-        "--turn", "--type", "--url", "--url-contains", "--value", "--window",
+        "--turn", "--type", "--url", "--url-contains", "--value", "--value-json", "--window",
         "--workspace", "--workspace-id", "--checkpoint", "--checkpoint-id",
     ]
 
@@ -3556,6 +3556,10 @@ struct CMUXCLI {
 
         case "workspace-action":
             try runWorkspaceAction(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat, windowOverride: windowId)
+        case "workspace":
+            try runWorkspaceCommand(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat, windowOverride: windowId)
+        case "metadata":
+            try runMetadataCommand(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat, windowOverride: windowId)
         case "tab-action":
             try runTabAction(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat, windowOverride: windowId)
         case "move-tab-to-new-workspace", "detach-tab":
@@ -6046,6 +6050,169 @@ struct CMUXCLI {
         }
     }
 
+    private func parseMetadataCriteriaOptions(_ args: [String]) throws -> ([String: String], [String]) {
+        let (values, remaining) = parseRepeatedOption(args, name: "--metadata")
+        var criteria: [String: String] = [:]
+        for raw in values {
+            let parts = raw.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else {
+                throw CLIError(message: "--metadata expects key=value")
+            }
+            let key = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else {
+                throw CLIError(message: "--metadata key cannot be empty")
+            }
+            criteria[key] = String(parts[1])
+        }
+        return (criteria, remaining)
+    }
+
+    private func runWorkspaceCommand(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat,
+        windowOverride _: String?
+    ) throws {
+        guard let subcommand = commandArgs.first else {
+            throw CLIError(message: "Usage: cmux workspace <lookup>")
+        }
+        let args = Array(commandArgs.dropFirst())
+        switch subcommand {
+        case "lookup":
+            let (criteria, remaining) = try parseMetadataCriteriaOptions(args)
+            guard !criteria.isEmpty else {
+                throw CLIError(message: "workspace lookup requires at least one --metadata key=value")
+            }
+            if let unknown = remaining.first(where: { $0.hasPrefix("--") && $0 != "--include-detached" }) {
+                throw CLIError(message: "workspace lookup: unknown flag '\(unknown)'")
+            }
+            var params: [String: Any] = ["metadata": criteria]
+            if hasFlag(remaining, name: "--include-detached") {
+                params["include_detached"] = true
+            }
+            let payload = try client.sendV2(method: "workspace.lookup", params: params)
+            if jsonOutput {
+                print(jsonString(formatIDs(payload, mode: idFormat)))
+            } else {
+                let matches = payload["matches"] as? [[String: Any]] ?? []
+                if matches.isEmpty {
+                    print("No matching workspaces")
+                } else {
+                    for item in matches {
+                        let handle = textHandle(item, idFormat: idFormat)
+                        let title = (item["title"] as? String) ?? ""
+                        let attached = (item["attached"] as? Bool) == true ? "attached" : "detached"
+                        print("\(handle)  \(attached)  \(title)")
+                    }
+                }
+            }
+        default:
+            throw CLIError(message: "Unknown workspace subcommand '\(subcommand)'")
+        }
+    }
+
+    private func metadataWorkspaceParams(
+        commandArgs: [String],
+        client: SocketClient,
+        windowOverride: String?
+    ) throws -> (params: [String: Any], remaining: [String]) {
+        let (workspaceOpt, rem0) = parseOption(commandArgs, name: "--workspace")
+        let (windowOpt, rem1) = parseOption(rem0, name: "--window")
+        let windowRaw = windowOpt ?? windowOverride
+        var params: [String: Any] = [:]
+        let windowHandle = try normalizeWindowHandle(windowRaw, client: client)
+        if let windowHandle {
+            params["window_id"] = windowHandle
+        }
+        let workspaceArg = workspaceOpt ?? (windowRaw == nil ? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"] : nil)
+        let workspaceId = try normalizeWorkspaceHandle(
+            workspaceArg,
+            client: client,
+            windowHandle: windowHandle,
+            allowCurrent: true
+        )
+        if let workspaceId {
+            params["workspace_id"] = workspaceId
+        }
+        return (params, rem1)
+    }
+
+    private func runMetadataCommand(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat,
+        windowOverride: String?
+    ) throws {
+        guard let subcommand = commandArgs.first else {
+            throw CLIError(message: "Usage: cmux metadata <set|get|list|clear>")
+        }
+        let baseArgs = Array(commandArgs.dropFirst())
+        var parsed = try metadataWorkspaceParams(commandArgs: baseArgs, client: client, windowOverride: windowOverride)
+
+        switch subcommand {
+        case "set":
+            let (valueOpt, rem0) = parseOption(parsed.remaining, name: "--value")
+            let (jsonValueOpt, rem1) = parseOption(rem0, name: "--value-json")
+            guard let key = rem1.first else {
+                throw CLIError(message: "metadata set requires <key> <value>")
+            }
+            let trailing = Array(rem1.dropFirst())
+            let value = jsonValueOpt ?? valueOpt ?? trailing.joined(separator: " ")
+            guard !value.isEmpty else {
+                throw CLIError(message: "metadata set requires a value")
+            }
+            parsed.params["key"] = key
+            parsed.params[jsonValueOpt == nil ? "value" : "json_value"] = value
+            let payload = try client.sendV2(method: "metadata.set", params: parsed.params)
+            printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
+
+        case "get":
+            guard let key = parsed.remaining.first else {
+                throw CLIError(message: "metadata get requires <key>")
+            }
+            parsed.params["key"] = key
+            let payload = try client.sendV2(method: "metadata.get", params: parsed.params)
+            if jsonOutput {
+                print(jsonString(formatIDs(payload, mode: idFormat)))
+            } else if (payload["exists"] as? Bool) == true {
+                print((payload["value"] as? String) ?? "")
+            }
+
+        case "list":
+            let (prefixOpt, rem0) = parseOption(parsed.remaining, name: "--prefix")
+            if let unknown = rem0.first(where: { $0.hasPrefix("--") }) {
+                throw CLIError(message: "metadata list: unknown flag '\(unknown)'")
+            }
+            if let prefixOpt {
+                parsed.params["prefix"] = prefixOpt
+            }
+            let payload = try client.sendV2(method: "metadata.list", params: parsed.params)
+            if jsonOutput {
+                print(jsonString(formatIDs(payload, mode: idFormat)))
+            } else {
+                let entries = payload["entries"] as? [[String: Any]] ?? []
+                for entry in entries {
+                    let key = (entry["key"] as? String) ?? ""
+                    let value = (entry["value"] as? String) ?? ""
+                    print("\(key)=\(value)")
+                }
+            }
+
+        case "clear":
+            guard let key = parsed.remaining.first else {
+                throw CLIError(message: "metadata clear requires <key>")
+            }
+            parsed.params["key"] = key
+            let payload = try client.sendV2(method: "metadata.clear", params: parsed.params)
+            printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
+
+        default:
+            throw CLIError(message: "Unknown metadata subcommand '\(subcommand)'")
+        }
+    }
+
     private func runWorkspaceAction(
         commandArgs: [String],
         client: SocketClient,
@@ -6466,7 +6633,7 @@ struct CMUXCLI {
         // gateway forwards shell-request PTYs but stalls on exec-channel I/O, and the bootstrap
         // script is only meaningful if cmuxd-remote is participating. Let ssh open a plain
         // interactive shell instead.
-        let remoteTerminalBootstrapScript: String?
+        var remoteTerminalBootstrapScript: String?
         if sshOptions.skipDaemonBootstrap {
             remoteTerminalBootstrapScript = nil
         } else {
@@ -6507,6 +6674,12 @@ struct CMUXCLI {
         let persistentDaemonSlot = usesPersistentSSHPTY
             ? "ssh-\(UUID().uuidString.lowercased())"
             : nil
+        if let script = remoteTerminalBootstrapScript {
+            remoteTerminalBootstrapScript = script.replacingOccurrences(
+                of: "__CMUX_PERSISTENT_DAEMON_SLOT__",
+                with: persistentDaemonSlot ?? ""
+            )
+        }
         let startupInitialSSHCommand = buildSSHCommandText(
             sshOptions,
             localCommandScript: combinedLocalCommandScript
@@ -7101,6 +7274,7 @@ struct CMUXCLI {
             "if [ -n '__CMUX_WORKSPACE_ID__' ]; then export CMUX_WORKSPACE_ID='__CMUX_WORKSPACE_ID__'; fi",
             "if [ -n '__CMUX_WORKSPACE_ID__' ]; then export CMUX_TAB_ID='__CMUX_WORKSPACE_ID__'; fi",
             "if [ -n '__CMUX_SURFACE_ID__' ]; then export CMUX_SURFACE_ID='__CMUX_SURFACE_ID__'; export CMUX_PANEL_ID='__CMUX_SURFACE_ID__'; fi",
+            "if [ -n '__CMUX_PERSISTENT_DAEMON_SLOT__' ]; then export CMUX_REMOTE_DAEMON_SLOT='__CMUX_PERSISTENT_DAEMON_SLOT__'; fi",
         ]
         let relaySocket = remoteRelayPort > 0 ? "127.0.0.1:\(remoteRelayPort)" : nil
         var commonShellExportLines = remoteTerminalLines
@@ -12157,6 +12331,30 @@ struct CMUXCLI {
               cmux workspace-action --action set-description --description "Ship checklist"
               cmux workspace-action --action set-description $'Ship checklist\n- verify build\n- post notes'
               cmux workspace-action clear-color
+            """
+        case "workspace":
+            return """
+            Usage: cmux workspace lookup --metadata <key=value> [--metadata <key=value> ...] [--include-detached] [--json]
+
+            Look up workspaces by hidden machine-readable metadata. Attached workspaces
+            are searched first. --include-detached also searches remote snapshots in the
+            detached host registry.
+
+            Example:
+              cmux workspace lookup --metadata craft:project-id=proj --metadata craft:task-id=task --include-detached --json
+            """
+        case "metadata":
+            return """
+            Usage:
+              cmux metadata set --workspace <id|ref|index> <key> <value>
+              cmux metadata set --workspace <id|ref|index> <key> --value-json <json>
+              cmux metadata get --workspace <id|ref|index> <key> [--json]
+              cmux metadata list --workspace <id|ref|index> [--prefix <prefix>] [--json]
+              cmux metadata clear --workspace <id|ref|index> <key> [--json]
+
+            Store hidden machine-readable workspace metadata. When the workspace is
+            detached and addressed by UUID, supported operations mutate the remote
+            workspace snapshot directly.
             """
         case "tab-action":
             return """
@@ -29872,6 +30070,8 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           reorder-workspace --workspace <id|ref|index> (--index <n> | --before <id|ref|index> | --after <id|ref|index>) [--window <id|ref|index>] [--dry-run]
           reorder-workspaces --order <id|ref|index>,<id|ref|index>,... [--window <id|ref|index>] [--dry-run]
           workspace-action --action <name> [--workspace <id|ref|index>] [--window <id|ref|index>] [--title <text>] [--color <name|#hex>] [--description <text>]
+          workspace lookup --metadata <key=value> [--metadata <key=value> ...] [--include-detached] [--json]
+          metadata set|get|list|clear --workspace <id|ref|index> ...
           move-tab-to-new-workspace [--tab <id|ref|index>] [--surface <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--title <text>] [--focus <true|false>]
           list-workspaces [--window <id|ref|index>]
           new-workspace [--name <title>] [--description <text>] [--cwd <path>] [--command <text>] [--layout <json>] [--window <id|ref|index>] [--focus <true|false>]
