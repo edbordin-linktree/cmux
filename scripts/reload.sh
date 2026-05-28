@@ -891,8 +891,8 @@ if [[ "$LAUNCH" -eq 1 ]]; then
   LAUNCH_CMD=()
   LAUNCH_RETRY_CMD=()
   if [[ -n "${TAG_SLUG:-}" ]]; then
-    # Launch tagged apps directly so LaunchServices cannot reuse a stale
-    # LSEnvironment for the tag's bundle id.
+    # Launch tagged apps via LaunchServices so AppKit gets a normal foreground
+    # application activation path and the tagged window appears reliably.
     APP_EXECUTABLE="$APP_PATH/Contents/MacOS/${BASE_APP_NAME}"
     if [[ ! -x "$APP_EXECUTABLE" ]]; then
       echo "error: tagged app executable not found: $APP_EXECUTABLE" >&2
@@ -900,9 +900,11 @@ if [[ "$LAUNCH" -eq 1 ]]; then
     fi
     TAG_LAUNCH_LOG="/tmp/cmux-launch-${TAG_SLUG}.out"
     if [[ -n "${CMUX_SOCKET_PATH_VALUE:-}" ]]; then
-      nohup "${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" CMUX_SOCKET_PATH="$CMUX_SOCKET_PATH_VALUE" CMUXD_UNIX_PATH="$CMUXD_SOCKET" "$APP_EXECUTABLE" >"$TAG_LAUNCH_LOG" 2>&1 &
+      LAUNCH_CMD=("${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" CMUX_SOCKET_PATH="$CMUX_SOCKET_PATH_VALUE" CMUXD_UNIX_PATH="$CMUXD_SOCKET" open -n "$APP_PATH")
+      LAUNCH_RETRY_CMD=("${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" CMUX_SOCKET_PATH="$CMUX_SOCKET_PATH_VALUE" CMUXD_UNIX_PATH="$CMUXD_SOCKET" open -n "$APP_PATH")
     else
-      nohup "${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" "$APP_EXECUTABLE" >"$TAG_LAUNCH_LOG" 2>&1 &
+      LAUNCH_CMD=("${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" open -n "$APP_PATH")
+      LAUNCH_RETRY_CMD=("${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" open -n "$APP_PATH")
     fi
   else
     echo "/tmp/cmux-debug.sock" > /tmp/cmux-last-socket-path || true
