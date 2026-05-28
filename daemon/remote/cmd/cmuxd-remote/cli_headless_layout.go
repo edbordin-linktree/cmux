@@ -47,6 +47,8 @@ func headlessWorkspaceSummary(snap *headlessSnapshot) map[string]any {
 	return map[string]any{
 		"id":                     workspaceID,
 		"ref":                    "workspace:" + workspaceID,
+		"workspace_id":           workspaceID,
+		"workspace_ref":          "workspace:" + workspaceID,
 		"title":                  title,
 		"attached":               false,
 		"detached":               true,

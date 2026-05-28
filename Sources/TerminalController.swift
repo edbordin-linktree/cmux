@@ -5416,6 +5416,10 @@ class TerminalController {
         return v2EnsureHandleRef(kind: kind, uuid: uuid)
     }
 
+    func v2StableID(_ uuid: UUID) -> String {
+        uuid.uuidString.lowercased()
+    }
+
     func v2WorkspaceRefs(for ids: [UUID]) -> [UUID: String] {
         var refs: [UUID: String] = [:]
         refs.reserveCapacity(ids.count)
@@ -6029,7 +6033,7 @@ class TerminalController {
         metadata: [String: String]
     ) -> [String: Any] {
         [
-            "workspace_id": snapshot.workspaceId.uuidString,
+            "workspace_id": v2StableID(snapshot.workspaceId),
             "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
             "title": snapshot.title,
             "host": target.host.host,
@@ -6048,7 +6052,7 @@ class TerminalController {
         exists: Bool? = nil
     ) -> [String: Any] {
         var payload: [String: Any] = [
-            "workspace_id": snapshot.workspaceId.uuidString,
+            "workspace_id": v2StableID(snapshot.workspaceId),
             "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
             "title": snapshot.title,
             "host": target.host.host,
@@ -6203,7 +6207,7 @@ class TerminalController {
                 .sorted { lhs, rhs in lhs.key < rhs.key }
                 .map { key, value in ["key": key, "value": value] }
             return .ok([
-                "workspace_id": snapshot.workspaceId.uuidString,
+                "workspace_id": v2StableID(snapshot.workspaceId),
                 "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
                 "title": snapshot.title,
                 "host": target.host.host,
@@ -6253,7 +6257,7 @@ class TerminalController {
             let removed = metadata.removeValue(forKey: key) != nil
             snapshot.metadataEntries = metadata
             var payload: [String: Any] = [
-                "workspace_id": snapshot.workspaceId.uuidString,
+                "workspace_id": v2StableID(snapshot.workspaceId),
                 "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
                 "title": snapshot.title,
                 "host": target.host.host,

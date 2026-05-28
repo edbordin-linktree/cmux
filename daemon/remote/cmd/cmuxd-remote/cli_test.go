@@ -1464,7 +1464,8 @@ func TestCLIHeadlessWorkspaceLookupWithoutIncludeDetachedReturnsEmpty(t *testing
 
 func TestCLIHeadlessWorkspaceLookupIncludeDetachedScansAllSnapshots(t *testing.T) {
 	root, callerWorkspaceID, callerSlot := writeHeadlessCLITestSnapshot(t)
-	targetWorkspaceID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	targetWorkspaceID := "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB"
+	targetWorkspaceIDLower := strings.ToLower(targetWorkspaceID)
 	targetSlot := "slot-b"
 	targetSurfaceID := "22222222-2222-4222-8222-222222222222"
 	writeHeadlessCLITestSnapshotAtWithMetadata(t, root, targetWorkspaceID, targetSlot, "Target Workspace", targetSurfaceID, map[string]string{
@@ -1500,8 +1501,11 @@ func TestCLIHeadlessWorkspaceLookupIncludeDetachedScansAllSnapshots(t *testing.T
 		t.Fatalf("matches len = %d, want 1", len(matches))
 	}
 	match, _ := matches[0].(map[string]any)
-	if got := match["id"]; got != targetWorkspaceID {
-		t.Fatalf("match id = %v, want %s", got, targetWorkspaceID)
+	if got := match["id"]; got != targetWorkspaceIDLower {
+		t.Fatalf("match id = %v, want %s", got, targetWorkspaceIDLower)
+	}
+	if got := match["workspace_id"]; got != targetWorkspaceIDLower {
+		t.Fatalf("match workspace_id = %v, want %s", got, targetWorkspaceIDLower)
 	}
 	callerBody := readHeadlessCLITestBody(t, root, callerSlot)
 	if got := headlessMetadataMap(callerBody)["craft:task-id"]; got != "task-1" {
