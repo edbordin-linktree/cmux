@@ -64,8 +64,11 @@ func runHeadlessCLICommand(commandName, method string, params map[string]any, js
 // was attempted at all, instead of leaving them staring at only the headless
 // reason.
 func headlessFailureMessage(commandName string, headlessErr, relayErr error) string {
-	_ = relayErr
-	return fmt.Sprintf("cmux: %s requires an attached cmux UI or a detached remote snapshot: %v", commandName, headlessErr)
+	msg := fmt.Sprintf("cmux: %s requires an attached cmux UI or a detached remote snapshot: %v", commandName, headlessErr)
+	if relayErr != nil {
+		msg += fmt.Sprintf(" (relay path also failed: %v)", relayErr)
+	}
+	return msg
 }
 
 func headlessSupportsMethod(method string) bool {
