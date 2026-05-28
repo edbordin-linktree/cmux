@@ -363,6 +363,8 @@ cmux send-key [--workspace current] --surface <surface> <key>
 
 The remote wrapper accepts `--json` before or after the command for these daemon-relayed commands, so both `cmux --json new-surface ...` and `cmux new-surface ... --json` are valid.
 
+For `new-pane`, `new-surface`, and `new-split`, `--command` is treated as terminal input sent after the terminal surface is created, equivalent to `cmux send ... "$command"` followed by Enter. It is not passed to Ghostty as a native startup executable. This keeps local, attached remote, and detached/headless command semantics aligned and supports shell snippets such as `sleep 1; printf ok >/tmp/probe`.
+
 Remote/headless `cmux workspace lookup` is a query command. If the Swift relay is available, it routes to Swift and searches the workspaces Swift knows about. If the relay is unavailable and `--include-detached` is absent, it returns an empty match set. If `--include-detached` is present, it scans all detached snapshots under the current remote host's daemon root and matches by metadata.
 
 Detached-safe remote commands can run without `CMUX_SOCKET_PATH` when the remote workspace context environment is present (`CMUX_WORKSPACE_ID` and/or `CMUX_REMOTE_DAEMON_SLOT`). In that case the wrapper skips the relay attempt and goes straight to the headless snapshot/daemon path. If a Swift relay socket is present and reachable, it remains authoritative; server-side Swift errors are returned to the caller instead of being masked by a detached fallback.

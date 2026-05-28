@@ -9763,7 +9763,7 @@ class TerminalController {
                     direction: direction,
                     focus: focus,
                     workingDirectory: ws.isRemoteWorkspace ? nil : workingDirectory,
-                    initialCommand: ws.isRemoteWorkspace ? nil : initialCommand,
+                    initialCommand: nil,
                     tmuxStartCommand: tmuxStartCommand,
                     startupEnvironment: startupEnvironment,
                     initialDividerPosition: initialDividerPosition.map { CGFloat($0) },
@@ -9772,7 +9772,7 @@ class TerminalController {
             }
 
             if let newId {
-                if let commandError = v2QueueRemoteTerminalStartupInput(
+                if let commandError = v2QueueTerminalStartupInput(
                     workingDirectory: workingDirectory,
                     initialCommand: initialCommand,
                     workspace: ws,
@@ -9853,7 +9853,7 @@ class TerminalController {
                     inPane: paneId,
                     focus: focus,
                     workingDirectory: ws.isRemoteWorkspace ? nil : workingDirectory,
-                    initialCommand: ws.isRemoteWorkspace ? nil : initialCommand,
+                    initialCommand: nil,
                     tmuxStartCommand: tmuxStartCommand,
                     startupEnvironment: startupEnvironment,
                     remotePTYSessionID: remotePTYSessionID
@@ -9864,7 +9864,7 @@ class TerminalController {
                 result = .err(code: "internal_error", message: "Failed to create surface", data: nil)
                 return
             }
-            if let commandError = v2QueueRemoteTerminalStartupInput(
+            if let commandError = v2QueueTerminalStartupInput(
                 workingDirectory: workingDirectory,
                 initialCommand: initialCommand,
                 workspace: ws,
@@ -9927,7 +9927,7 @@ class TerminalController {
         return result
     }
 
-    private func v2QueueRemoteTerminalStartupInput(
+    private func v2QueueTerminalStartupInput(
         workingDirectory: String?,
         initialCommand: String?,
         workspace: Workspace,
@@ -9935,8 +9935,9 @@ class TerminalController {
     ) -> V2CallResult? {
         let normalizedWorkingDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedInitialCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard workspace.isRemoteWorkspace,
-              normalizedWorkingDirectory?.isEmpty == false || normalizedInitialCommand?.isEmpty == false else {
+        let shouldSendWorkingDirectory = workspace.isRemoteWorkspace && normalizedWorkingDirectory?.isEmpty == false
+        let shouldSendInitialCommand = normalizedInitialCommand?.isEmpty == false
+        guard shouldSendWorkingDirectory || shouldSendInitialCommand else {
             return nil
         }
         guard let terminalPanel = workspace.terminalPanel(for: surfaceId) else {
@@ -9944,28 +9945,44 @@ class TerminalController {
         }
 
         var commands: [String] = []
-        if let normalizedWorkingDirectory, !normalizedWorkingDirectory.isEmpty {
+        if shouldSendWorkingDirectory,
+           let normalizedWorkingDirectory,
+           !normalizedWorkingDirectory.isEmpty {
             commands.append("cd -- \(Self.v2ShellSingleQuoted(normalizedWorkingDirectory))")
         }
-        if let normalizedInitialCommand, !normalizedInitialCommand.isEmpty {
-            commands.append("exec /bin/sh -lc \(Self.v2ShellSingleQuoted(normalizedInitialCommand))")
+        if shouldSendInitialCommand,
+           let normalizedInitialCommand,
+           !normalizedInitialCommand.isEmpty {
+            commands.append(normalizedInitialCommand)
         }
         let input = commands.joined(separator: " && ") + "\n"
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak terminalPanel] in
-            guard let terminalPanel else { return }
-            switch terminalPanel.sendInputResult(input) {
-            case .sent:
-                terminalPanel.surface.forceRefresh(reason: "terminalController.v2QueueRemoteTerminalStartupInput")
-            case .queued:
-                break
-            case .inputQueueFull, .surfaceUnavailable, .processExited:
-                cmuxDebugLog(
-                    "terminalController.v2QueueRemoteTerminalStartupInput.failed " +
-                    "surface=\(surfaceId.uuidString.prefix(8))"
-                )
+        func scheduleAttempt(_ delay: TimeInterval, remainingRetries: Int) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak terminalPanel] in
+                guard let terminalPanel else { return }
+                switch terminalPanel.sendInputResult(input) {
+                case .sent:
+                    terminalPanel.surface.forceRefresh(reason: "terminalController.v2QueueTerminalStartupInput")
+                case .queued:
+                    break
+                case .inputQueueFull, .surfaceUnavailable:
+                    if remainingRetries > 0 {
+                        scheduleAttempt(1.0, remainingRetries: remainingRetries - 1)
+                    } else {
+                        cmuxDebugLog(
+                            "terminalController.v2QueueTerminalStartupInput.failed " +
+                            "surface=\(surfaceId.uuidString.prefix(8))"
+                        )
+                    }
+                case .processExited:
+                    cmuxDebugLog(
+                        "terminalController.v2QueueTerminalStartupInput.failed " +
+                        "surface=\(surfaceId.uuidString.prefix(8)) reason=processExited"
+                    )
+                }
             }
         }
+        scheduleAttempt(workspace.isRemoteWorkspace ? 1.5 : 0.2, remainingRetries: 3)
         return nil
     }
 
@@ -11249,7 +11266,7 @@ class TerminalController {
                     insertFirst: insertFirst,
                     focus: focus,
                     workingDirectory: ws.isRemoteWorkspace ? nil : workingDirectory,
-                    initialCommand: ws.isRemoteWorkspace ? nil : initialCommand,
+                    initialCommand: nil,
                     tmuxStartCommand: tmuxStartCommand,
                     startupEnvironment: startupEnvironment,
                     initialDividerPosition: initialDividerPosition.map { CGFloat($0) }
@@ -11260,7 +11277,7 @@ class TerminalController {
                 result = .err(code: "internal_error", message: "Failed to create pane", data: nil)
                 return
             }
-            if let commandError = v2QueueRemoteTerminalStartupInput(
+            if let commandError = v2QueueTerminalStartupInput(
                 workingDirectory: workingDirectory,
                 initialCommand: initialCommand,
                 workspace: ws,

@@ -12687,7 +12687,7 @@ struct CMUXCLI {
               --type <terminal|browser>
                                       New split surface type (default: terminal)
               --url <url>            URL for browser splits
-              --command <text>       Initial command for terminal splits
+              --command <text>       Command text to send to terminal splits after creation
               --focus <true|false>   Focus the new split (default: false)
 
             Example:
@@ -12832,7 +12832,7 @@ struct CMUXCLI {
               --workspace <id|ref|index>          Target workspace (default: $CMUX_WORKSPACE_ID)
               --window <id|ref|index>             Window context for workspace refs and indexes
               --url <url>                         URL for browser panes
-              --command <text>                    Initial command for terminal panes
+              --command <text>                    Command text to send to terminal panes after creation
               --focus <true|false>                Focus the new pane (default: false)
 
             Example:
@@ -12851,7 +12851,7 @@ struct CMUXCLI {
               --workspace <id|ref|index>  Target workspace (default: $CMUX_WORKSPACE_ID)
               --window <id|ref|index>     Window context for workspace/pane refs and indexes
               --url <url>                 URL for browser surfaces
-              --command <text>            Initial command for terminal surfaces
+              --command <text>            Command text to send to terminal surfaces after creation
               --focus <true|false>        Focus the new surface (default: false)
 
             Example:
