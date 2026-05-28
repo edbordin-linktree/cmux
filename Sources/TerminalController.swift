@@ -5230,6 +5230,21 @@ class TerminalController {
             "export CMUX_SOCKET_PATH=\(v2ShellSingleQuoted("127.0.0.1:\(relayPort)"))",
             #"export PATH="$HOME/.cmux/bin:$PATH""#,
             #"export CMUX_BUNDLED_CLI_PATH="$HOME/.cmux/bin/cmux""#,
+            #"""
+            cmux_relay_cli="${CMUX_BUNDLED_CLI_PATH:-$HOME/.cmux/bin/cmux}"
+            if [ ! -x "$cmux_relay_cli" ]; then cmux_relay_cli="$(command -v cmux 2>/dev/null || true)"; fi
+            cmux_relay_tty="$(tty 2>/dev/null || true)"
+            cmux_relay_tty="${cmux_relay_tty##*/}"
+            if [ -n "$cmux_relay_tty" ] && [ "$cmux_relay_tty" != "not a tty" ]; then
+              mkdir -p "$HOME/.cmux/relay" >/dev/null 2>&1 || true
+              printf '%s' "$cmux_relay_tty" > "$HOME/.cmux/relay/\#(relayPort).tty" 2>/dev/null || true
+              cmux_relay_report_tty="{\"workspace_id\":\"$CMUX_WORKSPACE_ID\",\"surface_id\":\"$CMUX_SURFACE_ID\",\"tty_name\":\"$cmux_relay_tty\"}"
+              if [ -n "$cmux_relay_cli" ]; then
+                env -u CMUX_SOCKET "$cmux_relay_cli" rpc surface.report_tty "$cmux_relay_report_tty" >/dev/null 2>&1 || true
+              fi
+            fi
+            unset cmux_relay_cli cmux_relay_tty cmux_relay_report_tty
+            """#,
         ]
         if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
             statements.append("cd -- \(v2ShellSingleQuoted(cwd))")
@@ -8548,7 +8563,7 @@ class TerminalController {
                 validSurfaceIds: validSurfaceIds
             )
             guard let surfaceId, validSurfaceIds.contains(surfaceId) else {
-                if tab.isRemoteWorkspace, validSurfaceIds.isEmpty {
+                if tab.isRemoteWorkspace, requestedSurfaceId != nil || validSurfaceIds.isEmpty {
                     tab.rememberPendingRemoteSurfaceTTY(ttyName, requestedSurfaceId: requestedSurfaceId)
                     result = .ok([
                         "workspace_id": workspaceId.uuidString,
