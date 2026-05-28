@@ -8,14 +8,14 @@ https://github.com/edbordin-linktree/cmux/tree/local/remote-workspace-snapshots
 
 This branch combines two layers:
 
-- an unmerged upstream remote-session base that runs a persistent `cmuxd-remote` daemon on the SSH host;
+- an unmerged upstream remote-session base from `manaflow-ai/cmux#4807` that runs a persistent `cmuxd-remote` daemon on the SSH host;
 - local additions on this branch that snapshot and restore workspace layout around that daemon.
 
 ## General Model
 
 The remote host does not run the full cmux workspace UI. The Swift app on the Mac still owns the real workspace model while attached: sidebar entries, split layout, tabs, browser surfaces, focus, and most workspace commands are Swift/UI state.
 
-The remote host owns long-lived terminal processes. The unmerged base branch adds a persistent `cmuxd-remote` daemon under `~/.cmux/daemon/<slot>/`. That daemon keeps PTY sessions alive and exposes primitives such as `pty.attach` and `pty.detach`, so a terminal process can survive the Mac UI closing its surface or losing the relay.
+The remote host owns long-lived terminal processes. The base branch from PR `manaflow-ai/cmux#4807` adds a persistent `cmuxd-remote` daemon under `~/.cmux/daemon/<slot>/`. That daemon keeps PTY sessions alive and exposes primitives such as `pty.attach` and `pty.detach`, so a terminal process can survive the Mac UI closing its surface or losing the relay.
 
 This branch builds a workspace illusion on top of that PTY layer:
 
