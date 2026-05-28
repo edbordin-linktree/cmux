@@ -644,6 +644,9 @@ func remoteSSHShellJoin(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
+	if len(args) == 1 {
+		return args[0]
+	}
 	quoted := make([]string, 0, len(args))
 	for _, arg := range args {
 		quoted = append(quoted, remoteSSHShellQuote(arg))

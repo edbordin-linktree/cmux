@@ -1518,6 +1518,26 @@ func TestCLISSHRoutesToSwiftWhenRelayAvailable(t *testing.T) {
 	}
 }
 
+func TestCLISSHSingleCommandArgIsNotShellQuoted(t *testing.T) {
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+	command := "printf remote_wrapper_command_ok >/tmp/cmux-remote-wrapper-command-marker; exec bash -l"
+	_ = captureStdout(t, func() {
+		code := runCLI([]string{"--socket", sockPath, "--json", "ssh", "localhost", "--cwd", "/tmp/project", "--name", "Attached Task", "--", command})
+		if code != 0 {
+			t.Fatalf("ssh returned %d", code)
+		}
+	})
+	select {
+	case req := <-requests:
+		params, _ := req["params"].(map[string]any)
+		if got := params["initial_command"]; got != command {
+			t.Fatalf("initial_command = %q, want %q", got, command)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ssh create request")
+	}
+}
+
 func TestCLISSHDetachedFlagBypassesSwiftRelay(t *testing.T) {
 	root := t.TempDir()
 	cwd := filepath.Join(root, "project")

@@ -7311,6 +7311,17 @@ class TerminalController {
         let relayPort = Self.v2GenerateRemoteRelayPort()
         let relayID = UUID().uuidString.lowercased()
         let persistentDaemonSlot = "ssh-\(UUID().uuidString.lowercased())"
+        let sshPort = v2StrictInt(params, "port")
+        let identityFile = v2RawString(params, "identity_file")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sshOptions = v2StringArray(params, "ssh_options") ?? []
+        let foregroundAuthToken: String
+        let relayToken: String
+        do {
+            foregroundAuthToken = try Self.v2RandomHex(byteCount: 32)
+            relayToken = try Self.v2RandomHex(byteCount: 32)
+        } catch {
+            return .err(code: "internal_error", message: "failed to generate SSH relay credential", data: nil)
+        }
         let remoteShellCommand = Self.v2RemoteSSHWorkspaceTerminalCommand(
             workspaceID: "__CMUX_WORKSPACE_ID__",
             surfaceID: "__CMUX_SURFACE_ID__",
@@ -7320,15 +7331,16 @@ class TerminalController {
             initialCommand: initialCommand
         )
         let terminalStartupCommand = SSHPTYAttachStartupCommandBuilder.command(
+            foregroundAuth: SSHPTYAttachStartupCommandBuilder.ForegroundAuth(
+                destination: destination,
+                port: sshPort,
+                identityFile: identityFile?.isEmpty == true ? nil : identityFile,
+                sshOptions: sshOptions,
+                token: foregroundAuthToken
+            ),
             requireExisting: false,
             command: remoteShellCommand
         )
-        let relayToken: String
-        do {
-            relayToken = try Self.v2RandomHex(byteCount: 32)
-        } catch {
-            return .err(code: "internal_error", message: "failed to generate SSH relay credential", data: nil)
-        }
 
         let createResult = v2WorkspaceCreate(params: [
             "title": title ?? "",
@@ -7354,7 +7366,8 @@ class TerminalController {
         var configureParams: [String: Any] = [
             "workspace_id": workspaceID.uuidString,
             "destination": destination,
-            "auto_connect": true,
+            "auto_connect": false,
+            "foreground_auth_token": foregroundAuthToken,
             "relay_port": relayPort,
             "relay_id": relayID,
             "relay_token": relayToken,
@@ -7363,14 +7376,13 @@ class TerminalController {
             "preserve_after_terminal_exit": true,
             "persistent_daemon_slot": persistentDaemonSlot,
         ]
-        if let port = v2StrictInt(params, "port") {
-            configureParams["port"] = port
+        if let sshPort {
+            configureParams["port"] = sshPort
         }
-        if let identityFile = v2RawString(params, "identity_file")?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !identityFile.isEmpty {
+        if let identityFile, !identityFile.isEmpty {
             configureParams["identity_file"] = identityFile
         }
-        if let sshOptions = v2StringArray(params, "ssh_options"), !sshOptions.isEmpty {
+        if !sshOptions.isEmpty {
             configureParams["ssh_options"] = sshOptions
         }
 
