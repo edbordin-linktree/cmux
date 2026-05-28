@@ -130,6 +130,13 @@ struct cmuxApp: App {
             setenv("TERM", TerminalSurface.managedTerminalType, 1)
         }
 
+        if getenv("TERMINFO") == nil, let resourceURL = Bundle.main.resourceURL {
+            let bundledTerminfoURL = resourceURL.appendingPathComponent("terminfo")
+            if fileManager.fileExists(atPath: bundledTerminfoURL.path) {
+                setenv("TERMINFO", bundledTerminfoURL.path, 1)
+            }
+        }
+
         if getenv("COLORTERM") == nil {
             setenv("COLORTERM", TerminalSurface.managedColorTerm, 1)
         }

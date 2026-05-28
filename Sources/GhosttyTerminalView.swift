@@ -2217,6 +2217,12 @@ class GhosttyApp {
                 logLabel: "renderer background (fallback)"
             )
             loadInlineGhosttyConfig(
+                "window-vsync = false",
+                into: fallbackConfig,
+                prefix: "cmux-window-vsync",
+                logLabel: "window vsync (fallback)"
+            )
+            loadInlineGhosttyConfig(
                 "macos-titlebar-proxy-icon = hidden",
                 into: fallbackConfig,
                 prefix: "cmux-titlebar-proxy-icon",
@@ -2430,6 +2436,16 @@ class GhosttyApp {
             into: config,
             prefix: "cmux-renderer-bg",
             logLabel: "renderer background"
+        )
+        // Ghostty's embedded macOS renderer creates CVDisplayLink before cmux can
+        // provide a concrete display ID, and macOS can report zero active displays
+        // during tagged/debug launches or window reparenting. cmux drives explicit
+        // refreshes for embedded terminals, so disable the per-surface display link.
+        loadInlineGhosttyConfig(
+            "window-vsync = false",
+            into: config,
+            prefix: "cmux-window-vsync",
+            logLabel: "window vsync"
         )
         // Hide Ghostty's native AppKit proxy icon at the source instead of
         // overriding NSWindow.representedURL on every cmux main window.

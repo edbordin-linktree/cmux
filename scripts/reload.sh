@@ -420,6 +420,70 @@ CMUX_DEV_ORIGIN="http://localhost:${CMUX_DEV_PORT}"
 RELOAD_LOG="/tmp/cmux-reload-${TAG_SLUG}.log"
 RELOAD_START_TIME="$(date +%s)"
 : > "$RELOAD_LOG"
+LAUNCHCTL_TAG_ENV_KEYS=()
+
+clear_launchctl_tag_env() {
+  local key
+  for key in "${LAUNCHCTL_TAG_ENV_KEYS[@]:-}"; do
+    launchctl unsetenv "$key" >/dev/null 2>&1 || true
+  done
+  LAUNCHCTL_TAG_ENV_KEYS=()
+}
+
+prepare_launchctl_tag_env() {
+  clear_launchctl_tag_env
+
+  local pair key value
+  local clean_keys=(
+    CMUX_SOCKET
+    CMUX_SOCKET_PASSWORD
+    CMUX_SOCKET_PATH
+    CMUX_WORKSPACE_ID
+    CMUX_REMOTE_DAEMON_SLOT
+    CMUX_SURFACE_ID
+    CMUX_TAB_ID
+    CMUX_PANEL_ID
+    CMUXD_UNIX_PATH
+    CMUX_TAG
+    CMUX_DEBUG_LOG
+    CMUX_BUNDLE_ID
+    CMUX_BUNDLED_CLI_PATH
+    CMUX_SHELL_INTEGRATION
+    CMUX_SHELL_INTEGRATION_DIR
+    CMUX_LOAD_GHOSTTY_ZSH_INTEGRATION
+    CMUX_API_BASE_URL
+    CMUX_AUTH_WWW_ORIGIN
+    CMUX_NO_GIT_WATCH
+    CMUX_PORT
+    CMUX_PORT_END
+    CMUX_PORT_RANGE
+    CMUX_REMOTE_DAEMON_ALLOW_LOCAL_BUILD
+    CMUX_SUPPRESS_SUBAGENT_NOTIFICATIONS
+    CMUX_VM_API_BASE_URL
+    CMUXTERM_REPO_ROOT
+    GHOSTTY_BIN_DIR
+    GHOSTTY_CONFIG_DIR
+    GHOSTTY_RESOURCES_DIR
+    GHOSTTY_SHELL_FEATURES
+    GHOSTTY_SURFACE_ID
+    GIT_PAGER
+    GH_PAGER
+    TERMINFO
+    XDG_DATA_DIRS
+  )
+
+  for key in "${clean_keys[@]}"; do
+    launchctl unsetenv "$key" >/dev/null 2>&1 || true
+  done
+
+  for pair in "$@"; do
+    key="${pair%%=*}"
+    value="${pair#*=}"
+    [[ -n "$key" ]] || continue
+    launchctl setenv "$key" "$value"
+    LAUNCHCTL_TAG_ENV_KEYS+=("$key")
+  done
+}
 
 # Save the original stdout/stderr so the EXIT trap can write the user-facing
 # summary after the body redirect, then redirect bulk output into the log.
@@ -429,6 +493,7 @@ exec >>"$RELOAD_LOG" 2>&1
 reload_finalize() {
   local rc=$?
   trap - EXIT
+  clear_launchctl_tag_env
   exec 1>&3 2>&4
   local elapsed=$(( $(date +%s) - RELOAD_START_TIME ))
   if [[ "$rc" -ne 0 ]]; then
@@ -846,6 +911,7 @@ if [[ "$LAUNCH" -eq 1 ]]; then
     -u CMUX_SOCKET_PASSWORD
     -u CMUX_SOCKET_PATH
     -u CMUX_WORKSPACE_ID
+    -u CMUX_REMOTE_DAEMON_SLOT
     -u CMUX_SURFACE_ID
     -u CMUX_TAB_ID
     -u CMUX_PANEL_ID
@@ -857,7 +923,18 @@ if [[ "$LAUNCH" -eq 1 ]]; then
     -u CMUX_SHELL_INTEGRATION
     -u CMUX_SHELL_INTEGRATION_DIR
     -u CMUX_LOAD_GHOSTTY_ZSH_INTEGRATION
+    -u CMUX_API_BASE_URL
+    -u CMUX_AUTH_WWW_ORIGIN
+    -u CMUX_NO_GIT_WATCH
+    -u CMUX_PORT
+    -u CMUX_PORT_END
+    -u CMUX_PORT_RANGE
+    -u CMUX_REMOTE_DAEMON_ALLOW_LOCAL_BUILD
+    -u CMUX_SUPPRESS_SUBAGENT_NOTIFICATIONS
+    -u CMUX_VM_API_BASE_URL
+    -u CMUXTERM_REPO_ROOT
     -u GHOSTTY_BIN_DIR
+    -u GHOSTTY_CONFIG_DIR
     -u GHOSTTY_RESOURCES_DIR
     -u GHOSTTY_SHELL_FEATURES
     -u GHOSTTY_SURFACE_ID
@@ -877,7 +954,7 @@ if [[ "$LAUNCH" -eq 1 ]]; then
     CMUX_DEBUG_LOG="$CMUX_DEBUG_LOG"
     CMUX_REMOTE_DAEMON_ALLOW_LOCAL_BUILD=1
     CMUXTERM_REPO_ROOT="$PWD"
-    CMUX_BUNDLED_CLI_PATH="$CLI_PATH"
+    CMUX_BUNDLED_CLI_PATH="$APP_PATH/Contents/Resources/bin/cmux"
     CMUX_SHELL_INTEGRATION_DIR="$APP_PATH/Contents/Resources/shell-integration"
     CMUX_PORT="$CMUX_DEV_PORT"
     CMUX_PORT_END="$CMUX_DEV_PORT_END"
@@ -886,6 +963,8 @@ if [[ "$LAUNCH" -eq 1 ]]; then
     CMUX_AUTH_WWW_ORIGIN="$CMUX_DEV_ORIGIN"
     CMUX_API_BASE_URL="$CMUX_DEV_ORIGIN"
     CMUX_VM_API_BASE_URL="$CMUX_DEV_ORIGIN"
+    GHOSTTY_RESOURCES_DIR="$APP_PATH/Contents/Resources/ghostty"
+    TERMINFO="$APP_PATH/Contents/Resources/terminfo"
   )
 
   LAUNCH_CMD=()
@@ -900,11 +979,13 @@ if [[ "$LAUNCH" -eq 1 ]]; then
     fi
     TAG_LAUNCH_LOG="/tmp/cmux-launch-${TAG_SLUG}.out"
     if [[ -n "${CMUX_SOCKET_PATH_VALUE:-}" ]]; then
-      LAUNCH_CMD=("${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" CMUX_SOCKET_PATH="$CMUX_SOCKET_PATH_VALUE" CMUXD_UNIX_PATH="$CMUXD_SOCKET" open -n "$APP_PATH")
-      LAUNCH_RETRY_CMD=("${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" CMUX_SOCKET_PATH="$CMUX_SOCKET_PATH_VALUE" CMUXD_UNIX_PATH="$CMUXD_SOCKET" open -n "$APP_PATH")
+      prepare_launchctl_tag_env "${TAG_LAUNCH_ENV[@]}" CMUX_SOCKET_PATH="$CMUX_SOCKET_PATH_VALUE" CMUXD_UNIX_PATH="$CMUXD_SOCKET"
+      LAUNCH_CMD=("${OPEN_CLEAN_ENV[@]}" open -n "$APP_PATH")
+      LAUNCH_RETRY_CMD=("${OPEN_CLEAN_ENV[@]}" open -n "$APP_PATH")
     else
-      LAUNCH_CMD=("${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" open -n "$APP_PATH")
-      LAUNCH_RETRY_CMD=("${OPEN_CLEAN_ENV[@]}" "${TAG_LAUNCH_ENV[@]}" open -n "$APP_PATH")
+      prepare_launchctl_tag_env "${TAG_LAUNCH_ENV[@]}"
+      LAUNCH_CMD=("${OPEN_CLEAN_ENV[@]}" open -n "$APP_PATH")
+      LAUNCH_RETRY_CMD=("${OPEN_CLEAN_ENV[@]}" open -n "$APP_PATH")
     fi
   else
     echo "/tmp/cmux-debug.sock" > /tmp/cmux-last-socket-path || true

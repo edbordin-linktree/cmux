@@ -9765,6 +9765,10 @@ class TerminalController {
                     workingDirectory: ws.isRemoteWorkspace ? nil : workingDirectory,
                     initialCommand: nil,
                     tmuxStartCommand: tmuxStartCommand,
+                    initialInput: v2LocalTerminalStartupInput(
+                        workspace: ws,
+                        initialCommand: initialCommand
+                    ),
                     startupEnvironment: startupEnvironment,
                     initialDividerPosition: initialDividerPosition.map { CGFloat($0) },
                     remotePTYSessionID: remotePTYSessionID
@@ -9855,6 +9859,10 @@ class TerminalController {
                     workingDirectory: ws.isRemoteWorkspace ? nil : workingDirectory,
                     initialCommand: nil,
                     tmuxStartCommand: tmuxStartCommand,
+                    initialInput: v2LocalTerminalStartupInput(
+                        workspace: ws,
+                        initialCommand: initialCommand
+                    ),
                     startupEnvironment: startupEnvironment,
                     remotePTYSessionID: remotePTYSessionID
                 )?.id
@@ -9927,6 +9935,18 @@ class TerminalController {
         return result
     }
 
+    private func v2LocalTerminalStartupInput(
+        workspace: Workspace,
+        initialCommand: String?
+    ) -> String? {
+        guard !workspace.isRemoteWorkspace else { return nil }
+        guard let command = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !command.isEmpty else {
+            return nil
+        }
+        return command + "\n"
+    }
+
     private func v2QueueTerminalStartupInput(
         workingDirectory: String?,
         initialCommand: String?,
@@ -9936,7 +9956,7 @@ class TerminalController {
         let normalizedWorkingDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedInitialCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldSendWorkingDirectory = workspace.isRemoteWorkspace && normalizedWorkingDirectory?.isEmpty == false
-        let shouldSendInitialCommand = normalizedInitialCommand?.isEmpty == false
+        let shouldSendInitialCommand = workspace.isRemoteWorkspace && normalizedInitialCommand?.isEmpty == false
         guard shouldSendWorkingDirectory || shouldSendInitialCommand else {
             return nil
         }
@@ -11268,6 +11288,10 @@ class TerminalController {
                     workingDirectory: ws.isRemoteWorkspace ? nil : workingDirectory,
                     initialCommand: nil,
                     tmuxStartCommand: tmuxStartCommand,
+                    initialInput: v2LocalTerminalStartupInput(
+                        workspace: ws,
+                        initialCommand: initialCommand
+                    ),
                     startupEnvironment: startupEnvironment,
                     initialDividerPosition: initialDividerPosition.map { CGFloat($0) }
                 )?.id
