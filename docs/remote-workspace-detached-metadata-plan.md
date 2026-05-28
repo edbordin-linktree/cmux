@@ -13,19 +13,19 @@ This branch combines two layers:
 
 ## Build And Run This Fork
 
-Use a tagged debug build so the fork can run beside the installed release build of cmux:
+Use a tagged debug build so the fork can run beside the installed release build of cmux. Pick a tag that is unique to the person or agent running the build; the examples below use `rwsnap`, but do not reuse that tag if another dev instance is already using it.
 
 ```bash
 git clone https://github.com/edbordin-linktree/cmux.git
 cd cmux
 git checkout local/remote-workspace-snapshots
 ./scripts/setup.sh
-CMUX_SKIP_ZIG_BUILD=1 ./scripts/reload.sh --tag rwsnap --launch
+CMUX_SKIP_ZIG_BUILD=1 ./scripts/reload.sh --tag <tag> --launch
 ```
 
 `CMUX_SKIP_ZIG_BUILD=1` is useful on machines where Homebrew has Zig `0.16.x` instead of the Ghostty helper's expected Zig `0.15.x`. Omit it if the local Zig toolchain is already compatible and you want the helper built normally.
 
-The tag is the isolation boundary. With `--tag rwsnap`, `reload.sh` creates:
+The tag is the isolation boundary. For example, with `--tag rwsnap`, `reload.sh` creates:
 
 - app name `cmux DEV rwsnap.app`;
 - bundle id `com.cmuxterm.app.debug.rwsnap`;
@@ -37,8 +37,8 @@ The tag is the isolation boundary. With `--tag rwsnap`, `reload.sh` creates:
 Use the tag-bound CLI helper for commands against this fork:
 
 ```bash
-CMUX_TAG=rwsnap scripts/cmux-debug-cli.sh list-workspaces
-CMUX_TAG=rwsnap scripts/cmux-debug-cli.sh ssh-workspace-list-detached --json
+CMUX_TAG=<tag> scripts/cmux-debug-cli.sh list-workspaces
+CMUX_TAG=<tag> scripts/cmux-debug-cli.sh ssh-workspace-list-detached --json
 ```
 
 Avoid `/tmp/cmux-cli` for dogfooding this branch because it points at the most recently reloaded dev build, not necessarily this tagged fork.
@@ -48,10 +48,10 @@ Avoid `/tmp/cmux-cli` for dogfooding this branch because it points at the most r
 The release app and this fork can be open at the same time:
 
 - Keep `/Applications/cmux.app` running as usual.
-- Launch the fork with `CMUX_SKIP_ZIG_BUILD=1 ./scripts/reload.sh --tag rwsnap --launch`.
-- Use `CMUX_TAG=rwsnap scripts/cmux-debug-cli.sh ...` for fork CLI commands.
+- Launch the fork with `CMUX_SKIP_ZIG_BUILD=1 ./scripts/reload.sh --tag <tag> --launch`.
+- Use `CMUX_TAG=<tag> scripts/cmux-debug-cli.sh ...` for fork CLI commands.
 - Use the normal release-installed `cmux` command for release CLI commands.
-- To stop only the fork, quit `cmux DEV rwsnap`.
+- To stop only the fork, quit the matching `cmux DEV <tag>` app.
 - To replace the fork build, rerun `reload.sh` with the same tag; it only kills and replaces the matching tagged app.
 
 Do not use an untagged debug app for this workflow. Untagged debug builds share default debug identity and socket paths, which makes it easy to target the wrong cmux instance.
@@ -367,7 +367,7 @@ Remote/headless `cmux workspace lookup` is a query command. If the Swift relay i
 
 Detached-safe remote commands can run without `CMUX_SOCKET_PATH` when the remote workspace context environment is present (`CMUX_WORKSPACE_ID` and/or `CMUX_REMOTE_DAEMON_SLOT`). In that case the wrapper skips the relay attempt and goes straight to the headless snapshot/daemon path. If a Swift relay socket is present and reachable, it remains authoritative; server-side Swift errors are returned to the caller instead of being masked by a detached fallback.
 
-Remote `cmux ssh <host>` is the workspace creation primitive for supervisor scripts. Use the canonical SSH destination that the Mac-side cmux app can also use for this host, for example `ed@tdb`, rather than `localhost`. When the Swift relay is available, the wrapper sends `workspace.remote.ssh_create` to the Mac app so the new workspace is created through the normal attached UI path and appears in the sidebar. Passing `--detached` forces the remote-headless same-host path even when the Swift relay is available, so scripts can deliberately create a task workspace that starts hidden from the Mac sidebar. When the relay is unavailable, the wrapper also falls back to that same detached path. The detached path only supports same-host destinations (`localhost`, the current hostname, or `user@current-host`): it creates a new persistent daemon slot, starts the workspace's initial terminal PTY in the requested remote working directory, writes `workspace-snapshot.json` / `.meta.json`, and returns the new `workspace_id`, `surface_id`, and `persistent_daemon_slot`.
+Remote `cmux ssh <host>` is the workspace creation primitive for supervisor scripts. Use the canonical SSH destination that the Mac-side cmux app can also use for this host, for example `user@remote-host`, rather than `localhost`. When the Swift relay is available, the wrapper sends `workspace.remote.ssh_create` to the Mac app so the new workspace is created through the normal attached UI path and appears in the sidebar. Passing `--detached` forces the remote-headless same-host path even when the Swift relay is available, so scripts can deliberately create a task workspace that starts hidden from the Mac sidebar. When the relay is unavailable, the wrapper also falls back to that same detached path. The detached path only supports same-host destinations (`localhost`, the current hostname, or `user@current-host`): it creates a new persistent daemon slot, starts the workspace's initial terminal PTY in the requested remote working directory, writes `workspace-snapshot.json` / `.meta.json`, and returns the new `workspace_id`, `surface_id`, and `persistent_daemon_slot`.
 
 Known limitation: the attached and detached paths need to agree on the host string. `localhost` is reliable for proving same-host in the detached fallback, but it is not safe when the Swift relay is available because Swift would interpret `localhost` from the Mac. Scripts should prefer a stable host alias/name that works from the Mac and also matches the remote host's hostname or `$HOSTNAME`/`$HOST` for detached fallback. If those cannot be made to agree, detached same-host workspace creation may need to use `localhost` while attached workspace creation uses the Mac-reachable host name.
 
@@ -426,7 +426,7 @@ Snapshot reads and mutations on the remote host use an advisory per-slot `worksp
 
 ### Validated E2E Behavior
 
-The current branch was tested on `ed@tdb` with the dev build:
+The current branch was tested against a same-host SSH development machine with the dev build:
 
 - created a remote workspace with multiple panes and browser/terminal surfaces;
 - detached it from the Mac UI;
