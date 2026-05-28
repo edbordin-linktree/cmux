@@ -1542,10 +1542,10 @@ func atomicWriteWorkspaceSnapshotPair(bodyPath string, body []byte, metaPath str
 			_ = os.Remove(metaTmp)
 		}
 	}()
-	if err := writeFileSync(bodyTmp, body, 0o600); err != nil {
+	if err := writeFile(bodyTmp, body, 0o600); err != nil {
 		return err
 	}
-	if err := writeFileSync(metaTmp, meta, 0o600); err != nil {
+	if err := writeFile(metaTmp, meta, 0o600); err != nil {
 		return err
 	}
 	bodyRenamed := false
@@ -1560,9 +1560,6 @@ func atomicWriteWorkspaceSnapshotPair(bodyPath string, body []byte, metaPath str
 		return err
 	}
 	cleanupTemps = false
-	if err := fsyncDirectory(filepath.Dir(bodyPath)); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -1601,7 +1598,7 @@ func lockWorkspaceSnapshot(root string) (func(), error) {
 	}, nil
 }
 
-func writeFileSync(path string, data []byte, perm os.FileMode) error {
+func writeFile(path string, data []byte, perm os.FileMode) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
 		return err
@@ -1618,15 +1615,6 @@ func writeFileSync(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return os.Chmod(path, perm)
-}
-
-func fsyncDirectory(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
 }
 
 func (s *rpcServer) handleProxyOpen(req rpcRequest) rpcResponse {
