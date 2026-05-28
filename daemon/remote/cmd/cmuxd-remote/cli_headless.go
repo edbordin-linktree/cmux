@@ -28,6 +28,27 @@ type headlessSnapshot struct {
 
 var headlessStartPTYFunc = headlessStartPTY
 
+func withHeadlessSnapshot(params map[string]any, fn func(*headlessSnapshot) (map[string]any, error)) (map[string]any, error) {
+	slot, err := resolveHeadlessSnapshotSlot(params)
+	if err != nil {
+		return nil, err
+	}
+	paths, err := persistentDaemonPathsForSlot(slot)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	err = withWorkspaceSnapshotLock(paths.root, func() error {
+		snap, err := loadHeadlessSnapshotAtSlot(params, paths)
+		if err != nil {
+			return err
+		}
+		result, err = fn(snap)
+		return err
+	})
+	return result, err
+}
+
 func runHeadlessCLICommand(commandName, method string, params map[string]any, jsonOutput bool, relayErr error) (int, bool) {
 	if !headlessSupportsMethod(method) {
 		return 0, false
@@ -200,11 +221,23 @@ func headlessCreateWorkspace(params map[string]any) (map[string]any, error) {
 }
 
 func loadHeadlessSnapshot(params map[string]any) (*headlessSnapshot, error) {
+	slot, err := resolveHeadlessSnapshotSlot(params)
+	if err != nil {
+		return nil, err
+	}
+	paths, err := persistentDaemonPathsForSlot(slot)
+	if err != nil {
+		return nil, err
+	}
+	return loadHeadlessSnapshotAtSlot(params, paths)
+}
+
+func resolveHeadlessSnapshotSlot(params map[string]any) (string, error) {
 	workspaceID := headlessWorkspaceID(params)
 	envSlot := firstNonEmptyEnv("CMUX_REMOTE_DAEMON_SLOT", "CMUX_PERSISTENT_DAEMON_SLOT", "CMUX_DAEMON_SLOT")
 	rootBase, err := headlessDaemonRoot()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	slot := envSlot
 	if workspaceID != "" {
@@ -212,16 +245,17 @@ func loadHeadlessSnapshot(params map[string]any) (*headlessSnapshot, error) {
 		if resolveErr == nil {
 			slot = resolvedSlot
 		} else if envSlot == "" {
-			return nil, resolveErr
+			return "", resolveErr
 		}
 	}
 	if slot == "" {
-		return nil, errors.New("CMUX_REMOTE_DAEMON_SLOT or CMUX_WORKSPACE_ID is required")
+		return "", errors.New("CMUX_REMOTE_DAEMON_SLOT or CMUX_WORKSPACE_ID is required")
 	}
-	paths, err := persistentDaemonPathsForSlot(slot)
-	if err != nil {
-		return nil, err
-	}
+	return slot, nil
+}
+
+func loadHeadlessSnapshotAtSlot(params map[string]any, paths persistentDaemonPaths) (*headlessSnapshot, error) {
+	workspaceID := headlessWorkspaceID(params)
 	bodyPath := filepath.Join(paths.root, workspaceSnapshotBodyFile)
 	metaPath := filepath.Join(paths.root, workspaceSnapshotMetaFile)
 	bodyBytes, err := os.ReadFile(bodyPath)
@@ -247,7 +281,7 @@ func loadHeadlessSnapshot(params map[string]any) (*headlessSnapshot, error) {
 		}
 	}
 	return &headlessSnapshot{
-		slot:     slot,
+		slot:     paths.slot,
 		root:     paths.root,
 		bodyPath: bodyPath,
 		metaPath: metaPath,
@@ -310,24 +344,22 @@ func headlessMetadataSet(params map[string]any) (map[string]any, error) {
 	if key == "" || value == "" {
 		return nil, errors.New("metadata.set requires key and value")
 	}
-	snap, err := loadHeadlessSnapshot(params)
-	if err != nil {
-		return nil, err
-	}
-	metadata := headlessMetadataMap(snap.body)
-	metadata[key] = value
-	snap.body["metadataEntries"] = metadata
-	sha, err := storeHeadlessSnapshot(snap)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"workspace_id":    snap.meta.WorkspaceID,
-		"key":             key,
-		"value":           value,
-		"detached":        true,
-		"snapshot_sha256": sha,
-	}, nil
+	return withHeadlessSnapshot(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		metadata := headlessMetadataMap(snap.body)
+		metadata[key] = value
+		snap.body["metadataEntries"] = metadata
+		sha, err := storeHeadlessSnapshot(snap)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"workspace_id":    snap.meta.WorkspaceID,
+			"key":             key,
+			"value":           value,
+			"detached":        true,
+			"snapshot_sha256": sha,
+		}, nil
+	})
 }
 
 func headlessMetadataGet(params map[string]any) (map[string]any, error) {
@@ -384,25 +416,23 @@ func headlessMetadataClear(params map[string]any) (map[string]any, error) {
 	if key == "" {
 		return nil, errors.New("metadata.clear requires key")
 	}
-	snap, err := loadHeadlessSnapshot(params)
-	if err != nil {
-		return nil, err
-	}
-	metadata := headlessMetadataMap(snap.body)
-	_, existed := metadata[key]
-	delete(metadata, key)
-	snap.body["metadataEntries"] = metadata
-	sha, err := storeHeadlessSnapshot(snap)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"workspace_id":    snap.meta.WorkspaceID,
-		"key":             key,
-		"cleared":         existed,
-		"detached":        true,
-		"snapshot_sha256": sha,
-	}, nil
+	return withHeadlessSnapshot(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		metadata := headlessMetadataMap(snap.body)
+		_, existed := metadata[key]
+		delete(metadata, key)
+		snap.body["metadataEntries"] = metadata
+		sha, err := storeHeadlessSnapshot(snap)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"workspace_id":    snap.meta.WorkspaceID,
+			"key":             key,
+			"cleared":         existed,
+			"detached":        true,
+			"snapshot_sha256": sha,
+		}, nil
+	})
 }
 
 func headlessWorkspaceLookup(params map[string]any) (map[string]any, error) {
@@ -477,23 +507,32 @@ func loadAllHeadlessSnapshots() ([]*headlessSnapshot, []map[string]any) {
 			loadErrors = append(loadErrors, map[string]any{"slot": slot, "error": err.Error()})
 			continue
 		}
+		unlock, lockErr := lockWorkspaceSnapshot(paths.root)
+		if lockErr != nil {
+			loadErrors = append(loadErrors, map[string]any{"slot": slot, "error": lockErr.Error()})
+			continue
+		}
 		bodyPath := filepath.Join(paths.root, workspaceSnapshotBodyFile)
 		metaPath := filepath.Join(paths.root, workspaceSnapshotMetaFile)
 		bodyBytes, bodyErr := os.ReadFile(bodyPath)
 		metaBytes, metaErr := os.ReadFile(metaPath)
 		if bodyErr != nil || metaErr != nil {
+			unlock()
 			continue
 		}
 		var meta workspaceSnapshotMeta
 		if err := json.Unmarshal(metaBytes, &meta); err != nil {
+			unlock()
 			loadErrors = append(loadErrors, map[string]any{"slot": slot, "error": "decode detached snapshot metadata: " + err.Error()})
 			continue
 		}
 		var body map[string]any
 		if err := json.Unmarshal(bodyBytes, &body); err != nil {
+			unlock()
 			loadErrors = append(loadErrors, map[string]any{"slot": slot, "error": "decode detached snapshot body: " + err.Error()})
 			continue
 		}
+		unlock()
 		snapshots = append(snapshots, &headlessSnapshot{
 			slot:     slot,
 			root:     paths.root,
@@ -522,92 +561,91 @@ func headlessMetadataMatches(metadata map[string]string, criteria map[string]str
 }
 
 func headlessCreateSurface(params map[string]any, splitPane bool) (map[string]any, error) {
-	snap, err := loadHeadlessSnapshot(params)
-	if err != nil {
-		return nil, err
-	}
-	workspaceID := snap.meta.WorkspaceID
-	if workspaceID == "" {
-		workspaceID, _ = snap.body["workspaceId"].(string)
-	}
-	surfaceID := strings.ToLower(newHeadlessUUID())
-	panelType := strings.ToLower(strings.TrimSpace(stringFromAny(params["type"])))
-	if panelType == "" {
-		panelType = "terminal"
-	}
-	var paneSnapshot map[string]any
-	if panelType == "browser" {
-		url := strings.TrimSpace(stringFromAny(params["url"]))
-		if url == "" {
-			url = "about:blank"
+	return withHeadlessSnapshot(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		workspaceID := snap.meta.WorkspaceID
+		if workspaceID == "" {
+			workspaceID, _ = snap.body["workspaceId"].(string)
 		}
-		paneSnapshot = map[string]any{
-			"type": "browser",
-			"browser": map[string]any{
-				"paneId":     surfaceID,
-				"currentURL": url,
-				"title":      url,
-			},
+		surfaceID := strings.ToLower(newHeadlessUUID())
+		panelType := strings.ToLower(strings.TrimSpace(stringFromAny(params["type"])))
+		if panelType == "" {
+			panelType = "terminal"
 		}
-	} else {
-		sessionID := strings.TrimSpace(stringFromAny(params["remote_pty_session_id"]))
-		if sessionID == "" {
-			sessionID = "ssh-" + workspaceID + "-" + surfaceID
+		var paneSnapshot map[string]any
+		if panelType == "browser" {
+			url := strings.TrimSpace(stringFromAny(params["url"]))
+			if url == "" {
+				url = "about:blank"
+			}
+			paneSnapshot = map[string]any{
+				"type": "browser",
+				"browser": map[string]any{
+					"paneId":     surfaceID,
+					"currentURL": url,
+					"title":      url,
+				},
+			}
+		} else {
+			sessionID := strings.TrimSpace(stringFromAny(params["remote_pty_session_id"]))
+			if sessionID == "" {
+				sessionID = "ssh-" + workspaceID + "-" + surfaceID
+			}
+			command := headlessPTYCommand(
+				snap.slot,
+				workspaceID,
+				surfaceID,
+				stringFromAny(params["initial_command"]),
+				headlessWorkspaceCreateCWD(params),
+			)
+			if err := headlessStartPTYFunc(snap.slot, sessionID, surfaceID, command); err != nil {
+				return nil, err
+			}
+			paneSnapshot = map[string]any{
+				"type": "terminal",
+				"terminal": map[string]any{
+					"paneId":             surfaceID,
+					"remotePTYSessionId": sessionID,
+					"title":              "Terminal",
+					"cwdHint":            headlessWorkspaceCreateCWD(params),
+				},
+			}
 		}
-		command := headlessPTYCommand(
-			snap.slot,
-			workspaceID,
-			surfaceID,
-			stringFromAny(params["initial_command"]),
-			headlessWorkspaceCreateCWD(params),
-		)
-		if err := headlessStartPTYFunc(snap.slot, sessionID, surfaceID, command); err != nil {
-			return nil, err
+		snap.body["panes"] = append(headlessPaneSnapshots(snap.body), paneSnapshot)
+		paneID := surfaceID
+		if splitPane {
+			direction := strings.ToLower(strings.TrimSpace(stringFromAny(params["direction"])))
+			if direction == "" {
+				direction = "right"
+			}
+			if err := headlessInsertSplitPane(snap.body, surfaceID, direction); err != nil {
+				return nil, err
+			}
+		} else {
+			var err error
+			paneID, err = headlessAppendSurfaceToPane(snap.body, surfaceID, stringFromAny(params["pane_id"]))
+			if err != nil {
+				return nil, err
+			}
 		}
-		paneSnapshot = map[string]any{
-			"type": "terminal",
-			"terminal": map[string]any{
-				"paneId":             surfaceID,
-				"remotePTYSessionId": sessionID,
-				"title":              "Terminal",
-				"cwdHint":            headlessWorkspaceCreateCWD(params),
-			},
+		if headlessShouldFocus(params) {
+			snap.body["activePaneId"] = surfaceID
 		}
-	}
-	snap.body["panes"] = append(headlessPaneSnapshots(snap.body), paneSnapshot)
-	paneID := surfaceID
-	if splitPane {
-		direction := strings.ToLower(strings.TrimSpace(stringFromAny(params["direction"])))
-		if direction == "" {
-			direction = "right"
-		}
-		if err := headlessInsertSplitPane(snap.body, surfaceID, direction); err != nil {
-			return nil, err
-		}
-	} else {
-		paneID, err = headlessAppendSurfaceToPane(snap.body, surfaceID, stringFromAny(params["pane_id"]))
+		sha, err := storeHeadlessSnapshot(snap)
 		if err != nil {
 			return nil, err
 		}
-	}
-	if headlessShouldFocus(params) {
-		snap.body["activePaneId"] = surfaceID
-	}
-	sha, err := storeHeadlessSnapshot(snap)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"workspace_id":    workspaceID,
-		"workspace_ref":   "workspace:" + workspaceID,
-		"pane_id":         paneID,
-		"pane_ref":        "pane:" + paneID,
-		"surface_id":      surfaceID,
-		"surface_ref":     "surface:" + surfaceID,
-		"type":            panelType,
-		"detached":        true,
-		"snapshot_sha256": sha,
-	}, nil
+		return map[string]any{
+			"workspace_id":    workspaceID,
+			"workspace_ref":   "workspace:" + workspaceID,
+			"pane_id":         paneID,
+			"pane_ref":        "pane:" + paneID,
+			"surface_id":      surfaceID,
+			"surface_ref":     "surface:" + surfaceID,
+			"type":            panelType,
+			"detached":        true,
+			"snapshot_sha256": sha,
+		}, nil
+	})
 }
 
 func headlessCloseSurface(params map[string]any) (map[string]any, error) {
@@ -618,26 +656,24 @@ func headlessCloseSurface(params map[string]any) (map[string]any, error) {
 	if surfaceID == "" {
 		return nil, errors.New("surface.close requires surface_id")
 	}
-	snap, err := loadHeadlessSnapshot(params)
-	if err != nil {
-		return nil, err
-	}
-	snap.body["panes"] = removeHeadlessPaneSnapshot(snap.body, surfaceID)
-	removed := headlessRemoveSurfaceFromLayout(snap.body["splitTree"], surfaceID)
-	if strings.EqualFold(stringFromAny(snap.body["activePaneId"]), surfaceID) {
-		snap.body["activePaneId"] = firstHeadlessSurfaceID(snap.body["splitTree"])
-	}
-	sha, err := storeHeadlessSnapshot(snap)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"workspace_id":    snap.meta.WorkspaceID,
-		"surface_id":      surfaceID,
-		"closed":          removed,
-		"detached":        true,
-		"snapshot_sha256": sha,
-	}, nil
+	return withHeadlessSnapshot(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		snap.body["panes"] = removeHeadlessPaneSnapshot(snap.body, surfaceID)
+		removed := headlessRemoveSurfaceFromLayout(snap.body["splitTree"], surfaceID)
+		if strings.EqualFold(stringFromAny(snap.body["activePaneId"]), surfaceID) {
+			snap.body["activePaneId"] = firstHeadlessSurfaceID(snap.body["splitTree"])
+		}
+		sha, err := storeHeadlessSnapshot(snap)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"workspace_id":    snap.meta.WorkspaceID,
+			"surface_id":      surfaceID,
+			"closed":          removed,
+			"detached":        true,
+			"snapshot_sha256": sha,
+		}, nil
+	})
 }
 
 func headlessRenameWorkspace(params map[string]any) (map[string]any, error) {
@@ -645,27 +681,25 @@ func headlessRenameWorkspace(params map[string]any) (map[string]any, error) {
 	if title == "" {
 		return nil, errors.New("workspace.rename requires title")
 	}
-	snap, err := loadHeadlessSnapshot(params)
-	if err != nil {
-		return nil, err
-	}
-	snap.body["title"] = title
-	snap.meta.Title = title
-	sha, err := storeHeadlessSnapshot(snap)
-	if err != nil {
-		return nil, err
-	}
-	workspaceID := snap.meta.WorkspaceID
-	if workspaceID == "" {
-		workspaceID = stringFromAny(snap.body["workspaceId"])
-	}
-	return map[string]any{
-		"workspace_id":    workspaceID,
-		"workspace_ref":   "workspace:" + workspaceID,
-		"title":           title,
-		"detached":        true,
-		"snapshot_sha256": sha,
-	}, nil
+	return withHeadlessSnapshot(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		snap.body["title"] = title
+		snap.meta.Title = title
+		sha, err := storeHeadlessSnapshot(snap)
+		if err != nil {
+			return nil, err
+		}
+		workspaceID := snap.meta.WorkspaceID
+		if workspaceID == "" {
+			workspaceID = stringFromAny(snap.body["workspaceId"])
+		}
+		return map[string]any{
+			"workspace_id":    workspaceID,
+			"workspace_ref":   "workspace:" + workspaceID,
+			"title":           title,
+			"detached":        true,
+			"snapshot_sha256": sha,
+		}, nil
+	})
 }
 
 func headlessTabAction(params map[string]any) (map[string]any, error) {
@@ -684,10 +718,6 @@ func headlessRenameSurface(params map[string]any) (map[string]any, error) {
 	if title == "" {
 		return nil, errors.New("tab.action rename requires title")
 	}
-	snap, err := loadHeadlessSnapshot(params)
-	if err != nil {
-		return nil, err
-	}
 	surfaceID := headlessNormalizeID(stringFromAny(params["surface_id"]))
 	if surfaceID == "" {
 		surfaceID = headlessNormalizeID(os.Getenv("CMUX_TAB_ID"))
@@ -695,60 +725,62 @@ func headlessRenameSurface(params map[string]any) (map[string]any, error) {
 	if surfaceID == "" {
 		surfaceID = headlessNormalizeID(os.Getenv("CMUX_SURFACE_ID"))
 	}
-	if surfaceID == "" {
-		surfaceID = headlessNormalizeID(stringFromAny(snap.body["activePaneId"]))
-	}
-	if surfaceID == "" {
-		return nil, errors.New("tab.action rename requires surface_id or active surface")
-	}
-	panes := headlessPaneSnapshots(snap.body)
-	found := false
-	for _, pane := range panes {
-		if !strings.EqualFold(headlessPaneSnapshotID(pane), surfaceID) {
-			continue
+	return withHeadlessSnapshot(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		if surfaceID == "" {
+			surfaceID = headlessNormalizeID(stringFromAny(snap.body["activePaneId"]))
 		}
-		found = true
-		switch stringFromAny(pane["type"]) {
-		case "terminal":
-			terminal, _ := pane["terminal"].(map[string]any)
-			if terminal == nil {
-				terminal = map[string]any{}
-				pane["terminal"] = terminal
-			}
-			terminal["title"] = title
-		case "browser":
-			browser, _ := pane["browser"].(map[string]any)
-			if browser == nil {
-				browser = map[string]any{}
-				pane["browser"] = browser
-			}
-			browser["title"] = title
-		default:
-			return nil, fmt.Errorf("surface %s does not support detached rename", surfaceID)
+		if surfaceID == "" {
+			return nil, errors.New("tab.action rename requires surface_id or active surface")
 		}
-		break
-	}
-	if !found {
-		return nil, fmt.Errorf("surface %s not found in detached snapshot", surfaceID)
-	}
-	snap.body["panes"] = panes
-	sha, err := storeHeadlessSnapshot(snap)
-	if err != nil {
-		return nil, err
-	}
-	workspaceID := snap.meta.WorkspaceID
-	if workspaceID == "" {
-		workspaceID = stringFromAny(snap.body["workspaceId"])
-	}
-	return map[string]any{
-		"workspace_id":    workspaceID,
-		"workspace_ref":   "workspace:" + workspaceID,
-		"surface_id":      surfaceID,
-		"surface_ref":     "surface:" + surfaceID,
-		"title":           title,
-		"detached":        true,
-		"snapshot_sha256": sha,
-	}, nil
+		panes := headlessPaneSnapshots(snap.body)
+		found := false
+		for _, pane := range panes {
+			if !strings.EqualFold(headlessPaneSnapshotID(pane), surfaceID) {
+				continue
+			}
+			found = true
+			switch stringFromAny(pane["type"]) {
+			case "terminal":
+				terminal, _ := pane["terminal"].(map[string]any)
+				if terminal == nil {
+					terminal = map[string]any{}
+					pane["terminal"] = terminal
+				}
+				terminal["title"] = title
+			case "browser":
+				browser, _ := pane["browser"].(map[string]any)
+				if browser == nil {
+					browser = map[string]any{}
+					pane["browser"] = browser
+				}
+				browser["title"] = title
+			default:
+				return nil, fmt.Errorf("surface %s does not support detached rename", surfaceID)
+			}
+			break
+		}
+		if !found {
+			return nil, fmt.Errorf("surface %s not found in detached snapshot", surfaceID)
+		}
+		snap.body["panes"] = panes
+		sha, err := storeHeadlessSnapshot(snap)
+		if err != nil {
+			return nil, err
+		}
+		workspaceID := snap.meta.WorkspaceID
+		if workspaceID == "" {
+			workspaceID = stringFromAny(snap.body["workspaceId"])
+		}
+		return map[string]any{
+			"workspace_id":    workspaceID,
+			"workspace_ref":   "workspace:" + workspaceID,
+			"surface_id":      surfaceID,
+			"surface_ref":     "surface:" + surfaceID,
+			"title":           title,
+			"detached":        true,
+			"snapshot_sha256": sha,
+		}, nil
+	})
 }
 
 func headlessSendText(params map[string]any) (map[string]any, error) {
@@ -776,45 +808,43 @@ func headlessStatusSet(params map[string]any) (map[string]any, error) {
 	if key == "" {
 		return nil, errors.New("status.set requires key")
 	}
-	snap, err := loadHeadlessSnapshot(params)
-	if err != nil {
-		return nil, err
-	}
-	entry := map[string]any{
-		"key":       key,
-		"value":     value,
-		"priority":  intFromAny(params["priority"]),
-		"format":    firstNonEmptyString(stringFromAny(params["format"]), "plain"),
-		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	for _, field := range []string{"icon", "color", "url"} {
-		if value := strings.TrimSpace(stringFromAny(params[field])); value != "" {
-			entry[field] = value
+	return withHeadlessSnapshot(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		entry := map[string]any{
+			"key":       key,
+			"value":     value,
+			"priority":  intFromAny(params["priority"]),
+			"format":    firstNonEmptyString(stringFromAny(params["format"]), "plain"),
+			"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
 		}
-	}
-	entries := headlessStatusEntries(snap.body)
-	replaced := false
-	for i, existing := range entries {
-		if strings.EqualFold(stringFromAny(existing["key"]), key) {
-			entries[i] = entry
-			replaced = true
-			break
+		for _, field := range []string{"icon", "color", "url"} {
+			if value := strings.TrimSpace(stringFromAny(params[field])); value != "" {
+				entry[field] = value
+			}
 		}
-	}
-	if !replaced {
-		entries = append(entries, entry)
-	}
-	snap.body["statusEntries"] = entries
-	sha, err := storeHeadlessSnapshot(snap)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"key":             key,
-		"value":           value,
-		"detached":        true,
-		"snapshot_sha256": sha,
-	}, nil
+		entries := headlessStatusEntries(snap.body)
+		replaced := false
+		for i, existing := range entries {
+			if strings.EqualFold(stringFromAny(existing["key"]), key) {
+				entries[i] = entry
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			entries = append(entries, entry)
+		}
+		snap.body["statusEntries"] = entries
+		sha, err := storeHeadlessSnapshot(snap)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"key":             key,
+			"value":           value,
+			"detached":        true,
+			"snapshot_sha256": sha,
+		}, nil
+	})
 }
 
 func headlessStatusClear(params map[string]any) (map[string]any, error) {
@@ -822,35 +852,33 @@ func headlessStatusClear(params map[string]any) (map[string]any, error) {
 	if key == "" {
 		return nil, errors.New("status.clear requires key")
 	}
-	snap, err := loadHeadlessSnapshot(params)
-	if err != nil {
-		return nil, err
-	}
-	entries := headlessStatusEntries(snap.body)
-	out := entries[:0]
-	cleared := false
-	for _, entry := range entries {
-		if strings.EqualFold(stringFromAny(entry["key"]), key) {
-			cleared = true
-			continue
+	return withHeadlessSnapshot(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		entries := headlessStatusEntries(snap.body)
+		out := entries[:0]
+		cleared := false
+		for _, entry := range entries {
+			if strings.EqualFold(stringFromAny(entry["key"]), key) {
+				cleared = true
+				continue
+			}
+			out = append(out, entry)
 		}
-		out = append(out, entry)
-	}
-	if len(out) == 0 {
-		delete(snap.body, "statusEntries")
-	} else {
-		snap.body["statusEntries"] = out
-	}
-	sha, err := storeHeadlessSnapshot(snap)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"key":             key,
-		"cleared":         cleared,
-		"detached":        true,
-		"snapshot_sha256": sha,
-	}, nil
+		if len(out) == 0 {
+			delete(snap.body, "statusEntries")
+		} else {
+			snap.body["statusEntries"] = out
+		}
+		sha, err := storeHeadlessSnapshot(snap)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"key":             key,
+			"cleared":         cleared,
+			"detached":        true,
+			"snapshot_sha256": sha,
+		}, nil
+	})
 }
 
 func headlessStatusList(params map[string]any) (map[string]any, error) {

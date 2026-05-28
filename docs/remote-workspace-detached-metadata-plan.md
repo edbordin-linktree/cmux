@@ -422,6 +422,8 @@ Detach writes a `detached` snapshot and removes the local workspace. Attach rest
 
 When Swift reconnects to a workspace whose remote snapshot changed while detached or disconnected, the remote snapshot wins. Swift rebuilds local layout from the remote snapshot, reapplies snapshot-backed status banners, and validates PTYs during restore. Missing PTYs become lost placeholders.
 
+Snapshot reads and mutations on the remote host use an advisory per-slot `workspace-snapshot.lock`. Daemon RPC `store`/`fetch`/`clear`, `workspace-snapshot-list-all`, and headless read-modify-write commands take that lock while touching the snapshot files. This gives atomic file-level read/update/write semantics for the current command model. Schema versioning is still only schema compatibility; it is not an optimistic concurrency token.
+
 ### Validated E2E Behavior
 
 The current branch was tested on `ed@tdb` with the dev build:
@@ -629,6 +631,6 @@ cmux metadata set \
 
 When running inside the remote workspace and the Mac relay is unavailable, the same commands operate on the remote snapshot.
 
-## TODO: Concurrency Control
+## Future Concurrency Work
 
-Add locking or lightweight compare-and-swap semantics for remote snapshot metadata and layout mutations after the concept is stable. Concurrent remote scripts should not be able to silently overwrite each other's metadata or layout changes long term.
+The current lock serializes single-host snapshot commands. If Craft later needs longer client-side transactions, add a sidecar `revision` or `etag` and require `expected_revision`/`expected_snapshot_sha256` on writes so stale clients fail explicitly instead of overwriting a newer snapshot.

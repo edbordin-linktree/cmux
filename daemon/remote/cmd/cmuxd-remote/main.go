@@ -106,12 +106,14 @@ const maxRPCFrameBytes = 4 * 1024 * 1024
 const (
 	workspaceSnapshotBodyFile     = "workspace-snapshot.json"
 	workspaceSnapshotMetaFile     = "workspace-snapshot.meta.json"
+	workspaceSnapshotLockFile     = "workspace-snapshot.lock"
 	workspaceSnapshotMaxBytes     = 1024 * 1024
 	workspaceSnapshotMetaMaxBytes = 4 * 1024
 )
 
 var workspaceSnapshotUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 var workspaceSnapshotRename = os.Rename
+var errWorkspaceSnapshotMissing = errors.New("workspace snapshot missing")
 
 type workspaceSnapshotMeta struct {
 	Version        int    `json:"version"`
@@ -339,9 +341,21 @@ func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotL
 			continue
 		}
 		slot := entry.Name()
-		metaPath := filepath.Join(root, slot, workspaceSnapshotMetaFile)
+		slotRoot := filepath.Join(root, slot)
+		unlock, lockErr := lockWorkspaceSnapshot(slotRoot)
+		if lockErr != nil {
+			if includeErrors {
+				result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
+					Slot:  slot,
+					Error: lockErr.Error(),
+				})
+			}
+			continue
+		}
+		metaPath := filepath.Join(slotRoot, workspaceSnapshotMetaFile)
 		metaBytes, err := os.ReadFile(metaPath)
 		if err != nil {
+			unlock()
 			if includeErrors && !errors.Is(err, os.ErrNotExist) {
 				result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
 					Slot:  slot,
@@ -351,6 +365,7 @@ func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotL
 			continue
 		}
 		if len(metaBytes) > workspaceSnapshotMetaMaxBytes {
+			unlock()
 			if includeErrors {
 				result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
 					Slot:  slot,
@@ -361,6 +376,7 @@ func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotL
 		}
 		var meta workspaceSnapshotMeta
 		if err := json.Unmarshal(metaBytes, &meta); err != nil {
+			unlock()
 			if includeErrors {
 				result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
 					Slot:  slot,
@@ -370,9 +386,10 @@ func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotL
 			continue
 		}
 		bodyPresent := true
-		if _, err := os.Stat(filepath.Join(root, slot, workspaceSnapshotBodyFile)); err != nil {
+		if _, err := os.Stat(filepath.Join(slotRoot, workspaceSnapshotBodyFile)); err != nil {
 			bodyPresent = false
 			if !errors.Is(err, os.ErrNotExist) && includeErrors {
+				unlock()
 				result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
 					Slot:  slot,
 					Error: err.Error(),
@@ -380,6 +397,7 @@ func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotL
 				continue
 			}
 		}
+		unlock()
 		result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
 			Slot:           slot,
 			WorkspaceID:    meta.WorkspaceID,
@@ -1366,7 +1384,9 @@ func (s *rpcServer) handleWorkspaceSnapshotStore(req rpcRequest) rpcResponse {
 	if len(metaBytes) > workspaceSnapshotMetaMaxBytes {
 		return workspaceSnapshotError(req.ID, "invalid_params", "workspace snapshot metadata exceeds 4 KiB")
 	}
-	if err := atomicWriteWorkspaceSnapshotPair(bodyPath, bodyBytes, metaPath, metaBytes); err != nil {
+	if err := withWorkspaceSnapshotLock(filepath.Dir(bodyPath), func() error {
+		return atomicWriteWorkspaceSnapshotPair(bodyPath, bodyBytes, metaPath, metaBytes)
+	}); err != nil {
 		return workspaceSnapshotError(req.ID, "io_error", err.Error())
 	}
 	return rpcResponse{
@@ -1393,16 +1413,27 @@ func (s *rpcServer) handleWorkspaceSnapshotFetch(req rpcRequest) rpcResponse {
 	if !ok {
 		return workspaceSnapshotError(req.ID, "io_error", "workspace snapshot storage is available only in persistent daemon mode")
 	}
-	bodyBytes, err := os.ReadFile(bodyPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return workspaceSnapshotFetchMissing(req.ID)
+	var bodyBytes []byte
+	var metaBytes []byte
+	if err := withWorkspaceSnapshotLock(filepath.Dir(bodyPath), func() error {
+		var err error
+		bodyBytes, err = os.ReadFile(bodyPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return errWorkspaceSnapshotMissing
+			}
+			return err
 		}
-		return workspaceSnapshotError(req.ID, "io_error", err.Error())
-	}
-	metaBytes, err := os.ReadFile(metaPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		metaBytes, err = os.ReadFile(metaPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return errWorkspaceSnapshotMissing
+			}
+			return err
+		}
+		return nil
+	}); err != nil {
+		if errors.Is(err, errWorkspaceSnapshotMissing) {
 			return workspaceSnapshotFetchMissing(req.ID)
 		}
 		return workspaceSnapshotError(req.ID, "io_error", err.Error())
@@ -1441,14 +1472,19 @@ func (s *rpcServer) handleWorkspaceSnapshotClear(req rpcRequest) rpcResponse {
 		return workspaceSnapshotError(req.ID, "io_error", "workspace snapshot storage is available only in persistent daemon mode")
 	}
 	cleared := false
-	for _, path := range []string{bodyPath, metaPath} {
-		if err := os.Remove(path); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return workspaceSnapshotError(req.ID, "io_error", err.Error())
+	if err := withWorkspaceSnapshotLock(filepath.Dir(bodyPath), func() error {
+		for _, path := range []string{bodyPath, metaPath} {
+			if err := os.Remove(path); err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				continue
 			}
-			continue
+			cleared = true
 		}
-		cleared = true
+		return nil
+	}); err != nil {
+		return workspaceSnapshotError(req.ID, "io_error", err.Error())
 	}
 	return rpcResponse{
 		ID: req.ID,
@@ -1528,6 +1564,41 @@ func atomicWriteWorkspaceSnapshotPair(bodyPath string, body []byte, metaPath str
 		return err
 	}
 	return nil
+}
+
+func withWorkspaceSnapshotLock(root string, fn func() error) error {
+	unlock, err := lockWorkspaceSnapshot(root)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return fn()
+}
+
+func lockWorkspaceSnapshot(root string) (func(), error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		return nil, err
+	}
+	lockFile, err := os.OpenFile(filepath.Join(root, workspaceSnapshotLockFile), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lockFile.Close()
+		return nil, err
+	}
+	unlocked := false
+	return func() {
+		if unlocked {
+			return
+		}
+		unlocked = true
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}, nil
 }
 
 func writeFileSync(path string, data []byte, perm os.FileMode) error {

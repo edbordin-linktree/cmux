@@ -1674,6 +1674,53 @@ func TestCLIHeadlessExplicitWorkspaceTargetsOtherSnapshot(t *testing.T) {
 	}
 }
 
+func TestCLIHeadlessMetadataSetWaitsForSnapshotLock(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+	paths, err := persistentDaemonPathsForSlot(slot)
+	if err != nil {
+		t.Fatalf("persistent daemon paths: %v", err)
+	}
+	unlock, err := lockWorkspaceSnapshot(paths.root)
+	if err != nil {
+		t.Fatalf("lock snapshot: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := runHeadlessCLIResult("metadata.set", map[string]any{
+			"workspace_id": workspaceID,
+			"key":          "craft:locked-write",
+			"value":        "after-lock",
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("metadata.set completed while snapshot lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("metadata.set after unlock: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("metadata.set did not complete after snapshot lock was released")
+	}
+	body := readHeadlessCLITestBody(t, root, slot)
+	metadata := headlessMetadataMap(body)
+	if got := metadata["craft:locked-write"]; got != "after-lock" {
+		t.Fatalf("metadata value = %q, want after-lock", got)
+	}
+}
+
 func TestCLIExplicitWorkspaceUsesTargetRelayBeforeHeadlessFallback(t *testing.T) {
 	root, callerWorkspaceID, callerSlot := writeHeadlessCLITestSnapshot(t)
 	targetWorkspaceID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
