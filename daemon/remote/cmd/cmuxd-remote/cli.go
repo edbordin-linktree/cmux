@@ -484,7 +484,8 @@ func runStatusRelay(socketPath string, cmdName string, args []string, jsonOutput
 		fmt.Fprintf(os.Stderr, "cmux: %s cannot operate on detached workspace\n", cmdName)
 		return 1
 	}
-	resp, err := socketRoundTrip(socketPath, socketCommand, refreshAddr)
+	_ = socketCommand // Kept for parser parity with the legacy v1 command shape.
+	resp, err := socketRoundTripV2(socketPath, method, params, refreshAddr)
 	if err != nil {
 		if shouldTryHeadlessFallback(err) {
 			if code, handled := runHeadlessCLICommand(cmdName, method, params, jsonOutput, err); handled {
@@ -495,116 +496,54 @@ func runStatusRelay(socketPath string, cmdName string, args []string, jsonOutput
 		return 1
 	}
 	if jsonOutput {
-		payload := statusRelayJSONPayload(cmdName, params, resp)
-		encoded, err := json.Marshal(payload)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "cmux: failed to encode status result: %v\n", err)
-			return 1
-		}
-		fmt.Println(string(encoded))
+		fmt.Println(resp)
 		return 0
 	}
-	fmt.Print(resp)
-	if !strings.HasSuffix(resp, "\n") {
-		fmt.Println()
-	}
+	fmt.Println(statusRelayTextOutput(cmdName, resp))
 	return 0
 }
 
-func statusRelayJSONPayload(cmdName string, params map[string]any, resp string) map[string]any {
-	switch cmdName {
-	case "list-status":
-		entries := parseStatusListResponse(resp)
-		return map[string]any{
-			"entries": entries,
-			"count":   len(entries),
+func statusRelayTextOutput(cmdName string, resp string) string {
+	if cmdName != "list-status" {
+		return "OK"
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(resp), &payload); err != nil {
+		return defaultRelayOutput(resp)
+	}
+	rawEntries, _ := payload["entries"].([]any)
+	if len(rawEntries) == 0 {
+		return "No status entries"
+	}
+	lines := make([]string, 0, len(rawEntries))
+	for _, rawEntry := range rawEntries {
+		entry, _ := rawEntry.(map[string]any)
+		if entry == nil {
+			continue
 		}
-	case "set-status":
-		payload := map[string]any{
-			"key":   stringFromAny(params["key"]),
-			"value": stringFromAny(params["value"]),
+		key := stringFromAny(entry["key"])
+		value := stringFromAny(entry["value"])
+		if key == "" {
+			continue
 		}
-		for _, key := range []string{"workspace_id", "icon", "color", "url", "format"} {
-			if value := stringFromAny(params[key]); value != "" {
-				payload[key] = value
+		line := key + "=" + value
+		for _, option := range []string{"icon", "color", "url"} {
+			if value := stringFromAny(entry[option]); value != "" {
+				line += " " + option + "=" + value
 			}
 		}
-		if _, ok := params["priority"]; ok {
-			payload["priority"] = intFromAny(params["priority"])
+		if priority := intFromAny(entry["priority"]); priority != 0 {
+			line += fmt.Sprintf(" priority=%d", priority)
 		}
-		return payload
-	case "clear-status":
-		return map[string]any{
-			"key":     stringFromAny(params["key"]),
-			"cleared": !strings.HasPrefix(strings.TrimSpace(resp), "ERROR:"),
+		if format := stringFromAny(entry["format"]); format != "" && format != "plain" {
+			line += " format=" + format
 		}
-	default:
-		return map[string]any{"response": strings.TrimSpace(resp)}
+		lines = append(lines, line)
 	}
-}
-
-func parseStatusListResponse(resp string) []map[string]any {
-	var entries []map[string]any
-	for _, line := range strings.Split(resp, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || line == "No status entries" || strings.HasPrefix(line, "ERROR:") {
-			continue
-		}
-		entry := parseStatusLine(line)
-		if len(entry) > 0 {
-			entries = append(entries, entry)
-		}
+	if len(lines) == 0 {
+		return "No status entries"
 	}
-	if entries == nil {
-		return []map[string]any{}
-	}
-	return entries
-}
-
-func parseStatusLine(line string) map[string]any {
-	eq := strings.Index(line, "=")
-	if eq <= 0 {
-		return nil
-	}
-	key := line[:eq]
-	rest := strings.TrimSpace(line[eq+1:])
-	parts := strings.Fields(rest)
-	optionStart := len(parts)
-	for i, part := range parts {
-		if statusLineOptionKey(part) != "" {
-			optionStart = i
-			break
-		}
-	}
-	entry := map[string]any{
-		"key":   key,
-		"value": strings.Join(parts[:optionStart], " "),
-	}
-	if optionStart == len(parts) && rest != "" {
-		entry["value"] = rest
-	}
-	for _, part := range parts[optionStart:] {
-		optionKey := statusLineOptionKey(part)
-		if optionKey == "" {
-			continue
-		}
-		value := strings.TrimPrefix(part, optionKey+"=")
-		if optionKey == "priority" {
-			entry[optionKey] = intFromAny(value)
-		} else {
-			entry[optionKey] = value
-		}
-	}
-	return entry
-}
-
-func statusLineOptionKey(part string) string {
-	for _, key := range []string{"icon", "color", "url", "priority", "format"} {
-		if strings.HasPrefix(part, key+"=") {
-			return key
-		}
-	}
-	return ""
+	return strings.Join(lines, "\n")
 }
 
 type remoteSSHCLIOptions struct {

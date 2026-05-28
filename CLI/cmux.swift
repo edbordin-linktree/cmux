@@ -4361,35 +4361,34 @@ struct CMUXCLI {
             print(response)
 
         case "set-status":
-            let response = try forwardSidebarMetadataCommand(
-                "set_status",
+            try runStatusCommand(
+                subcommand: "set",
                 commandArgs: commandArgs,
                 client: client,
+                jsonOutput: jsonOutput,
+                idFormat: idFormat,
                 windowOverride: windowId
             )
-            print(response)
 
         case "clear-status":
-            let response = try forwardSidebarMetadataCommand(
-                "clear_status",
+            try runStatusCommand(
+                subcommand: "clear",
                 commandArgs: commandArgs,
                 client: client,
+                jsonOutput: jsonOutput,
+                idFormat: idFormat,
                 windowOverride: windowId
             )
-            print(response)
 
         case "list-status":
-            let response = try forwardSidebarMetadataCommand(
-                "list_status",
+            try runStatusCommand(
+                subcommand: "list",
                 commandArgs: commandArgs,
                 client: client,
+                jsonOutput: jsonOutput,
+                idFormat: idFormat,
                 windowOverride: windowId
             )
-            if jsonOutput {
-                print(jsonString(statusListJSONPayload(response)))
-            } else {
-                print(response)
-            }
 
         case "set-progress":
             let response = try forwardSidebarMetadataCommand(
@@ -6231,6 +6230,95 @@ struct CMUXCLI {
         default:
             throw CLIError(message: "Unknown metadata subcommand '\(subcommand)'")
         }
+    }
+
+    private func runStatusCommand(
+        subcommand: String,
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat,
+        windowOverride: String?
+    ) throws {
+        var parsed = try metadataWorkspaceParams(commandArgs: commandArgs, client: client, windowOverride: windowOverride)
+
+        switch subcommand {
+        case "set":
+            let (iconOpt, rem0) = parseOption(parsed.remaining, name: "--icon")
+            let (colorOpt, rem1) = parseOption(rem0, name: "--color")
+            let (urlOpt, rem2) = parseOption(rem1, name: "--url")
+            let (linkOpt, rem3) = parseOption(rem2, name: "--link")
+            let (priorityOpt, rem4) = parseOption(rem3, name: "--priority")
+            let (formatOpt, rem5) = parseOption(rem4, name: "--format")
+            guard rem5.count >= 2 else {
+                throw CLIError(message: "set-status requires <key> <value>")
+            }
+            let key = rem5[0]
+            let value = rem5.dropFirst().joined(separator: " ")
+            parsed.params["key"] = key
+            parsed.params["value"] = value
+            if let iconOpt { parsed.params["icon"] = iconOpt }
+            if let colorOpt { parsed.params["color"] = colorOpt }
+            if let url = urlOpt ?? linkOpt { parsed.params["url"] = url }
+            if let priorityOpt { parsed.params["priority"] = priorityOpt }
+            if let formatOpt { parsed.params["format"] = formatOpt }
+            let payload = try client.sendV2(method: "status.set", params: parsed.params)
+            printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
+
+        case "clear":
+            guard parsed.remaining.count == 1 else {
+                throw CLIError(message: "clear-status requires <key>")
+            }
+            parsed.params["key"] = parsed.remaining[0]
+            let payload = try client.sendV2(method: "status.clear", params: parsed.params)
+            printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
+
+        case "list":
+            if let unknown = parsed.remaining.first(where: { $0.hasPrefix("--") }) {
+                throw CLIError(message: "list-status: unknown flag '\(unknown)'")
+            }
+            guard parsed.remaining.isEmpty else {
+                throw CLIError(message: "list-status does not accept positional arguments")
+            }
+            let payload = try client.sendV2(method: "status.list", params: parsed.params)
+            if jsonOutput {
+                print(jsonString(formatIDs(payload, mode: idFormat)))
+            } else {
+                printStatusEntries(payload)
+            }
+
+        default:
+            throw CLIError(message: "Unknown status subcommand '\(subcommand)'")
+        }
+    }
+
+    private func printStatusEntries(_ payload: [String: Any]) {
+        let entries = payload["entries"] as? [[String: Any]] ?? []
+        guard !entries.isEmpty else {
+            print("No status entries")
+            return
+        }
+        for entry in entries {
+            print(statusEntryTextLine(entry))
+        }
+    }
+
+    private func statusEntryTextLine(_ entry: [String: Any]) -> String {
+        let key = (entry["key"] as? String) ?? ""
+        let value = (entry["value"] as? String) ?? ""
+        var line = "\(key)=\(value)"
+        for option in ["icon", "color", "url"] {
+            if let value = entry[option] as? String, !value.isEmpty {
+                line += " \(option)=\(value)"
+            }
+        }
+        if let priority = intFromAny(entry["priority"]), priority != 0 {
+            line += " priority=\(priority)"
+        }
+        if let format = entry["format"] as? String, !format.isEmpty, format != "plain" {
+            line += " format=\(format)"
+        }
+        return line
     }
 
     private func runWorkspaceAction(
@@ -15650,48 +15738,6 @@ struct CMUXCLI {
             return "{}"
         }
         return output
-    }
-
-    func statusListJSONPayload(_ response: String) -> [String: Any] {
-        let entries = response
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { statusEntryJSON(String($0)) }
-        return ["entries": entries, "count": entries.count]
-    }
-
-    private func statusEntryJSON(_ line: String) -> [String: Any]? {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              trimmed != "No status entries",
-              !trimmed.hasPrefix("ERROR:"),
-              let eq = trimmed.firstIndex(of: "=") else {
-            return nil
-        }
-        let key = String(trimmed[..<eq])
-        let rest = String(trimmed[trimmed.index(after: eq)...]).trimmingCharacters(in: .whitespacesAndNewlines)
-        let parts = rest.split(separator: " ").map(String.init)
-        let optionStart = parts.firstIndex { statusEntryOptionKey($0) != nil } ?? parts.count
-        var entry: [String: Any] = [
-            "key": key,
-            "value": optionStart == parts.count ? rest : parts[..<optionStart].joined(separator: " ")
-        ]
-        for part in parts.dropFirst(optionStart) {
-            guard let optionKey = statusEntryOptionKey(part) else { continue }
-            let value = String(part.dropFirst(optionKey.count + 1))
-            if optionKey == "priority" {
-                entry[optionKey] = Int(value) ?? 0
-            } else {
-                entry[optionKey] = value
-            }
-        }
-        return entry
-    }
-
-    private func statusEntryOptionKey(_ part: String) -> String? {
-        for key in ["icon", "color", "url", "priority", "format"] where part.hasPrefix("\(key)=") {
-            return key
-        }
-        return nil
     }
 
     private func parseRPCParams(_ args: [String]) throws -> [String: Any] {

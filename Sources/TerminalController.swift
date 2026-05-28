@@ -3419,6 +3419,12 @@ class TerminalController {
             return v2Result(id: id, self.v2MetadataList(params: params))
         case "metadata.clear":
             return v2Result(id: id, self.v2MetadataClear(params: params))
+        case "status.set":
+            return v2Result(id: id, self.v2StatusSet(params: params))
+        case "status.clear":
+            return v2Result(id: id, self.v2StatusClear(params: params))
+        case "status.list":
+            return v2Result(id: id, self.v2StatusList(params: params))
         case "workspace.remote.configure":
             return v2Result(id: id, self.v2WorkspaceRemoteConfigure(params: params))
         case "workspace.remote.ssh_create":
@@ -6272,6 +6278,261 @@ class TerminalController {
                 payload["snapshot_sha256"] = stored.sha256
             }
             return .ok(payload)
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2StatusKey(_ params: [String: Any]) -> String? {
+        v2String(params, "key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func v2StatusEntryPayload(_ entry: SidebarStatusEntry) -> [String: Any] {
+        [
+            "key": entry.key,
+            "value": entry.value,
+            "icon": v2OrNull(entry.icon),
+            "color": v2OrNull(entry.color),
+            "url": v2OrNull(entry.url?.absoluteString),
+            "priority": entry.priority,
+            "format": entry.format.rawValue,
+            "timestamp": RemoteWorkspaceSnapshotCodec.iso8601String(entry.timestamp),
+        ]
+    }
+
+    private func v2StatusEntryPayload(_ entry: RemoteWorkspaceStatusEntrySnapshot) -> [String: Any] {
+        [
+            "key": entry.key,
+            "value": entry.value,
+            "icon": v2OrNull(entry.icon),
+            "color": v2OrNull(entry.color),
+            "url": v2OrNull(entry.url),
+            "priority": entry.priority,
+            "format": entry.format,
+            "timestamp": RemoteWorkspaceSnapshotCodec.iso8601String(entry.timestamp),
+        ]
+    }
+
+    private func v2StatusDetachedEntriesInDisplayOrder(_ entries: [RemoteWorkspaceStatusEntrySnapshot]?) -> [RemoteWorkspaceStatusEntrySnapshot] {
+        (entries ?? []).sorted { lhs, rhs in
+            if lhs.priority != rhs.priority { return lhs.priority > rhs.priority }
+            if lhs.timestamp != rhs.timestamp { return lhs.timestamp > rhs.timestamp }
+            return lhs.key < rhs.key
+        }
+    }
+
+    private func v2StatusCommonPayload(
+        workspace: Workspace,
+        entries: [[String: Any]]? = nil,
+        extra: [String: Any] = [:]
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "workspace_id": v2StableID(workspace.id),
+            "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+            "attached": true,
+            "detached": false,
+        ]
+        if let entries {
+            payload["entries"] = entries
+            payload["count"] = entries.count
+        }
+        for (key, value) in extra {
+            payload[key] = value
+        }
+        return payload
+    }
+
+    private func v2DetachedStatusCommonPayload(
+        target: V2DetachedWorkspaceSnapshotTarget,
+        snapshot: RemoteWorkspaceSnapshotV1,
+        entries: [[String: Any]]? = nil,
+        extra: [String: Any] = [:]
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "workspace_id": v2StableID(snapshot.workspaceId),
+            "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+            "title": snapshot.title,
+            "host": target.host.host,
+            "persistent_daemon_slot": target.slot,
+            "attached": false,
+            "detached": true,
+        ]
+        if let entries {
+            payload["entries"] = entries
+            payload["count"] = entries.count
+        }
+        for (key, value) in extra {
+            payload[key] = value
+        }
+        return payload
+    }
+
+    private func v2StatusSet(params: [String: Any]) -> V2CallResult {
+        guard let key = v2StatusKey(params), !key.isEmpty else {
+            return .err(code: "invalid_params", message: "status.set requires key", data: nil)
+        }
+        guard let value = v2RawString(params, "value") else {
+            return .err(code: "invalid_params", message: "status.set requires value", data: nil)
+        }
+        let formatRaw = v2String(params, "format") ?? SidebarMetadataFormat.plain.rawValue
+        guard let format = SidebarMetadataFormat(rawValue: formatRaw) else {
+            return .err(code: "invalid_params", message: "Invalid metadata format '\(formatRaw)' - use: plain, markdown", data: nil)
+        }
+        let priority = max(-9999, min(9999, v2Int(params, "priority") ?? 0))
+        let icon = v2String(params, "icon")
+        let color = v2String(params, "color")
+        let url: URL?
+        if let rawURL = v2String(params, "url") ?? v2String(params, "link") {
+            guard let parsed = URL(string: rawURL),
+                  let scheme = parsed.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else {
+                return .err(code: "invalid_params", message: "Invalid metadata URL '\(rawURL)' - expected http(s) URL", data: nil)
+            }
+            url = parsed
+        } else {
+            url = nil
+        }
+
+        var payload: [String: Any]?
+        v2MainSync {
+            guard let workspace = v2MetadataWorkspace(params: params) else { return }
+            let entry = SidebarStatusEntry(
+                key: key,
+                value: value,
+                icon: icon,
+                color: color,
+                url: url,
+                priority: priority,
+                format: format,
+                timestamp: Date()
+            )
+            workspace.statusEntries[key] = entry
+            if workspace.isRemoteWorkspace {
+                _ = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
+                    workspace: workspace,
+                    status: .live,
+                    force: true,
+                    requireCapability: false
+                )
+            }
+            payload = v2StatusCommonPayload(
+                workspace: workspace,
+                extra: [
+                    "key": key,
+                    "value": value,
+                    "entry": v2StatusEntryPayload(entry),
+                ]
+            )
+        }
+        if let payload {
+            return .ok(payload)
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            var snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            let entry = RemoteWorkspaceStatusEntrySnapshot(
+                key: key,
+                value: value,
+                icon: icon,
+                color: color,
+                url: url?.absoluteString,
+                priority: priority,
+                format: format.rawValue,
+                timestamp: Date()
+            )
+            var entries = snapshot.statusEntries ?? []
+            if let index = entries.firstIndex(where: { $0.key.caseInsensitiveCompare(key) == .orderedSame }) {
+                entries[index] = entry
+            } else {
+                entries.append(entry)
+            }
+            snapshot.statusEntries = entries
+            let stored = try v2StoreDetachedWorkspaceSnapshot(snapshot, target: target)
+            return .ok(v2DetachedStatusCommonPayload(
+                target: target,
+                snapshot: snapshot,
+                extra: [
+                    "key": key,
+                    "value": value,
+                    "entry": v2StatusEntryPayload(entry),
+                    "snapshot_sha256": stored.sha256,
+                ]
+            ))
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2StatusClear(params: [String: Any]) -> V2CallResult {
+        guard let key = v2StatusKey(params), !key.isEmpty else {
+            return .err(code: "invalid_params", message: "status.clear requires key", data: nil)
+        }
+        var payload: [String: Any]?
+        v2MainSync {
+            guard let workspace = v2MetadataWorkspace(params: params) else { return }
+            let removed = workspace.statusEntries.removeValue(forKey: key) != nil
+            workspace.clearAgentPID(key: key)
+            if removed && workspace.isRemoteWorkspace {
+                _ = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
+                    workspace: workspace,
+                    status: .live,
+                    force: true,
+                    requireCapability: false
+                )
+            }
+            payload = v2StatusCommonPayload(
+                workspace: workspace,
+                extra: [
+                    "key": key,
+                    "cleared": removed,
+                ]
+            )
+        }
+        if let payload {
+            return .ok(payload)
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            var snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            let oldEntries = snapshot.statusEntries ?? []
+            let newEntries = oldEntries.filter { $0.key.caseInsensitiveCompare(key) != .orderedSame }
+            let removed = newEntries.count != oldEntries.count
+            snapshot.statusEntries = newEntries.isEmpty ? nil : newEntries
+            var extra: [String: Any] = [
+                "key": key,
+                "cleared": removed,
+            ]
+            if removed {
+                let stored = try v2StoreDetachedWorkspaceSnapshot(snapshot, target: target)
+                extra["snapshot_sha256"] = stored.sha256
+            }
+            return .ok(v2DetachedStatusCommonPayload(target: target, snapshot: snapshot, extra: extra))
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2StatusList(params: [String: Any]) -> V2CallResult {
+        var payload: [String: Any]?
+        v2MainSync {
+            guard let workspace = v2MetadataWorkspace(params: params) else { return }
+            let entries = workspace.sidebarStatusEntriesInDisplayOrder().map(v2StatusEntryPayload)
+            payload = v2StatusCommonPayload(workspace: workspace, entries: entries)
+        }
+        if let payload {
+            return .ok(payload)
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            let snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            let entries = v2StatusDetachedEntriesInDisplayOrder(snapshot.statusEntries).map(v2StatusEntryPayload)
+            return .ok(v2DetachedStatusCommonPayload(target: target, snapshot: snapshot, entries: entries))
         } catch {
             return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
         }

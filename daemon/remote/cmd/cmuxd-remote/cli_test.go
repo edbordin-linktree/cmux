@@ -2107,8 +2107,9 @@ func TestCLIHeadlessStatusFallbackMutatesSnapshot(t *testing.T) {
 	}
 }
 
-func TestCLIListStatusJSONParsesRelayTextResponse(t *testing.T) {
-	sockPath := startMockSocket(t, "task_state=running icon=bolt.fill color=#4C8DFF priority=100\nreview=needs input format=markdown")
+func TestCLIListStatusJSONPrintsRelayV2Response(t *testing.T) {
+	response := `{"id":"test","ok":true,"result":{"entries":[{"key":"task_state","value":"running","icon":"bolt.fill","color":"#4C8DFF","priority":100,"format":"plain"},{"key":"review","value":"needs input","priority":0,"format":"markdown"}],"count":2}}`
+	sockPath := startMockSocket(t, response)
 	output := captureStdout(t, func() {
 		code := runCLI([]string{"--socket", sockPath, "list-status", "--workspace", "workspace:1", "--json"})
 		if code != 0 {
