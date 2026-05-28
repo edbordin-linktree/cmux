@@ -28,6 +28,19 @@ So the workspace appears to be maintained on the server, but that is mostly a sn
 
 The snapshot layer intentionally keeps browser recovery shallow: browser surfaces reopen at the saved URL, but WKWebView cookies, scroll position, back/forward state, devtools, and local data stores are not part of the remote snapshot.
 
+### Daemon Slot Semantics
+
+A persistent daemon slot is not one PTY. It is the server-side container for one remote workspace instance.
+
+In practice, each `cmux ssh ...` remote workspace gets a unique slot such as `ssh-f605ac69-bcc0-406f-8d88-6c2a9220879e`. That slot corresponds to:
+
+- one daemon directory: `~/.cmux/daemon/<slot>/`;
+- one persistent `cmuxd-remote serve --persistent-server --slot <slot>` daemon;
+- one workspace snapshot body and metadata sidecar;
+- many PTY sessions, one per terminal/agent surface in that workspace.
+
+PTYs are identified separately by `session_id` values, usually derived from workspace and surface IDs. New terminal surfaces created while attached or detached create additional PTYs inside the same slot. Attach reuses the original slot so Swift can fetch the snapshot and reconnect each terminal surface to its PTY.
+
 ## Current Branch Additions
 
 This branch adds detached remote workspace snapshots, hidden workspace metadata, a Host Manager UI, and a restricted remote-headless command path for scripts running on an SSH host.
@@ -39,6 +52,126 @@ The core behavior Craft should rely on is:
 - A `cmux` command running inside a remote cmux terminal first tries the normal relay back to the Swift UI.
 - If the relay is unavailable, that remote `cmux` command can operate on the local remote snapshot for a restricted set of commands.
 - On reconnect/attach, the remote snapshot wins and Swift rebuilds local layout from it.
+
+## Architecture Diagrams
+
+### CLI Command Paths
+
+```mermaid
+flowchart LR
+  subgraph Local["Local Mac session"]
+    LCLI["cmux CLI"]
+    LSocket["Swift UI socket"]
+    LUI["Swift app workspace model"]
+    LCLI --> LSocket --> LUI
+  end
+
+  subgraph Attached["Attached remote session"]
+    RCLI["remote cmux wrapper"]
+    RelayAuth["relay auth + command mapping"]
+    SSHRelay["SSH relay / tunnel"]
+    ASocket["Swift UI socket on Mac"]
+    AUI["Swift app workspace model"]
+    RCLI --> RelayAuth --> SSHRelay --> ASocket --> AUI
+  end
+
+  subgraph Detached["Detached or relay-unavailable remote session"]
+    DCLI["remote cmux wrapper"]
+    Headless["cmuxd-remote headless CLI fallback"]
+    Snapshot["workspace-snapshot.json"]
+    Meta["workspace-snapshot.meta.json"]
+    PTY["persistent daemon PTY hub"]
+    DCLI --> Headless
+    Headless --> Snapshot
+    Headless --> Meta
+    Headless --> PTY
+  end
+```
+
+### Remote Daemon and Snapshot Layers
+
+```mermaid
+flowchart TB
+  subgraph Mac["Mac"]
+    UI["Swift UI\nsidebar, split tree, browser views, focus"]
+    AppSocket["local app socket"]
+    HostRegistry["detached-hosts.json\nhost registry only"]
+    UI <--> AppSocket
+    UI --> HostRegistry
+  end
+
+  subgraph Host["Remote SSH host"]
+    Wrapper["~/.cmux/bin/cmux\nremote wrapper"]
+    Slot["~/.cmux/daemon/<slot>/\none remote workspace container"]
+    Daemon["cmuxd-remote\npersistent daemon"]
+    PTYs["PTY sessions\nmany per slot"]
+    Body["workspace-snapshot.json\nlayout + panes + metadata"]
+    Sidecar["workspace-snapshot.meta.json\nlist/attach metadata"]
+
+    Wrapper --> Daemon
+    Slot --> Daemon
+    Slot --> Body
+    Slot --> Sidecar
+    Daemon --> PTYs
+  end
+
+  UI <-->|attached relay| Daemon
+  UI -->|store/fetch snapshot| Body
+  UI -->|store/fetch sidecar| Sidecar
+  HostRegistry -->|list detached hosts| Wrapper
+```
+
+### Checkpoint and Reconnect Flow
+
+```mermaid
+sequenceDiagram
+  participant Swift as Swift UI
+  participant Daemon as cmuxd-remote slot daemon
+  participant Snap as Remote snapshot files
+  participant RemoteCLI as remote cmux CLI
+
+  Swift->>Swift: Workspace layout or metadata changes
+  Swift->>Daemon: workspace.snapshot.store(status=live)
+  Daemon->>Snap: Atomic body + sidecar write
+
+  Note over Swift,RemoteCLI: Relay later drops or workspace is detached
+
+  RemoteCLI->>Snap: Read current snapshot
+  RemoteCLI->>Daemon: Create PTY for new terminal surface
+  RemoteCLI->>Snap: Write mutated snapshot
+
+  Note over Swift,Snap: Swift reconnects or attaches
+
+  Swift->>Daemon: workspace.snapshot.fetch
+  Daemon->>Snap: Read body + sidecar
+  Daemon-->>Swift: Snapshot body + metadata
+  Swift->>Swift: Remote snapshot wins, rebuild workspace
+  Swift->>Daemon: pty.attach for terminal surfaces
+  Swift->>Daemon: workspace.snapshot.store(status=live)
+```
+
+### Detach and Attach Flow
+
+```mermaid
+flowchart TD
+  Start["Remote workspace attached in Swift UI"] --> Validate["Validate persistent daemon slot + capability"]
+  Validate --> Capture["Capture split tree, panes, browser URLs, metadata"]
+  Capture --> StoreDetached["Store snapshot with status=detached"]
+  StoreDetached --> DetachPTY["pty.detach terminal/agent surfaces"]
+  DetachPTY --> TearDown["Release local browser/UI surfaces"]
+  TearDown --> RemoveSidebar["Remove workspace from Mac sidebar"]
+  RemoveSidebar --> Listed["Host Manager / list-detached can discover snapshot"]
+
+  Listed --> Resolve["Attach: resolve host + slot from workspace ID"]
+  Resolve --> Fetch["Fetch remote snapshot"]
+  Fetch --> Rebuild["Recreate Swift workspace with original workspaceId"]
+  Rebuild --> Layout["Replay split tree and recreate panes"]
+  Layout --> AttachPTY["pty.attach terminal surfaces"]
+  Layout --> ReopenBrowsers["Reopen browsers at saved URLs"]
+  AttachPTY --> StoreLive["Store checkpoint with status=live"]
+  ReopenBrowsers --> StoreLive
+  StoreLive --> Attached["Workspace attached in Swift UI again"]
+```
 
 ## Current cmux Capabilities
 
