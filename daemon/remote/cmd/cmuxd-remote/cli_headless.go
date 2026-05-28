@@ -29,14 +29,7 @@ type headlessSnapshot struct {
 var headlessStartPTYFunc = headlessStartPTY
 
 func runHeadlessCLICommand(commandName, method string, params map[string]any, jsonOutput bool, relayErr error) (int, bool) {
-	switch method {
-	case "metadata.set", "metadata.get", "metadata.list", "metadata.clear",
-		"workspace.lookup", "system.tree",
-		"surface.create", "pane.create", "surface.split", "surface.close",
-		"surface.send_text", "surface.send_key",
-		"workspace.rename", "tab.action",
-		"status.set", "status.clear", "status.list":
-	default:
+	if !headlessSupportsMethod(method) {
 		return 0, false
 	}
 
@@ -57,6 +50,20 @@ func runHeadlessCLICommand(commandName, method string, params map[string]any, js
 	}
 	_ = relayErr
 	return 0, true
+}
+
+func headlessSupportsMethod(method string) bool {
+	switch method {
+	case "metadata.set", "metadata.get", "metadata.list", "metadata.clear",
+		"workspace.lookup", "system.tree",
+		"surface.create", "pane.create", "surface.split", "surface.close",
+		"surface.send_text", "surface.send_key",
+		"workspace.rename", "tab.action",
+		"status.set", "status.clear", "status.list":
+		return true
+	default:
+		return false
+	}
 }
 
 func runHeadlessCLIResult(method string, params map[string]any) (map[string]any, error) {

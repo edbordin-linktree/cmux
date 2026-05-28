@@ -23,6 +23,24 @@ type relayAuthState struct {
 	RelayToken string `json:"relay_token"`
 }
 
+type socketServerError struct {
+	code    string
+	message string
+}
+
+func (err *socketServerError) Error() string {
+	return fmt.Sprintf("server error [%s]: %s", err.code, err.message)
+}
+
+func isSocketServerError(err error) bool {
+	var serverErr *socketServerError
+	return errors.As(err, &serverErr)
+}
+
+func shouldTryHeadlessFallback(err error) bool {
+	return err != nil && !isSocketServerError(err)
+}
+
 // protocolVersion indicates whether a command uses the v1 text or v2 JSON-RPC protocol.
 type protocolVersion int
 
@@ -133,6 +151,24 @@ func init() {
 	}
 }
 
+func hasHeadlessRemoteContext() bool {
+	return strings.TrimSpace(os.Getenv("CMUX_WORKSPACE_ID")) != "" ||
+		strings.TrimSpace(os.Getenv("CMUX_REMOTE_DAEMON_SLOT")) != "" ||
+		strings.TrimSpace(os.Getenv("CMUX_PERSISTENT_DAEMON_SLOT")) != "" ||
+		strings.TrimSpace(os.Getenv("CMUX_DAEMON_SLOT")) != ""
+}
+
+func commandMayUseHeadlessNoSocket(cmdName string) bool {
+	switch cmdName {
+	case "metadata", "workspace", "tree", "set-status", "clear-status", "list-status":
+		return true
+	}
+	if spec := commandIndex[cmdName]; spec != nil && spec.proto == protoV2 {
+		return headlessSupportsMethod(spec.v2Method)
+	}
+	return false
+}
+
 // runCLI is the entry point for the "cli" subcommand (or busybox "cmux" invocation).
 func runCLI(args []string) int {
 	socketPath := os.Getenv("CMUX_SOCKET_PATH")
@@ -183,8 +219,10 @@ doneFlags:
 		if cmdName == "ssh" {
 			return runSSHRelay("", cmdArgs, jsonOutput, nil)
 		}
-		fmt.Fprintln(os.Stderr, "cmux: CMUX_SOCKET_PATH not set and --socket not provided")
-		return 1
+		if !hasHeadlessRemoteContext() || !commandMayUseHeadlessNoSocket(cmdName) {
+			fmt.Fprintln(os.Stderr, "cmux: CMUX_SOCKET_PATH not set and --socket not provided")
+			return 1
+		}
 	}
 	if cmdName == "ssh" {
 		return runSSHRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
@@ -340,8 +378,10 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 
 	resp, err := socketRoundTripV2(socketPath, spec.v2Method, params, refreshAddr)
 	if err != nil {
-		if code, handled := runHeadlessCLICommand(spec.name, spec.v2Method, params, jsonOutput, err); handled {
-			return code
+		if shouldTryHeadlessFallback(err) {
+			if code, handled := runHeadlessCLICommand(spec.name, spec.v2Method, params, jsonOutput, err); handled {
+				return code
+			}
 		}
 		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
 		return 1
@@ -383,8 +423,10 @@ func runStatusRelay(socketPath string, cmdName string, args []string, jsonOutput
 	}
 	resp, err := socketRoundTrip(socketPath, socketCommand, refreshAddr)
 	if err != nil {
-		if code, handled := runHeadlessCLICommand(cmdName, method, params, jsonOutput, err); handled {
-			return code
+		if shouldTryHeadlessFallback(err) {
+			if code, handled := runHeadlessCLICommand(cmdName, method, params, jsonOutput, err); handled {
+				return code
+			}
 		}
 		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
 		return 1
@@ -424,6 +466,10 @@ func runSSHRelay(socketPath string, args []string, jsonOutput bool, refreshAddr 
 				fmt.Println(defaultRelayOutput(resp))
 			}
 			return 0
+		}
+		if !shouldTryHeadlessFallback(err) {
+			fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
+			return 1
 		}
 	}
 	if !remoteSSHDestinationIsSameHost(options.destination) {
@@ -773,8 +819,10 @@ func runTreeRelay(socketPath string, args []string, jsonOutput bool, refreshAddr
 	applyWorkspaceEnvFallback(params)
 	resp, err := socketRoundTripV2(socketPath, "system.tree", params, refreshAddr)
 	if err != nil {
-		if code, handled := runHeadlessCLICommand("tree", "system.tree", params, jsonOutput, err); handled {
-			return code
+		if shouldTryHeadlessFallback(err) {
+			if code, handled := runHeadlessCLICommand("tree", "system.tree", params, jsonOutput, err); handled {
+				return code
+			}
 		}
 		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
 		return 1
@@ -852,8 +900,10 @@ func runMetadataRelay(socketPath string, args []string, jsonOutput bool, refresh
 
 	resp, err := socketRoundTripV2(socketPath, method, params, refreshAddr)
 	if err != nil {
-		if code, handled := runHeadlessCLICommand("metadata "+sub, method, params, jsonOutput, err); handled {
-			return code
+		if shouldTryHeadlessFallback(err) {
+			if code, handled := runHeadlessCLICommand("metadata "+sub, method, params, jsonOutput, err); handled {
+				return code
+			}
 		}
 		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
 		return 1
@@ -907,8 +957,10 @@ func runWorkspaceRelay(socketPath string, args []string, jsonOutput bool, refres
 	}
 	resp, err := socketRoundTripV2(socketPath, "workspace.lookup", params, refreshAddr)
 	if err != nil {
-		if code, handled := runHeadlessCLICommand("workspace lookup", "workspace.lookup", params, jsonOutput, err); handled {
-			return code
+		if shouldTryHeadlessFallback(err) {
+			if code, handled := runHeadlessCLICommand("workspace lookup", "workspace.lookup", params, jsonOutput, err); handled {
+				return code
+			}
 		}
 		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
 		return 1
@@ -1555,9 +1607,9 @@ func socketRoundTripV2(socketPath, method string, params map[string]any, refresh
 		if errObj, _ := resp["error"].(map[string]any); errObj != nil {
 			code, _ := errObj["code"].(string)
 			msg, _ := errObj["message"].(string)
-			return "", fmt.Errorf("server error [%s]: %s", code, msg)
+			return "", &socketServerError{code: code, message: msg}
 		}
-		return "", fmt.Errorf("server returned error response")
+		return "", &socketServerError{code: "error", message: "server returned error response"}
 	}
 
 	// Return the result portion as JSON

@@ -167,6 +167,42 @@ func startMockV2SocketWithRequestCapture(t *testing.T) (string, <-chan map[strin
 	return sockPath, requests
 }
 
+func startMockV2ErrorSocket(t *testing.T, code string, message string) string {
+	t.Helper()
+	sockPath := makeShortUnixSocketPath(t)
+
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				_, _ = conn.Read(buf)
+				resp := map[string]any{
+					"ok": false,
+					"error": map[string]any{
+						"code":    code,
+						"message": message,
+					},
+				}
+				payload, _ := json.Marshal(resp)
+				_, _ = conn.Write(append(payload, '\n'))
+			}(conn)
+		}
+	}()
+
+	return sockPath
+}
+
 func startMockV2TCPSocketWithResult(t *testing.T, result any) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1263,6 +1299,60 @@ func TestCLIHeadlessMetadataFallbackMutatesSnapshot(t *testing.T) {
 	metadata, _ := body["metadataEntries"].(map[string]any)
 	if got := metadata["craft:task-id"]; got != "task-2" {
 		t.Fatalf("metadata value = %v, want task-2", got)
+	}
+}
+
+func TestCLIHeadlessNoSocketUsesRemoteContext(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CMUX_SOCKET_PATH", "")
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--json", "metadata", "set", "--workspace", "current", "craft:task-id", "task-no-socket"})
+		if code != 0 {
+			t.Fatalf("metadata set returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"snapshot_sha256"`) {
+		t.Fatalf("metadata set output missing snapshot hash: %s", output)
+	}
+	body := readHeadlessCLITestBody(t, root, slot)
+	metadata := headlessMetadataMap(body)
+	if got := metadata["craft:task-id"]; got != "task-no-socket" {
+		t.Fatalf("metadata value = %v, want task-no-socket", got)
+	}
+}
+
+func TestCLINoSocketWithoutRemoteContextStillFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CMUX_SOCKET_PATH", "")
+	t.Setenv("CMUX_WORKSPACE_ID", "")
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", "")
+
+	code := runCLI([]string{"--json", "metadata", "list"})
+	if code == 0 {
+		t.Fatal("metadata list without socket or remote context should fail")
+	}
+}
+
+func TestCLIReachableSocketServerErrorDoesNotHeadlessFallback(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+	sockPath := startMockV2ErrorSocket(t, "invalid_state", "swift handled but rejected")
+
+	code := runCLI([]string{"--socket", sockPath, "--json", "metadata", "set", "--workspace", "current", "craft:task-id", "should-not-write"})
+	if code == 0 {
+		t.Fatal("metadata set should fail on reachable Swift server error")
+	}
+	body := readHeadlessCLITestBody(t, root, slot)
+	metadata := headlessMetadataMap(body)
+	if got := metadata["craft:task-id"]; got != "task-1" {
+		t.Fatalf("metadata changed via fallback to %q, want original task-1", got)
 	}
 }
 
