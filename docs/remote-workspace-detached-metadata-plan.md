@@ -49,6 +49,8 @@ The core behavior Craft should rely on is:
 
 - A remote workspace can be detached from the Mac UI while its layout snapshot and PTYs remain on the remote host.
 - The Mac can list detached workspaces and attach them later.
+- Swift stores, fetches, and clears a specific workspace snapshot through the per-slot `cmuxd-remote` daemon RPCs.
+- Detached workspace discovery uses a one-shot `cmuxd-remote workspace-snapshot-list-all --json` command over SSH, not ad hoc shell filesystem commands.
 - A `cmux` command running inside a remote cmux terminal first tries the normal relay back to the Swift UI.
 - If the relay is unavailable, that remote `cmux` command can operate on the local remote snapshot for a restricted set of commands.
 - On reconnect/attach, the remote snapshot wins and Swift rebuilds local layout from it.
@@ -78,13 +80,15 @@ flowchart LR
   subgraph Detached["Detached or relay-unavailable remote session"]
     DCLI["remote cmux wrapper"]
     Headless["cmuxd-remote headless CLI fallback"]
+    SlotDaemon["cmuxd-remote persistent daemon"]
     Snapshot["workspace-snapshot.json"]
     Meta["workspace-snapshot.meta.json"]
     PTY["persistent daemon PTY hub"]
     DCLI --> Headless
+    Headless --> SlotDaemon
+    SlotDaemon --> PTY
     Headless --> Snapshot
     Headless --> Meta
-    Headless --> PTY
   end
 ```
 
@@ -112,13 +116,14 @@ flowchart TB
     Slot --> Daemon
     Slot --> Body
     Slot --> Sidecar
+    Daemon <-->|RPC-backed atomic read/write| Body
+    Daemon <-->|RPC-backed atomic read/write| Sidecar
     Daemon --> PTYs
   end
 
-  UI <-->|attached relay| Daemon
-  UI -->|store/fetch snapshot| Body
-  UI -->|store/fetch sidecar| Sidecar
-  HostRegistry -->|list detached hosts| Wrapper
+  UI <-->|attached relay + workspace.snapshot RPCs| Daemon
+  HostRegistry -->|list detached hosts via SSH| Wrapper
+  Wrapper -.->|workspace-snapshot-list-all reads metadata| Sidecar
 ```
 
 ### Checkpoint and Reconnect Flow
@@ -156,19 +161,19 @@ sequenceDiagram
 flowchart TD
   Start["Remote workspace attached in Swift UI"] --> Validate["Validate persistent daemon slot + capability"]
   Validate --> Capture["Capture split tree, panes, browser URLs, metadata"]
-  Capture --> StoreDetached["Store snapshot with status=detached"]
+  Capture --> StoreDetached["RPC workspace.snapshot.store(status=detached)"]
   StoreDetached --> DetachPTY["pty.detach terminal/agent surfaces"]
   DetachPTY --> TearDown["Release local browser/UI surfaces"]
   TearDown --> RemoveSidebar["Remove workspace from Mac sidebar"]
   RemoveSidebar --> Listed["Host Manager / list-detached can discover snapshot"]
 
   Listed --> Resolve["Attach: resolve host + slot from workspace ID"]
-  Resolve --> Fetch["Fetch remote snapshot"]
+  Resolve --> Fetch["RPC workspace.snapshot.fetch"]
   Fetch --> Rebuild["Recreate Swift workspace with original workspaceId"]
   Rebuild --> Layout["Replay split tree and recreate panes"]
   Layout --> AttachPTY["pty.attach terminal surfaces"]
   Layout --> ReopenBrowsers["Reopen browsers at saved URLs"]
-  AttachPTY --> StoreLive["Store checkpoint with status=live"]
+  AttachPTY --> StoreLive["RPC workspace.snapshot.store(status=live)"]
   ReopenBrowsers --> StoreLive
   StoreLive --> Attached["Workspace attached in Swift UI again"]
 ```
