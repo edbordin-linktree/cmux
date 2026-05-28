@@ -1,6 +1,51 @@
 import Foundation
 import Darwin
 
+/// Declarative spec for a remote-workspace-snapshot subcommand that follows
+/// the "value flags + boolean flags, no positional args" shape. Centralizing
+/// the flag whitelist + usage string lets every handler delegate the
+/// repetitive "unknown flag" / "unexpected positional" / "Known flags:"
+/// boilerplate to parseSnapshotSubcommand.
+struct CMUXSnapshotSubcommand {
+    /// A flag that takes a value (e.g. `--workspace <id>`). The descriptor is
+    /// the literal angle-bracket text appended after the flag name in error
+    /// messages (e.g. "<workspace>", "<h>", "<id|ref|index>").
+    struct ValueFlag {
+        let name: String
+        let descriptor: String
+    }
+
+    let name: String
+    let usage: String
+    let valueFlags: [ValueFlag]
+    let boolFlags: [String]
+
+    init(name: String, usage: String, valueFlags: [ValueFlag] = [], boolFlags: [String] = []) {
+        self.name = name
+        self.usage = usage
+        self.valueFlags = valueFlags
+        self.boolFlags = boolFlags
+    }
+
+    fileprivate var knownFlagsDescription: String {
+        let parts = valueFlags.map { "\($0.name) \($0.descriptor)" } + boolFlags
+        return parts.joined(separator: ", ")
+    }
+}
+
+struct CMUXSnapshotSubcommandArgs {
+    private let values: [String: String]
+    private let bools: Set<String>
+
+    fileprivate init(values: [String: String], bools: Set<String>) {
+        self.values = values
+        self.bools = bools
+    }
+
+    func value(_ flag: String) -> String? { values[flag] }
+    func bool(_ flag: String) -> Bool { bools.contains(flag) }
+}
+
 private struct DetachedWorkspaceHostRegistryFile: Codable {
     var version: Int = 1
     var hosts: [DetachedWorkspaceHostRecord] = []
@@ -213,20 +258,53 @@ private enum DetachedWorkspaceDates {
 }
 
 extension CMUXCLI {
+    /// Parse a snapshot subcommand following the standard shape declared by
+    /// `spec`. Returns the parsed value/boolean flags or throws the standard
+    /// "unknown flag" / "Usage: ..." CLIErrors. Required-value validation is
+    /// left to each handler so it can format command-specific error text and
+    /// pick a non-default exit code.
+    func parseSnapshotSubcommand(
+        _ args: [String],
+        spec: CMUXSnapshotSubcommand
+    ) throws -> CMUXSnapshotSubcommandArgs {
+        var remaining = args
+        var values: [String: String] = [:]
+        for flag in spec.valueFlags {
+            let (parsed, rest) = parseOption(remaining, name: flag.name)
+            if let parsed { values[flag.name] = parsed }
+            remaining = rest
+        }
+        var bools = Set<String>()
+        var leftover: [String] = []
+        for token in remaining {
+            if spec.boolFlags.contains(token) {
+                bools.insert(token)
+            } else {
+                leftover.append(token)
+            }
+        }
+        if let unknown = leftover.first(where: { localIsFlagToken($0) }) {
+            throw CLIError(message: "\(spec.name): unknown flag '\(unknown)'. Known flags: \(spec.knownFlagsDescription)")
+        }
+        guard leftover.isEmpty else {
+            throw CLIError(message: "Usage: \(spec.usage)")
+        }
+        return CMUXSnapshotSubcommandArgs(values: values, bools: bools)
+    }
+
     func runSSHWorkspaceDetach(
         commandArgs: [String],
         client: SocketClient,
         jsonOutput: Bool,
         idFormat: CLIIDFormat
     ) throws {
-        let (workspaceOpt, remaining) = parseOption(commandArgs, name: "--workspace")
-        if let unknown = remaining.first(where: { localIsFlagToken($0) }) {
-            throw CLIError(message: "ssh-workspace-detach: unknown flag '\(unknown)'. Known flags: --workspace <workspace>")
-        }
-        guard remaining.isEmpty else {
-            throw CLIError(message: "Usage: cmux ssh-workspace-detach --workspace <id|ref|index> [--json]")
-        }
-        guard let workspaceRaw = nonEmpty(workspaceOpt) else {
+        let spec = CMUXSnapshotSubcommand(
+            name: "ssh-workspace-detach",
+            usage: "cmux ssh-workspace-detach --workspace <id|ref|index> [--json]",
+            valueFlags: [.init(name: "--workspace", descriptor: "<workspace>")]
+        )
+        let parsed = try parseSnapshotSubcommand(commandArgs, spec: spec)
+        guard let workspaceRaw = nonEmpty(parsed.value("--workspace")) else {
             throw CLIError(message: "ssh-workspace-detach requires --workspace <id|ref|index>", exitCode: 1)
         }
         let workspaceID = try normalizeWorkspaceHandle(workspaceRaw, client: client)
@@ -252,16 +330,21 @@ extension CMUXCLI {
         idFormat: CLIIDFormat,
         windowOverride: String?
     ) throws {
-        let (workspaceIDOpt, rem0) = parseOption(commandArgs, name: "--workspace-id")
-        let (hostOpt, rem1) = parseOption(rem0, name: "--host")
-        let (slotOpt, rem2) = parseOption(rem1, name: "--slot")
-        let (windowOpt, remaining) = parseOption(rem2, name: "--window")
-        if let unknown = remaining.first(where: { localIsFlagToken($0) }) {
-            throw CLIError(message: "ssh-workspace-attach: unknown flag '\(unknown)'. Known flags: --workspace-id <uuid>, --host <h>, --slot <s>, --window <id|ref|index>")
-        }
-        guard remaining.isEmpty else {
-            throw CLIError(message: "Usage: cmux ssh-workspace-attach --workspace-id <uuid> [--host <h>] [--slot <s>] [--window <id|ref|index>] [--json]")
-        }
+        let spec = CMUXSnapshotSubcommand(
+            name: "ssh-workspace-attach",
+            usage: "cmux ssh-workspace-attach --workspace-id <uuid> [--host <h>] [--slot <s>] [--window <id|ref|index>] [--json]",
+            valueFlags: [
+                .init(name: "--workspace-id", descriptor: "<uuid>"),
+                .init(name: "--host", descriptor: "<h>"),
+                .init(name: "--slot", descriptor: "<s>"),
+                .init(name: "--window", descriptor: "<id|ref|index>"),
+            ]
+        )
+        let parsed = try parseSnapshotSubcommand(commandArgs, spec: spec)
+        let workspaceIDOpt = parsed.value("--workspace-id")
+        let hostOpt = parsed.value("--host")
+        let slotOpt = parsed.value("--slot")
+        let windowOpt = parsed.value("--window")
         guard let workspaceID = nonEmpty(workspaceIDOpt), UUID(uuidString: workspaceID) != nil else {
             throw CLIError(message: "ssh-workspace-attach requires --workspace-id <uuid>", exitCode: 1)
         }
@@ -317,17 +400,21 @@ extension CMUXCLI {
         jsonOutput: Bool,
         idFormat: CLIIDFormat
     ) throws {
-        let (workspaceIDOpt, rem0) = parseOption(commandArgs, name: "--workspace-id")
-        let (hostOpt, rem1) = parseOption(rem0, name: "--host")
-        let (slotOpt, rem2) = parseOption(rem1, name: "--slot")
-        let force = rem2.contains("--force")
-        let remaining = rem2.filter { $0 != "--force" }
-        if let unknown = remaining.first(where: { localIsFlagToken($0) }) {
-            throw CLIError(message: "ssh-workspace-snapshot-clear: unknown flag '\(unknown)'. Known flags: --workspace-id <uuid>, --host <h>, --slot <s>, --force")
-        }
-        guard remaining.isEmpty else {
-            throw CLIError(message: "Usage: cmux ssh-workspace-snapshot-clear (--workspace-id <uuid> | --host <h> --slot <s>) [--force]")
-        }
+        let spec = CMUXSnapshotSubcommand(
+            name: "ssh-workspace-snapshot-clear",
+            usage: "cmux ssh-workspace-snapshot-clear (--workspace-id <uuid> | --host <h> --slot <s>) [--force]",
+            valueFlags: [
+                .init(name: "--workspace-id", descriptor: "<uuid>"),
+                .init(name: "--host", descriptor: "<h>"),
+                .init(name: "--slot", descriptor: "<s>"),
+            ],
+            boolFlags: ["--force"]
+        )
+        let parsed = try parseSnapshotSubcommand(commandArgs, spec: spec)
+        let workspaceIDOpt = parsed.value("--workspace-id")
+        let hostOpt = parsed.value("--host")
+        let slotOpt = parsed.value("--slot")
+        let force = parsed.bool("--force")
         let target: DetachedWorkspaceResolvedTarget
         if let workspaceID = nonEmpty(workspaceIDOpt) {
             target = try resolveDetachedWorkspaceTarget(
@@ -374,9 +461,11 @@ extension CMUXCLI {
     }
 
     func runSSHHostList(commandArgs: [String], jsonOutput: Bool) throws {
-        guard commandArgs.isEmpty else {
-            throw CLIError(message: "Usage: cmux ssh-host-list [--json]")
-        }
+        let spec = CMUXSnapshotSubcommand(
+            name: "ssh-host-list",
+            usage: "cmux ssh-host-list [--json]"
+        )
+        _ = try parseSnapshotSubcommand(commandArgs, spec: spec)
         let registry = try DetachedWorkspaceRegistry.load()
         if jsonOutput {
             print(jsonString(try registryJSONObject(registry)))
@@ -400,13 +489,15 @@ extension CMUXCLI {
     }
 
     func runSSHHostForget(commandArgs: [String], jsonOutput: Bool) throws {
-        let (hostOpt, rem0) = parseOption(commandArgs, name: "--host")
-        let force = rem0.contains("--force")
-        let remaining = rem0.filter { $0 != "--force" }
-        if let unknown = remaining.first(where: { localIsFlagToken($0) }) {
-            throw CLIError(message: "ssh-host-forget: unknown flag '\(unknown)'. Known flags: --host <h>, --force")
-        }
-        guard remaining.isEmpty, let host = nonEmpty(hostOpt) else {
+        let spec = CMUXSnapshotSubcommand(
+            name: "ssh-host-forget",
+            usage: "cmux ssh-host-forget --host <h> [--force]",
+            valueFlags: [.init(name: "--host", descriptor: "<h>")],
+            boolFlags: ["--force"]
+        )
+        let parsed = try parseSnapshotSubcommand(commandArgs, spec: spec)
+        let force = parsed.bool("--force")
+        guard let host = nonEmpty(parsed.value("--host")) else {
             throw CLIError(message: "Usage: cmux ssh-host-forget --host <h> [--force]")
         }
 
@@ -434,15 +525,17 @@ extension CMUXCLI {
     }
 
     func runSSHWorkspaceListDetached(commandArgs: [String], jsonOutput: Bool) throws {
-        let (hostOpt, rem0) = parseOption(commandArgs, name: "--host")
-        let (timeoutOpt, remaining) = parseOption(rem0, name: "--timeout")
-        if let unknown = remaining.first(where: { localIsFlagToken($0) }) {
-            throw CLIError(message: "ssh-workspace-list-detached: unknown flag '\(unknown)'. Known flags: --host <h>, --timeout <secs>")
-        }
-        guard remaining.isEmpty else {
-            throw CLIError(message: "Usage: cmux ssh-workspace-list-detached [--host <h>] [--json] [--timeout <secs>]")
-        }
-        let timeout = try parseTimeout(timeoutOpt, defaultValue: 5)
+        let spec = CMUXSnapshotSubcommand(
+            name: "ssh-workspace-list-detached",
+            usage: "cmux ssh-workspace-list-detached [--host <h>] [--json] [--timeout <secs>]",
+            valueFlags: [
+                .init(name: "--host", descriptor: "<h>"),
+                .init(name: "--timeout", descriptor: "<secs>"),
+            ]
+        )
+        let parsed = try parseSnapshotSubcommand(commandArgs, spec: spec)
+        let hostOpt = parsed.value("--host")
+        let timeout = try parseTimeout(parsed.value("--timeout"), defaultValue: 5)
         let registry = try DetachedWorkspaceRegistry.load()
         let hosts: [DetachedWorkspaceHostRecord]
         if let host = nonEmpty(hostOpt) {
