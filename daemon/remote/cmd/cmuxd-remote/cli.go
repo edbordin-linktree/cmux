@@ -369,7 +369,7 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 		}
 
 		applyWorkspaceEnvFallback(params)
-		applySurfaceEnvFallback(params)
+		applySurfaceEnvFallback(params, parsed.flags["workspace"])
 
 		if workspaceArg := parsed.flags["workspace"]; workspaceArg != "" {
 			socketPath = socketPathForExplicitWorkspaceArg(workspaceArg, socketPath)
@@ -1073,7 +1073,7 @@ func runBrowserRelay(socketPath string, args []string, jsonOutput bool, refreshA
 		applyWorkspaceEnvFallback(params)
 	}
 	if spec.useSurfaceEnv {
-		applySurfaceEnvFallback(params)
+		applySurfaceEnvFallback(params, parsed.flags["workspace"])
 	}
 	if workspaceArg := parsed.flags["workspace"]; workspaceArg != "" {
 		socketPath = socketPathForExplicitWorkspaceArg(workspaceArg, socketPath)
@@ -1168,13 +1168,25 @@ func socketPathForExplicitWorkspaceArg(workspaceArg string, fallback string) str
 	return socketPath
 }
 
-func applySurfaceEnvFallback(params map[string]any) {
+func applySurfaceEnvFallback(params map[string]any, workspaceArg string) {
 	if _, ok := params["surface_id"]; ok {
+		return
+	}
+	if !workspaceArgAllowsCallerSurfaceEnv(workspaceArg) {
 		return
 	}
 	if envSf := os.Getenv("CMUX_SURFACE_ID"); envSf != "" {
 		params["surface_id"] = envSf
 	}
+}
+
+func workspaceArgAllowsCallerSurfaceEnv(workspaceArg string) bool {
+	workspaceArg = headlessNormalizeID(workspaceArg)
+	if workspaceArg == "" || workspaceArg == "current" {
+		return true
+	}
+	envWorkspace := headlessNormalizeID(os.Getenv("CMUX_WORKSPACE_ID"))
+	return envWorkspace != "" && strings.EqualFold(workspaceArg, envWorkspace)
 }
 
 func defaultRelayOutput(resp string) string {

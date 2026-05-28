@@ -846,6 +846,63 @@ func TestCLINewPaneDefaultsDirectionAndForwardsExtraFlags(t *testing.T) {
 	}
 }
 
+func TestCLINewPaneExplicitOtherWorkspaceDoesNotForwardCallerSurfaceEnv(t *testing.T) {
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+	t.Setenv("CMUX_WORKSPACE_ID", "caller-ws")
+	t.Setenv("CMUX_SURFACE_ID", "caller-surface")
+
+	code := runCLI([]string{
+		"--socket", sockPath, "--json",
+		"new-pane",
+		"--workspace", "target-ws",
+		"--type", "browser",
+		"--url", "https://example.com",
+	})
+	if code != 0 {
+		t.Fatalf("new-pane should return 0, got %d", code)
+	}
+
+	select {
+	case req := <-requests:
+		params, _ := req["params"].(map[string]any)
+		if got := params["workspace_id"]; got != "target-ws" {
+			t.Fatalf("workspace_id = %v, want target-ws", got)
+		}
+		if got := params["surface_id"]; got != nil {
+			t.Fatalf("surface_id should not default from caller env for other workspace, got %v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for new-pane request")
+	}
+}
+
+func TestCLINewPaneExplicitCurrentWorkspaceForwardsCallerSurfaceEnv(t *testing.T) {
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+	t.Setenv("CMUX_WORKSPACE_ID", "caller-ws")
+	t.Setenv("CMUX_SURFACE_ID", "caller-surface")
+
+	code := runCLI([]string{
+		"--socket", sockPath, "--json",
+		"new-pane",
+		"--workspace", "current",
+		"--type", "browser",
+		"--url", "https://example.com",
+	})
+	if code != 0 {
+		t.Fatalf("new-pane should return 0, got %d", code)
+	}
+
+	select {
+	case req := <-requests:
+		params, _ := req["params"].(map[string]any)
+		if got := params["surface_id"]; got != "caller-surface" {
+			t.Fatalf("surface_id = %v, want caller-surface", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for new-pane request")
+	}
+}
+
 func TestCLIListPanelsUsesSurfaceList(t *testing.T) {
 	sockPath, requests := startMockV2SocketWithRequestCapture(t)
 	code := runCLI([]string{"--socket", sockPath, "--json", "list-panels", "--workspace", "ws-1"})
