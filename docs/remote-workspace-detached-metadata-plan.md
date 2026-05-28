@@ -443,6 +443,16 @@ Then update current Craft helpers:
 
 The existing discoverer-specific path should become a normal agent surface with different Craft-side configuration. cmux does not need special discoverer behavior.
 
+Known raw cmux call sites to consolidate into the provider layer on the Craft `feat/refactor` branch:
+
+- `bin/orchestrator.sh`: first-run cmux workspace bootstrap currently calls `cmux new-workspace`, `rename-workspace`, `tree`, `rename-tab`, `send`, `send-key`, and `select-workspace` directly. Move workspace identity/surface recording through the provider; keep `select-workspace` as a relay-only UI action.
+- `bin/lib/mux-cmux.sh`: this is the main cmux provider today, but it mixes provider primitives with title-prefix lookup, tab-title lookup, dashboard surface management, architect/task pane setup, and UI focus. Split this into metadata-based workspace/surface primitives plus thin compatibility wrappers.
+- `plugins/craft-dashboard/dashboard/cmux.ts`: dashboard focus logic shells out to `cmux` directly and still relies on title/tab matching and status reads. Keep a dashboard-specific wrapper if useful, but route identity through metadata/tree and classify focus/select/attach failures as `cmux_ui_unavailable`.
+- `plugins/craft-dashboard/scripts/set-task-state`: finds task workspaces with `cmux tree --all --json` title matching before `set-status`. Replace workspace lookup with metadata lookup; keep `set-status` for visible feedback only.
+- `plugins/planning/scripts/start-discoverer`: directly creates a terminal surface, renames it, and sends a prompt. Replace the discoverer special case with the common semantic-surface path for an agent surface with different configuration.
+- `plugins/buildkite-status/scripts/show-build-status` and `plugins/buildkite-status/hooks.sh`: directly search/create/rename/close browser surfaces by URL/title. Replace with semantic browser surface metadata such as `craft:surface:buildkite-status`.
+- Diffhub/Devin scripts already mostly use their own surface files or higher-level helpers, but any direct cmux surface open/close path should be folded into the same semantic-surface provider instead of keeping plugin-local cmux shell logic.
+
 ### Detached-Safe Craft Operations
 
 Craft supervisor scripts can rely on these in attached and detached remote workspaces:
