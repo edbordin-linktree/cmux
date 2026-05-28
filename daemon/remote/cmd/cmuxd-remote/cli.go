@@ -321,6 +321,7 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 	for key, value := range spec.defaultParams {
 		params[key] = value
 	}
+	forceHeadless := false
 
 	if !spec.noParams {
 		parsed, err := parseFlags(args, spec.flagKeys)
@@ -372,8 +373,18 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 		applySurfaceEnvFallback(params, parsed.flags["workspace"])
 
 		if workspaceArg := parsed.flags["workspace"]; workspaceArg != "" {
-			socketPath = socketPathForExplicitWorkspaceArg(workspaceArg, socketPath)
+			route := routeForExplicitWorkspaceArg(workspaceArg, socketPath)
+			socketPath = route.socketPath
+			forceHeadless = route.forceHeadless
 		}
+	}
+
+	if forceHeadless {
+		if code, handled := runHeadlessCLICommand(spec.name, spec.v2Method, params, jsonOutput, errors.New("target workspace is detached")); handled {
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "cmux: %s cannot operate on detached workspace\n", spec.name)
+		return 1
 	}
 
 	resp, err := socketRoundTripV2(socketPath, spec.v2Method, params, refreshAddr)
@@ -420,6 +431,15 @@ func runStatusRelay(socketPath string, cmdName string, args []string, jsonOutput
 	if targetSocketPath := stringFromAny(params["_target_socket_path"]); targetSocketPath != "" {
 		socketPath = targetSocketPath
 		delete(params, "_target_socket_path")
+	}
+	forceHeadless := boolFromAny(params["_target_headless"])
+	delete(params, "_target_headless")
+	if forceHeadless {
+		if code, handled := runHeadlessCLICommand(cmdName, method, params, jsonOutput, errors.New("target workspace is detached")); handled {
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "cmux: %s cannot operate on detached workspace\n", cmdName)
+		return 1
 	}
 	resp, err := socketRoundTrip(socketPath, socketCommand, refreshAddr)
 	if err != nil {
@@ -731,8 +751,11 @@ func parseSetStatusCommand(args []string) (string, map[string]any, error) {
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
 		parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
-		if targetSocketPath := socketPathForExplicitWorkspaceArg(workspace, ""); targetSocketPath != "" {
-			params["_target_socket_path"] = targetSocketPath
+		route := routeForExplicitWorkspaceArg(workspace, "")
+		if route.forceHeadless {
+			params["_target_headless"] = true
+		} else if route.socketPath != "" {
+			params["_target_socket_path"] = route.socketPath
 		}
 	} else {
 		applyWorkspaceEnvFallback(params)
@@ -756,8 +779,11 @@ func parseClearStatusCommand(args []string) (string, map[string]any, error) {
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
 		parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
-		if targetSocketPath := socketPathForExplicitWorkspaceArg(workspace, ""); targetSocketPath != "" {
-			params["_target_socket_path"] = targetSocketPath
+		route := routeForExplicitWorkspaceArg(workspace, "")
+		if route.forceHeadless {
+			params["_target_headless"] = true
+		} else if route.socketPath != "" {
+			params["_target_socket_path"] = route.socketPath
 		}
 	} else {
 		applyWorkspaceEnvFallback(params)
@@ -781,8 +807,11 @@ func parseListStatusCommand(args []string) (string, map[string]any, error) {
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
 		parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
-		if targetSocketPath := socketPathForExplicitWorkspaceArg(workspace, ""); targetSocketPath != "" {
-			params["_target_socket_path"] = targetSocketPath
+		route := routeForExplicitWorkspaceArg(workspace, "")
+		if route.forceHeadless {
+			params["_target_headless"] = true
+		} else if route.socketPath != "" {
+			params["_target_socket_path"] = route.socketPath
 		}
 	} else {
 		applyWorkspaceEnvFallback(params)
@@ -818,7 +847,15 @@ func runTreeRelay(socketPath string, args []string, jsonOutput bool, refreshAddr
 	params := map[string]any{}
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
-		socketPath = socketPathForExplicitWorkspaceArg(workspace, socketPath)
+		route := routeForExplicitWorkspaceArg(workspace, socketPath)
+		socketPath = route.socketPath
+		if route.forceHeadless {
+			if code, handled := runHeadlessCLICommand("tree", "system.tree", params, jsonOutput, errors.New("target workspace is detached")); handled {
+				return code
+			}
+			fmt.Fprintln(os.Stderr, "cmux: tree cannot operate on detached workspace")
+			return 1
+		}
 	}
 	applyWorkspaceEnvFallback(params)
 	resp, err := socketRoundTripV2(socketPath, "system.tree", params, refreshAddr)
@@ -853,9 +890,12 @@ func runMetadataRelay(socketPath string, args []string, jsonOutput bool, refresh
 		return 2
 	}
 	params := map[string]any{}
+	forceHeadless := false
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
-		socketPath = socketPathForExplicitWorkspaceArg(workspace, socketPath)
+		route := routeForExplicitWorkspaceArg(workspace, socketPath)
+		socketPath = route.socketPath
+		forceHeadless = route.forceHeadless
 	}
 	applyWorkspaceEnvFallback(params)
 
@@ -900,6 +940,14 @@ func runMetadataRelay(socketPath string, args []string, jsonOutput bool, refresh
 	default:
 		fmt.Fprintf(os.Stderr, "cmux metadata: unknown subcommand %q\n", sub)
 		return 2
+	}
+
+	if forceHeadless {
+		if code, handled := runHeadlessCLICommand("metadata "+sub, method, params, jsonOutput, errors.New("target workspace is detached")); handled {
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "cmux: metadata %s cannot operate on detached workspace\n", sub)
+		return 1
 	}
 
 	resp, err := socketRoundTripV2(socketPath, method, params, refreshAddr)
@@ -1079,8 +1127,18 @@ func runBrowserRelay(socketPath string, args []string, jsonOutput bool, refreshA
 	if spec.useSurfaceEnv {
 		applySurfaceEnvFallback(params, parsed.flags["workspace"])
 	}
+	forceHeadless := false
 	if workspaceArg := parsed.flags["workspace"]; workspaceArg != "" {
-		socketPath = socketPathForExplicitWorkspaceArg(workspaceArg, socketPath)
+		route := routeForExplicitWorkspaceArg(workspaceArg, socketPath)
+		socketPath = route.socketPath
+		forceHeadless = route.forceHeadless
+	}
+	if forceHeadless {
+		if code, handled := runHeadlessCLICommand("browser "+sub, spec.method, params, jsonOutput, errors.New("target workspace is detached")); handled {
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "cmux: browser %s cannot operate on detached workspace\n", sub)
+		return 1
 	}
 
 	resp, err := socketRoundTripV2(socketPath, spec.method, params, refreshAddr)
@@ -1152,24 +1210,33 @@ func applyWorkspaceEnvFallback(params map[string]any) {
 	}
 }
 
-func socketPathForExplicitWorkspaceArg(workspaceArg string, fallback string) string {
+type explicitWorkspaceRoute struct {
+	socketPath    string
+	forceHeadless bool
+}
+
+func routeForExplicitWorkspaceArg(workspaceArg string, fallback string) explicitWorkspaceRoute {
 	workspaceID := headlessNormalizeID(workspaceArg)
 	if workspaceID == "" || workspaceID == "current" {
-		return fallback
+		return explicitWorkspaceRoute{socketPath: fallback}
 	}
 	rootBase, err := headlessDaemonRoot()
 	if err != nil {
-		return fallback
+		return explicitWorkspaceRoute{socketPath: fallback}
 	}
 	slot, err := findHeadlessSlotForWorkspace(rootBase, workspaceID)
 	if err != nil {
-		return fallback
+		return explicitWorkspaceRoute{socketPath: fallback}
 	}
 	socketPath := headlessRelaySocketForSlot(slot)
 	if socketPath == "" {
-		return fallback
+		return explicitWorkspaceRoute{socketPath: fallback, forceHeadless: true}
 	}
-	return socketPath
+	return explicitWorkspaceRoute{socketPath: socketPath}
+}
+
+func socketPathForExplicitWorkspaceArg(workspaceArg string, fallback string) string {
+	return routeForExplicitWorkspaceArg(workspaceArg, fallback).socketPath
 }
 
 func applySurfaceEnvFallback(params map[string]any, workspaceArg string) {

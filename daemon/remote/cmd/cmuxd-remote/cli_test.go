@@ -1843,6 +1843,42 @@ func TestCLIHeadlessNewSurfaceExplicitWorkspaceTargetsOtherSnapshot(t *testing.T
 	}
 }
 
+func TestCLIAttachedCallerExplicitDetachedWorkspaceUsesHeadless(t *testing.T) {
+	root, callerWorkspaceID, callerSlot := writeHeadlessCLITestSnapshot(t)
+	targetWorkspaceID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	targetSlot := "slot-b"
+	targetSurfaceID := "22222222-2222-4222-8222-222222222222"
+	writeHeadlessCLITestSnapshotAt(t, root, targetWorkspaceID, targetSlot, "Target Workspace", targetSurfaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", callerWorkspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", callerSlot)
+	callerSocket, requests := startMockV2SocketWithRequestCapture(t)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", callerSocket, "--json", "new-surface", "--workspace", targetWorkspaceID, "--type", "browser", "--url", "https://example.com"})
+		if code != 0 {
+			t.Fatalf("new-surface returned %d", code)
+		}
+	})
+	select {
+	case req := <-requests:
+		t.Fatalf("explicit detached target should bypass caller Swift relay, got request %#v", req)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if !strings.Contains(output, targetWorkspaceID) {
+		t.Fatalf("new-surface output should reference target workspace: %s", output)
+	}
+
+	callerBody := readHeadlessCLITestBody(t, root, callerSlot)
+	if got := len(headlessPaneSnapshots(callerBody)); got != 1 {
+		t.Fatalf("caller pane snapshots = %d, want unchanged 1", got)
+	}
+	targetBody := readHeadlessCLITestBody(t, root, targetSlot)
+	if got := len(headlessPaneSnapshots(targetBody)); got != 2 {
+		t.Fatalf("target pane snapshots = %d, want 2", got)
+	}
+}
+
 func TestCLIHeadlessNewPaneAcceptsFocusFalse(t *testing.T) {
 	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
 	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
