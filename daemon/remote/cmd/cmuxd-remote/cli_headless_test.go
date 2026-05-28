@@ -659,3 +659,27 @@ func TestRunHeadlessCLIResultRoutesViaRegistry(t *testing.T) {
 		t.Fatalf("registry-dispatched handler returned %+v", result)
 	}
 }
+
+func TestHeadlessFailureMessageIncludesRelayErr(t *testing.T) {
+	got := headlessFailureMessage(
+		"metadata.set",
+		errors.New("snapshot missing"),
+		errors.New("dial unix /tmp/cmux.sock: connect: connection refused"),
+	)
+	if !strings.Contains(got, "snapshot missing") {
+		t.Errorf("missing headless reason: %q", got)
+	}
+	if !strings.Contains(got, "connection refused") {
+		t.Errorf("relay error dropped from stderr message: %q", got)
+	}
+}
+
+func TestHeadlessFailureMessageOmitsRelaySuffixWhenNil(t *testing.T) {
+	got := headlessFailureMessage("metadata.set", errors.New("snapshot missing"), nil)
+	if !strings.Contains(got, "snapshot missing") {
+		t.Errorf("missing headless reason: %q", got)
+	}
+	if strings.Contains(got, "relay") {
+		t.Errorf("unexpected relay suffix when relay error is nil: %q", got)
+	}
+}

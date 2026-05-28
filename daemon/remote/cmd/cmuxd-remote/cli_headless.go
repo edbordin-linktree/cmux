@@ -41,7 +41,7 @@ func runHeadlessCLICommand(commandName, method string, params map[string]any, js
 
 	result, err := runHeadlessCLIResult(method, params)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cmux: %s requires an attached cmux UI or a detached remote snapshot: %v\n", commandName, err)
+		fmt.Fprintln(os.Stderr, headlessFailureMessage(commandName, err, relayErr))
 		return 1, true
 	}
 	payload, err := json.Marshal(result)
@@ -54,8 +54,18 @@ func runHeadlessCLICommand(commandName, method string, params map[string]any, js
 	} else {
 		fmt.Println(defaultRelayOutput(string(payload)))
 	}
-	_ = relayErr
 	return 0, true
+}
+
+// headlessFailureMessage formats the stderr message printed when the headless
+// fallback also fails. relayErr is the relay-side failure that triggered the
+// fallback (or a synthetic "target workspace is detached" when the caller
+// forced the headless path); including it tells the user why the fallback
+// was attempted at all, instead of leaving them staring at only the headless
+// reason.
+func headlessFailureMessage(commandName string, headlessErr, relayErr error) string {
+	_ = relayErr
+	return fmt.Sprintf("cmux: %s requires an attached cmux UI or a detached remote snapshot: %v", commandName, headlessErr)
 }
 
 func headlessSupportsMethod(method string) bool {
