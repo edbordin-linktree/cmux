@@ -120,7 +120,7 @@ func headlessSendText(params map[string]any) (map[string]any, error) {
 	if !ok {
 		return nil, errors.New("surface.send_text requires text")
 	}
-	result, err := headlessPersistentDaemonRPC(snap.slot, "pty.send", map[string]any{
+	result, err := headlessPersistentDaemonRPCFunc(snap.slot, "pty.send", map[string]any{
 		"session_id": sessionID,
 		"text":       text,
 	})
@@ -139,7 +139,7 @@ func headlessSendKey(params map[string]any) (map[string]any, error) {
 	if key == "" {
 		return nil, errors.New("surface.send_key requires key")
 	}
-	result, err := headlessPersistentDaemonRPC(snap.slot, "pty.send_key", map[string]any{
+	result, err := headlessPersistentDaemonRPCFunc(snap.slot, "pty.send_key", map[string]any{
 		"session_id": sessionID,
 		"key":        key,
 	})

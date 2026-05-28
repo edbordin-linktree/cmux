@@ -26,9 +26,13 @@ type headlessSnapshot struct {
 	meta     workspaceSnapshotMeta
 }
 
-// headlessStartPTYFunc is var-extracted so tests can stub PTY launch without
-// touching the persistent daemon.
-var headlessStartPTYFunc = headlessStartPTY
+// headlessStartPTYFunc and headlessPersistentDaemonRPCFunc are var-extracted
+// so tests can stub PTY launch and persistent-daemon RPC without touching the
+// real socket.
+var (
+	headlessStartPTYFunc            = headlessStartPTY
+	headlessPersistentDaemonRPCFunc = headlessPersistentDaemonRPC
+)
 
 func loadHeadlessSnapshot(params map[string]any) (*headlessSnapshot, error) {
 	slot, err := resolveHeadlessSnapshotSlot(params)
