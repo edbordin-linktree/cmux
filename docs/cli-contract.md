@@ -100,7 +100,7 @@ Environment:
 | `move-tab-to-new-workspace` | Move a tab or surface into a newly created workspace. |
 | `list-workspaces` | List workspaces. |
 | `new-workspace` | Create a workspace, optionally with cwd, command, description, and layout. |
-| `ssh` | Open an SSH-backed workspace. |
+| `ssh` | Open an SSH-backed workspace. The Mac Swift CLI supports the standard SSH workspace flags; the remote wrapper adds same-host `--cwd`, `--detached`, and `--json` support for supervisor scripts. |
 | `remote-daemon-status` | Print bundled remote daemon version, asset, checksum, and cache status. |
 | `ssh-workspace-detach` | Store a remote workspace snapshot on its persistent daemon host and remove the local workspace. Supports `--json`. |
 | `ssh-workspace-list-detached` | List snapshots whose remote metadata status is `detached` across known hosts, or one host with `--host`. Supports `--json`; live checkpoints are intentionally hidden. |
@@ -438,7 +438,8 @@ the expected text without connecting to a cmux socket.
 - `cmux rename-tab --help` -> `Usage: cmux rename-tab`
 - `cmux new-workspace --help` -> `Usage: cmux new-workspace`
 - `cmux list-workspaces --help` -> `Usage: cmux list-workspaces`
-- `cmux ssh --help` -> `Usage: cmux ssh <destination> [--cwd <path>] [--name <title>] [--detached] [--json] [-- <cmd>]`
+- Mac Swift CLI `cmux ssh --help` -> `Usage: cmux ssh <destination> [flags] [-- <remote-command-args>]`
+- Remote wrapper `cmux ssh --help` -> `Usage: cmux ssh <destination> [--cwd <path>] [--name <title>] [--detached] [--json] [-- <cmd>]`
 - `cmux ssh-workspace-detach --help` -> `Usage: cmux ssh-workspace-detach --workspace <id|ref|index>`
 - `cmux ssh-workspace-list-detached --help` -> `Usage: cmux ssh-workspace-list-detached`
 - `cmux ssh-workspace-attach --help` -> `Usage: cmux ssh-workspace-attach --workspace-id <uuid>`
