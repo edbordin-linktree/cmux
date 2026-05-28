@@ -1518,6 +1518,51 @@ func TestCLISSHRoutesToSwiftWhenRelayAvailable(t *testing.T) {
 	}
 }
 
+func TestCLISSHDetachedFlagBypassesSwiftRelay(t *testing.T) {
+	root := t.TempDir()
+	cwd := filepath.Join(root, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+
+	oldStartPTY := headlessStartPTYFunc
+	var startedSlot string
+	headlessStartPTYFunc = func(slot, sessionID, attachmentID, command string) error {
+		startedSlot = slot
+		return nil
+	}
+	t.Cleanup(func() { headlessStartPTYFunc = oldStartPTY })
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", sockPath, "--json", "ssh", "--detached", "localhost", "--cwd", cwd, "--name", "Forced Detached Task"})
+		if code != 0 {
+			t.Fatalf("ssh returned %d", code)
+		}
+	})
+	select {
+	case req := <-requests:
+		t.Fatalf("ssh --detached should bypass Swift relay, got request %#v", req)
+	case <-time.After(100 * time.Millisecond):
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if got, _ := result["detached"].(bool); !got {
+		t.Fatalf("detached = %v, want true", result["detached"])
+	}
+	slot := stringFromAny(result["persistent_daemon_slot"])
+	if slot == "" || startedSlot != slot {
+		t.Fatalf("slot result=%q started=%q", slot, startedSlot)
+	}
+	body := readHeadlessCLITestBody(t, root, slot)
+	if got := stringFromAny(body["title"]); got != "Forced Detached Task" {
+		t.Fatalf("title = %q, want Forced Detached Task", got)
+	}
+}
+
 func TestCLIHeadlessSSHSameHostFallbackCreatesDetachedSnapshot(t *testing.T) {
 	root := t.TempDir()
 	cwd := filepath.Join(root, "project")

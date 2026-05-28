@@ -438,7 +438,7 @@ the expected text without connecting to a cmux socket.
 - `cmux rename-tab --help` -> `Usage: cmux rename-tab`
 - `cmux new-workspace --help` -> `Usage: cmux new-workspace`
 - `cmux list-workspaces --help` -> `Usage: cmux list-workspaces`
-- `cmux ssh --help` -> `Usage: cmux ssh <destination>`
+- `cmux ssh --help` -> `Usage: cmux ssh <destination> [--cwd <path>] [--name <title>] [--detached] [--json] [-- <cmd>]`
 - `cmux ssh-workspace-detach --help` -> `Usage: cmux ssh-workspace-detach --workspace <id|ref|index>`
 - `cmux ssh-workspace-list-detached --help` -> `Usage: cmux ssh-workspace-list-detached`
 - `cmux ssh-workspace-attach --help` -> `Usage: cmux ssh-workspace-attach --workspace-id <uuid>`

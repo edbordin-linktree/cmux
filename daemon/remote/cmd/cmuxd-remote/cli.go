@@ -445,6 +445,7 @@ type remoteSSHCLIOptions struct {
 	port           string
 	identity       string
 	noFocus        bool
+	detached       bool
 	sshOptions     []string
 	extraArguments []string
 	jsonOutput     bool
@@ -457,7 +458,7 @@ func runSSHRelay(socketPath string, args []string, jsonOutput bool, refreshAddr 
 		return 2
 	}
 	params := remoteSSHWorkspaceParams(options)
-	if strings.TrimSpace(socketPath) != "" {
+	if strings.TrimSpace(socketPath) != "" && !options.detached {
 		resp, err := socketRoundTripV2(socketPath, "workspace.remote.ssh_create", params, refreshAddr)
 		if err == nil {
 			if options.jsonOutput {
@@ -577,6 +578,9 @@ func parseRemoteSSHCLIOptions(args []string, jsonOutput bool) (remoteSSHCLIOptio
 			i = next
 		case "--no-focus":
 			options.noFocus = true
+			i++
+		case "--detached":
+			options.detached = true
 			i++
 		case "--ssh-option":
 			value, next, err := remoteSSHFlagValue(args, i, arg)
@@ -1651,7 +1655,7 @@ func cliUsage() {
 	fmt.Fprintln(os.Stderr, "  list-workspaces           List all workspaces")
 	fmt.Fprintln(os.Stderr, "  new-window                Create a new window")
 	fmt.Fprintln(os.Stderr, "  new-workspace             Create a new workspace")
-	fmt.Fprintln(os.Stderr, "  ssh <host>                Create an SSH workspace; falls back to same-host detached creation")
+	fmt.Fprintln(os.Stderr, "  ssh <host>                Create an SSH workspace; use --detached to force same-host detached creation")
 	fmt.Fprintln(os.Stderr, "  new-surface               Create a new surface")
 	fmt.Fprintln(os.Stderr, "  new-split                 Split an existing surface")
 	fmt.Fprintln(os.Stderr, "  close-surface             Close a surface")
