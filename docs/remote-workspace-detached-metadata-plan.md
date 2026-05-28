@@ -202,17 +202,20 @@ flowchart TB
     PTYs["PTY sessions\nmany per slot"]
     Body["workspace-snapshot.json\nlayout + panes + metadata + statuses"]
     Sidecar["workspace-snapshot.meta.json\nlist/attach metadata"]
+    RelaySocket["relay_socket\nslot-scoped Swift relay address"]
 
     Wrapper --> Daemon
     Slot --> Daemon
     Slot --> Body
     Slot --> Sidecar
+    Slot --> RelaySocket
     Daemon <-->|RPC-backed atomic read/write| Body
     Daemon <-->|RPC-backed atomic read/write| Sidecar
     Daemon --> PTYs
   end
 
   UI <-->|attached relay + workspace.snapshot RPCs| Daemon
+  UI -.->|relay bootstrap writes| RelaySocket
   HostRegistry -->|list detached hosts via SSH| Wrapper
   Wrapper -.->|workspace-snapshot-list-all reads metadata| Sidecar
 ```
@@ -343,19 +346,26 @@ When the Mac relay is gone, these commands fall back to mutating or reading the 
 cmux metadata set|get|list|clear --workspace current ...
 cmux workspace lookup --metadata <key=value> [--include-detached] --json
 cmux tree --workspace current --json
+cmux new-workspace --cwd <path> [--name <title>] [--command <cmd>] [--json]
 cmux new-pane --workspace current --type terminal|browser [--direction <dir>] [--url <url>] [--command <cmd>] [--focus true|false]
 cmux new-surface --workspace current --type terminal|browser [--pane <pane>] [--url <url>] [--command <cmd>] [--focus true|false]
 cmux new-split <dir> --workspace current [--surface <surface>] [--type terminal|browser] [--url <url>] [--command <cmd>] [--focus true|false]
 cmux close-surface --workspace current --surface <surface>
 cmux rename-workspace [--workspace current] '<title>'
 cmux rename-window [--workspace current] '<title>'
-cmux rename-tab --surface <surface> '<title>'
-cmux set-status <key> <value> [--icon <icon>] [--color <color>] [--priority <n>]
-cmux clear-status <key>
-cmux list-status
-cmux send --surface <surface> -- '<text>'
-cmux send-key --surface <surface> <key>
+cmux rename-tab [--workspace current] --surface <surface> '<title>'
+cmux set-status [--workspace current] <key> <value> [--icon <icon>] [--color <color>] [--priority <n>]
+cmux clear-status [--workspace current] <key>
+cmux list-status [--workspace current]
+cmux send [--workspace current] --surface <surface> -- '<text>'
+cmux send-key [--workspace current] --surface <surface> <key>
 ```
+
+The remote wrapper accepts `--json` before or after the command for these daemon-relayed commands, so both `cmux --json new-surface ...` and `cmux new-surface ... --json` are valid.
+
+Detached `new-workspace --cwd` creates a new persistent daemon slot, starts the workspace's initial terminal PTY in that remote working directory, writes a detached workspace snapshot for the new workspace, and returns the new `workspace_id`, `surface_id`, and `persistent_daemon_slot`. This is intended for remote supervisor scripts that need to spawn task workspaces while the Mac UI is detached.
+
+For detached-capable mutations, `--workspace current` means the caller workspace from `CMUX_WORKSPACE_ID` / `CMUX_REMOTE_DAEMON_SLOT`. An explicit workspace ID is a target context switch: the remote CLI resolves `~/.cmux/daemon/*/workspace-snapshot.meta.json` to find the target slot, tries the target slot's `relay_socket` if Swift is currently attached to that workspace, and falls back to mutating that target snapshot if the relay is unavailable. PTY operations use the target slot's daemon. This is what lets an orchestrator running in one remote workspace create or maintain surfaces in task workspaces while the Mac UI is attached to either workspace, detached from either workspace, or temporarily disconnected.
 
 Terminal creation in detached mode starts a real PTY through the persistent daemon before writing the new terminal surface into the snapshot. Browser creation records the initial URL/title only.
 

@@ -646,6 +646,61 @@ func TestCLIV2FlagMapping(t *testing.T) {
 	}
 }
 
+func TestCLINewWorkspaceAcceptsCWDAndTrailingJSON(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", sockPath, "new-workspace", "--cwd", ".", "--name", "Task Workspace", "--json"})
+		if code != 0 {
+			t.Fatalf("new-workspace should return 0, got %d", code)
+		}
+	})
+	if !strings.Contains(output, `"method":"workspace.create"`) {
+		t.Fatalf("expected JSON relay output, got %q", output)
+	}
+
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "workspace.create" {
+			t.Fatalf("expected workspace.create, got %v", got)
+		}
+		params, _ := req["params"].(map[string]any)
+		if got := params["cwd"]; got != cwd {
+			t.Fatalf("expected resolved cwd %q, got %v", cwd, got)
+		}
+		if got := params["title"]; got != "Task Workspace" {
+			t.Fatalf("expected title, got %v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for new-workspace payload")
+	}
+}
+
+func TestCLINewSurfaceAcceptsTrailingJSON(t *testing.T) {
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", sockPath, "new-surface", "--type", "browser", "--url", "https://example.com", "--json"})
+		if code != 0 {
+			t.Fatalf("new-surface should return 0, got %d", code)
+		}
+	})
+	if !strings.Contains(output, `"method":"surface.create"`) {
+		t.Fatalf("expected JSON relay output, got %q", output)
+	}
+
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "surface.create" {
+			t.Fatalf("expected surface.create, got %v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for new-surface payload")
+	}
+}
+
 func TestCLISendPositionalMapsToTextAndUnescapes(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "cmux-cli-send-*")
 	if err != nil {
@@ -1098,6 +1153,7 @@ func TestFlagToParamKey(t *testing.T) {
 		{"window", "window_id"},
 		{"command", "initial_command"},
 		{"name", "title"},
+		{"cwd", "cwd"},
 		{"working-directory", "working_directory"},
 		{"title", "title"},
 		{"url", "url"},
@@ -1231,6 +1287,83 @@ func TestCLIHeadlessWorkspaceLookupFallback(t *testing.T) {
 	}
 }
 
+func TestCLIHeadlessNewWorkspaceFallbackCreatesDetachedSnapshot(t *testing.T) {
+	root := t.TempDir()
+	cwd := filepath.Join(root, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	missingSocket := filepath.Join(t.TempDir(), "missing.sock")
+
+	oldStartPTY := headlessStartPTYFunc
+	var startedSlot, startedSession, startedAttachment, startedCommand string
+	headlessStartPTYFunc = func(slot, sessionID, attachmentID, command string) error {
+		startedSlot = slot
+		startedSession = sessionID
+		startedAttachment = attachmentID
+		startedCommand = command
+		return nil
+	}
+	t.Cleanup(func() { headlessStartPTYFunc = oldStartPTY })
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", missingSocket, "--json", "new-workspace", "--cwd", cwd, "--name", "Detached Task", "--command", "printf hi"})
+		if code != 0 {
+			t.Fatalf("new-workspace returned %d", code)
+		}
+	})
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	workspaceID := stringFromAny(result["workspace_id"])
+	slot := stringFromAny(result["persistent_daemon_slot"])
+	surfaceID := stringFromAny(result["surface_id"])
+	if workspaceID == "" || slot == "" || surfaceID == "" {
+		t.Fatalf("missing identifiers in result: %#v", result)
+	}
+	if startedSlot != slot {
+		t.Fatalf("started slot = %q, want %q", startedSlot, slot)
+	}
+	if startedSession == "" || startedAttachment != surfaceID {
+		t.Fatalf("started PTY session=%q attachment=%q surface=%q", startedSession, startedAttachment, surfaceID)
+	}
+	if !strings.Contains(startedCommand, "cd -- "+shellSingleQuote(cwd)) {
+		t.Fatalf("started command missing cwd cd: %s", startedCommand)
+	}
+	if !strings.Contains(startedCommand, "printf hi") {
+		t.Fatalf("started command missing initial command: %s", startedCommand)
+	}
+
+	body := readHeadlessCLITestBody(t, root, slot)
+	if got := stringFromAny(body["workspaceId"]); got != workspaceID {
+		t.Fatalf("workspaceId = %q, want %q", got, workspaceID)
+	}
+	if got := stringFromAny(body["title"]); got != "Detached Task" {
+		t.Fatalf("title = %q, want Detached Task", got)
+	}
+	panes := headlessPaneSnapshots(body)
+	if len(panes) != 1 {
+		t.Fatalf("pane snapshots = %d, want 1", len(panes))
+	}
+	terminal, _ := panes[0]["terminal"].(map[string]any)
+	if got := stringFromAny(terminal["cwdHint"]); got != cwd {
+		t.Fatalf("cwdHint = %q, want %q", got, cwd)
+	}
+	metaBytes, err := os.ReadFile(filepath.Join(root, slot, workspaceSnapshotMetaFile))
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var meta workspaceSnapshotMeta
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("decode meta: %v", err)
+	}
+	if meta.Status != "detached" {
+		t.Fatalf("meta status = %q, want detached", meta.Status)
+	}
+}
+
 func TestCLIHeadlessNewPaneBrowserFallbackMutatesSnapshot(t *testing.T) {
 	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
 	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
@@ -1259,6 +1392,115 @@ func TestCLIHeadlessNewPaneBrowserFallbackMutatesSnapshot(t *testing.T) {
 	}
 	if got := len(headlessPaneSnapshots(body)); got != 2 {
 		t.Fatalf("pane snapshots = %d, want 2", got)
+	}
+}
+
+func TestCLIHeadlessExplicitWorkspaceTargetsOtherSnapshot(t *testing.T) {
+	root, callerWorkspaceID, callerSlot := writeHeadlessCLITestSnapshot(t)
+	targetWorkspaceID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	targetSlot := "slot-b"
+	targetSurfaceID := "22222222-2222-4222-8222-222222222222"
+	writeHeadlessCLITestSnapshotAt(t, root, targetWorkspaceID, targetSlot, "Target Workspace", targetSurfaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", callerWorkspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", callerSlot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "metadata", "set", "--workspace", targetWorkspaceID, "craft:task-id", "target-task"})
+		if code != 0 {
+			t.Fatalf("metadata set returned %d", code)
+		}
+	})
+	if !strings.Contains(output, targetWorkspaceID) {
+		t.Fatalf("metadata set output should reference target workspace: %s", output)
+	}
+
+	callerBody := readHeadlessCLITestBody(t, root, callerSlot)
+	callerMetadata := headlessMetadataMap(callerBody)
+	if got := callerMetadata["craft:task-id"]; got != "task-1" {
+		t.Fatalf("caller metadata changed to %q, want original task-1", got)
+	}
+	targetBody := readHeadlessCLITestBody(t, root, targetSlot)
+	targetMetadata := headlessMetadataMap(targetBody)
+	if got := targetMetadata["craft:task-id"]; got != "target-task" {
+		t.Fatalf("target metadata = %q, want target-task", got)
+	}
+}
+
+func TestCLIExplicitWorkspaceUsesTargetRelayBeforeHeadlessFallback(t *testing.T) {
+	root, callerWorkspaceID, callerSlot := writeHeadlessCLITestSnapshot(t)
+	targetWorkspaceID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	targetSlot := "slot-b"
+	targetSurfaceID := "22222222-2222-4222-8222-222222222222"
+	writeHeadlessCLITestSnapshotAt(t, root, targetWorkspaceID, targetSlot, "Target Workspace", targetSurfaceID)
+	targetSocket, requests := startMockV2SocketWithRequestCapture(t)
+	if err := os.WriteFile(filepath.Join(root, targetSlot, "relay_socket"), []byte(targetSocket), 0o600); err != nil {
+		t.Fatalf("write relay socket: %v", err)
+	}
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", callerWorkspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", callerSlot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "new-surface", "--workspace", targetWorkspaceID, "--type", "browser", "--url", "https://example.com"})
+		if code != 0 {
+			t.Fatalf("new-surface returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"method":"surface.create"`) {
+		t.Fatalf("expected target relay JSON output, got %s", output)
+	}
+
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "surface.create" {
+			t.Fatalf("method = %v, want surface.create", got)
+		}
+		params, _ := req["params"].(map[string]any)
+		if got := params["workspace_id"]; got != targetWorkspaceID {
+			t.Fatalf("workspace_id = %v, want %s", got, targetWorkspaceID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for target relay request")
+	}
+
+	callerBody := readHeadlessCLITestBody(t, root, callerSlot)
+	targetBody := readHeadlessCLITestBody(t, root, targetSlot)
+	if got := len(headlessPaneSnapshots(callerBody)); got != 1 {
+		t.Fatalf("caller pane snapshots = %d, want unchanged 1", got)
+	}
+	if got := len(headlessPaneSnapshots(targetBody)); got != 1 {
+		t.Fatalf("target pane snapshots = %d, want unchanged 1 because relay handled it", got)
+	}
+}
+
+func TestCLIHeadlessNewSurfaceExplicitWorkspaceTargetsOtherSnapshot(t *testing.T) {
+	root, callerWorkspaceID, callerSlot := writeHeadlessCLITestSnapshot(t)
+	targetWorkspaceID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	targetSlot := "slot-b"
+	targetSurfaceID := "22222222-2222-4222-8222-222222222222"
+	writeHeadlessCLITestSnapshotAt(t, root, targetWorkspaceID, targetSlot, "Target Workspace", targetSurfaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", callerWorkspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", callerSlot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "new-surface", "--workspace", targetWorkspaceID, "--type", "browser", "--url", "https://example.com"})
+		if code != 0 {
+			t.Fatalf("new-surface returned %d", code)
+		}
+	})
+	if !strings.Contains(output, targetWorkspaceID) {
+		t.Fatalf("new-surface output should reference target workspace: %s", output)
+	}
+
+	callerBody := readHeadlessCLITestBody(t, root, callerSlot)
+	if got := len(headlessPaneSnapshots(callerBody)); got != 1 {
+		t.Fatalf("caller pane snapshots = %d, want unchanged 1", got)
+	}
+	targetBody := readHeadlessCLITestBody(t, root, targetSlot)
+	if got := len(headlessPaneSnapshots(targetBody)); got != 2 {
+		t.Fatalf("target pane snapshots = %d, want 2", got)
 	}
 }
 
@@ -1381,6 +1623,12 @@ func writeHeadlessCLITestSnapshot(t *testing.T) (root string, workspaceID string
 	root = t.TempDir()
 	workspaceID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	slot = "slot-a"
+	writeHeadlessCLITestSnapshotAt(t, root, workspaceID, slot, "Detached Test", "11111111-1111-4111-8111-111111111111")
+	return root, workspaceID, slot
+}
+
+func writeHeadlessCLITestSnapshotAt(t *testing.T, root string, workspaceID string, slot string, title string, surfaceID string) {
+	t.Helper()
 	slotDir := filepath.Join(root, slot)
 	if err := os.MkdirAll(slotDir, 0o700); err != nil {
 		t.Fatalf("mkdir slot: %v", err)
@@ -1388,25 +1636,25 @@ func writeHeadlessCLITestSnapshot(t *testing.T) (root string, workspaceID string
 	body := map[string]any{
 		"version":       1,
 		"workspaceId":   workspaceID,
-		"title":         "Detached Test",
+		"title":         title,
 		"detachedAt":    "2026-05-28T00:00:00Z",
 		"displayTarget": "test:" + slot,
 		"splitTree": map[string]any{
 			"type": "pane",
 			"pane": map[string]any{
-				"panelIds":        []string{"11111111-1111-4111-8111-111111111111"},
-				"selectedPanelId": "11111111-1111-4111-8111-111111111111",
+				"panelIds":        []string{surfaceID},
+				"selectedPanelId": surfaceID,
 			},
 		},
 		"panes": []map[string]any{{
 			"type": "terminal",
 			"terminal": map[string]any{
-				"paneId":             "11111111-1111-4111-8111-111111111111",
+				"paneId":             surfaceID,
 				"remotePTYSessionId": "sess-existing",
 				"title":              "Terminal",
 			},
 		}},
-		"activePaneId": "11111111-1111-4111-8111-111111111111",
+		"activePaneId": surfaceID,
 		"metadataEntries": map[string]string{
 			"craft:task-id": "task-1",
 		},
@@ -1419,7 +1667,7 @@ func writeHeadlessCLITestSnapshot(t *testing.T) (root string, workspaceID string
 	meta := workspaceSnapshotMeta{
 		Version:        1,
 		WorkspaceID:    workspaceID,
-		Title:          "Detached Test",
+		Title:          title,
 		Status:         "detached",
 		DetachedAt:     "2026-05-28T00:00:00Z",
 		SchemaVersion:  1,
@@ -1436,7 +1684,6 @@ func writeHeadlessCLITestSnapshot(t *testing.T) (root string, workspaceID string
 	if err := os.WriteFile(filepath.Join(slotDir, workspaceSnapshotMetaFile), metaBytes, 0o600); err != nil {
 		t.Fatalf("write meta: %v", err)
 	}
-	return root, workspaceID, slot
 }
 
 func readHeadlessCLITestBody(t *testing.T, root string, slot string) map[string]any {

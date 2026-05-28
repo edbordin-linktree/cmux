@@ -7339,7 +7339,8 @@ final class WorkspaceRemoteSessionController {
             daemonRemotePath: remotePath,
             relayPort: relayPort,
             relayID: relayID,
-            relayToken: relayToken
+            relayToken: relayToken,
+            persistentDaemonSlot: configuration.persistentDaemonSlot
         )
         let command = "sh -c \(Self.shellSingleQuoted(script))"
         let result = try sshExec(arguments: sshCommonArguments(batchMode: true) + [configuration.destination, command], timeout: 8)
@@ -7359,7 +7360,10 @@ final class WorkspaceRemoteSessionController {
             debugLog("remote.relay.cleanup.skipped reason=vm-baked relayPort=\(relayPort)")
             return
         }
-        let script = Self.remoteRelayMetadataCleanupScript(relayPort: relayPort)
+        let script = Self.remoteRelayMetadataCleanupScript(
+            relayPort: relayPort,
+            persistentDaemonSlot: configuration.persistentDaemonSlot
+        )
         let command = "sh -c \(Self.shellSingleQuoted(script))"
         do {
             _ = try sshExec(arguments: sshCommonArguments(batchMode: true) + [configuration.destination, command], timeout: 8)
@@ -7368,13 +7372,27 @@ final class WorkspaceRemoteSessionController {
         }
     }
 
-    static func remoteRelayMetadataCleanupScript(relayPort: Int) -> String {
-        """
+    static func remoteRelayMetadataCleanupScript(relayPort: Int, persistentDaemonSlot: String? = nil) -> String {
+        let slot = persistentDaemonSlot?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let slotCleanup: String
+        if slot.isEmpty {
+            slotCleanup = ""
+        } else {
+            let slotLiteral = Self.shellSingleQuoted(slot)
+            slotCleanup = """
+            slot_relay_socket="$HOME/.cmux/daemon"/\(slotLiteral)/relay_socket
+            if [ -r "$slot_relay_socket" ] && [ "$(tr -d '\\r\\n' < "$slot_relay_socket")" = "$relay_socket" ]; then
+              rm -f "$slot_relay_socket"
+            fi
+            """
+        }
+        return """
         relay_socket='127.0.0.1:\(relayPort)'
         socket_addr_file="$HOME/.cmux/socket_addr"
         if [ -r "$socket_addr_file" ] && [ "$(tr -d '\\r\\n' < "$socket_addr_file")" = "$relay_socket" ]; then
           rm -f "$socket_addr_file"
         fi
+        \(slotCleanup)
         rm -f "$HOME/.cmux/relay/\(relayPort).auth" "$HOME/.cmux/relay/\(relayPort).daemon_path" "$HOME/.cmux/relay/\(relayPort).tty"
         """
     }
@@ -7956,10 +7974,24 @@ final class WorkspaceRemoteSessionController {
         daemonRemotePath: String,
         relayPort: Int,
         relayID: String,
-        relayToken: String
+        relayToken: String,
+        persistentDaemonSlot: String? = nil
     ) -> String {
         let trimmedRemotePath = daemonRemotePath.trimmingCharacters(in: .whitespacesAndNewlines)
         let daemonPathExpression = remoteDaemonPathShellExpression(trimmedRemotePath)
+        let slot = persistentDaemonSlot?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let slotInstall: String
+        if slot.isEmpty {
+            slotInstall = ""
+        } else {
+            let slotLiteral = Self.shellSingleQuoted(slot)
+            slotInstall = """
+            slot_dir="$HOME/.cmux/daemon"/\(slotLiteral)
+            mkdir -p "$slot_dir"
+            chmod 700 "$slot_dir"
+            printf '%s' '127.0.0.1:\(relayPort)' > "$slot_dir/relay_socket"
+            """
+        }
         let authPayload = """
         {"relay_id":"\(relayID)","relay_token":"\(relayToken)"}
         """
@@ -7974,6 +8006,7 @@ final class WorkspaceRemoteSessionController {
         CMUXRELAYAUTH
         chmod 600 "$HOME/.cmux/relay/\(relayPort).auth"
         printf '%s' '127.0.0.1:\(relayPort)' > "$HOME/.cmux/socket_addr"
+        \(slotInstall)
         """
     }
 

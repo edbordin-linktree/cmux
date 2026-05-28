@@ -73,7 +73,7 @@ var commands = []commandSpec{
 	{name: "capabilities", proto: protoV2, v2Method: "system.capabilities", noParams: true},
 	{name: "tree", proto: protoV2, v2Method: "system.tree", flagKeys: []string{"workspace"}},
 	{name: "list-workspaces", proto: protoV2, v2Method: "workspace.list", noParams: true},
-	{name: "new-workspace", proto: protoV2, v2Method: "workspace.create", flagKeys: []string{"command", "working-directory", "name"}},
+	{name: "new-workspace", proto: protoV2, v2Method: "workspace.create", flagKeys: []string{"command", "cwd", "working-directory", "name", "description", "focus"}},
 	{name: "close-workspace", proto: protoV2, v2Method: "workspace.close", flagKeys: []string{"workspace"}},
 	{name: "select-workspace", proto: protoV2, v2Method: "workspace.select", flagKeys: []string{"workspace"}},
 	{name: "current-workspace", proto: protoV2, v2Method: "workspace.current", noParams: true},
@@ -86,9 +86,9 @@ var commands = []commandSpec{
 	{name: "new-pane", proto: protoV2, v2Method: "pane.create", flagKeys: []string{"workspace", "surface", "direction", "type", "url", "command", "focus"}, defaultParams: map[string]any{"direction": "right"}},
 	{name: "new-surface", proto: protoV2, v2Method: "surface.create", flagKeys: []string{"workspace", "pane", "type", "url", "command", "focus"}},
 	{name: "new-split", proto: protoV2, v2Method: "surface.split", flagKeys: []string{"workspace", "surface", "direction", "type", "url", "command", "focus"}},
-	{name: "close-surface", proto: protoV2, v2Method: "surface.close", flagKeys: []string{"surface"}},
-	{name: "send", proto: protoV2, v2Method: "surface.send_text", flagKeys: []string{"surface", "text"}},
-	{name: "send-key", proto: protoV2, v2Method: "surface.send_key", flagKeys: []string{"surface", "key"}},
+	{name: "close-surface", proto: protoV2, v2Method: "surface.close", flagKeys: []string{"workspace", "surface"}},
+	{name: "send", proto: protoV2, v2Method: "surface.send_text", flagKeys: []string{"workspace", "surface", "text"}},
+	{name: "send-key", proto: protoV2, v2Method: "surface.send_key", flagKeys: []string{"workspace", "surface", "key"}},
 	{name: "rename-tab", proto: protoV2, v2Method: "tab.action", flagKeys: []string{"workspace", "surface", "tab", "title"}, paramKeyOverrides: map[string]string{"tab": "surface_id"}, defaultParams: map[string]any{"action": "rename"}},
 	{name: "notify", proto: protoV2, v2Method: "notification.create", flagKeys: []string{"title", "body", "workspace"}},
 	{name: "refresh-surfaces", proto: protoV2, v2Method: "surface.refresh", noParams: true},
@@ -284,12 +284,18 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 			fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
 			return 2
 		}
+		if _, ok := parsed.flags["json"]; ok {
+			jsonOutput = true
+		}
 		// Map flag keys to JSON param keys (e.g. "workspace" → "workspace_id" where appropriate)
 		for _, key := range spec.flagKeys {
 			if val, ok := parsed.flags[key]; ok {
 				paramKey := flagToParamKey(key)
 				if override, ok := spec.paramKeyOverrides[key]; ok {
 					paramKey = override
+				}
+				if key == "cwd" || key == "working-directory" {
+					val = resolveCLIPath(val)
 				}
 				params[paramKey] = val
 			}
@@ -320,6 +326,10 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 
 		applyWorkspaceEnvFallback(params)
 		applySurfaceEnvFallback(params)
+
+		if workspaceArg := parsed.flags["workspace"]; workspaceArg != "" {
+			socketPath = socketPathForExplicitWorkspaceArg(workspaceArg, socketPath)
+		}
 	}
 
 	resp, err := socketRoundTripV2(socketPath, spec.v2Method, params, refreshAddr)
@@ -361,6 +371,10 @@ func runStatusRelay(socketPath string, cmdName string, args []string, jsonOutput
 		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
 		return 2
 	}
+	if targetSocketPath := stringFromAny(params["_target_socket_path"]); targetSocketPath != "" {
+		socketPath = targetSocketPath
+		delete(params, "_target_socket_path")
+	}
 	resp, err := socketRoundTrip(socketPath, socketCommand, refreshAddr)
 	if err != nil {
 		if code, handled := runHeadlessCLICommand(cmdName, method, params, jsonOutput, err); handled {
@@ -398,6 +412,9 @@ func parseSetStatusCommand(args []string) (string, map[string]any, error) {
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
 		parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
+		if targetSocketPath := socketPathForExplicitWorkspaceArg(workspace, ""); targetSocketPath != "" {
+			params["_target_socket_path"] = targetSocketPath
+		}
 	} else {
 		applyWorkspaceEnvFallback(params)
 		if workspace := stringFromAny(params["workspace_id"]); workspace != "" {
@@ -420,6 +437,9 @@ func parseClearStatusCommand(args []string) (string, map[string]any, error) {
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
 		parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
+		if targetSocketPath := socketPathForExplicitWorkspaceArg(workspace, ""); targetSocketPath != "" {
+			params["_target_socket_path"] = targetSocketPath
+		}
 	} else {
 		applyWorkspaceEnvFallback(params)
 		if workspace := stringFromAny(params["workspace_id"]); workspace != "" {
@@ -442,6 +462,9 @@ func parseListStatusCommand(args []string) (string, map[string]any, error) {
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
 		parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
+		if targetSocketPath := socketPathForExplicitWorkspaceArg(workspace, ""); targetSocketPath != "" {
+			params["_target_socket_path"] = targetSocketPath
+		}
 	} else {
 		applyWorkspaceEnvFallback(params)
 		if workspace := stringFromAny(params["workspace_id"]); workspace != "" {
@@ -476,6 +499,7 @@ func runTreeRelay(socketPath string, args []string, jsonOutput bool, refreshAddr
 	params := map[string]any{}
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
+		socketPath = socketPathForExplicitWorkspaceArg(workspace, socketPath)
 	}
 	applyWorkspaceEnvFallback(params)
 	resp, err := socketRoundTripV2(socketPath, "system.tree", params, refreshAddr)
@@ -510,6 +534,7 @@ func runMetadataRelay(socketPath string, args []string, jsonOutput bool, refresh
 	params := map[string]any{}
 	if workspace, ok := parsed.flags["workspace"]; ok {
 		params["workspace_id"] = workspace
+		socketPath = socketPathForExplicitWorkspaceArg(workspace, socketPath)
 	}
 	applyWorkspaceEnvFallback(params)
 
@@ -686,6 +711,9 @@ func runBrowserRelay(socketPath string, args []string, jsonOutput bool, refreshA
 		fmt.Fprintf(os.Stderr, "cmux browser: %v\n", err)
 		return 2
 	}
+	if _, ok := parsed.flags["json"]; ok {
+		jsonOutput = true
+	}
 	for _, key := range spec.flagKeys {
 		if val, ok := parsed.flags[key]; ok {
 			paramKey := flagToParamKey(key)
@@ -725,6 +753,9 @@ func runBrowserRelay(socketPath string, args []string, jsonOutput bool, refreshA
 	}
 	if spec.useSurfaceEnv {
 		applySurfaceEnvFallback(params)
+	}
+	if workspaceArg := parsed.flags["workspace"]; workspaceArg != "" {
+		socketPath = socketPathForExplicitWorkspaceArg(workspaceArg, socketPath)
 	}
 
 	resp, err := socketRoundTripV2(socketPath, spec.method, params, refreshAddr)
@@ -794,6 +825,26 @@ func applyWorkspaceEnvFallback(params map[string]any) {
 	if envWs := os.Getenv("CMUX_WORKSPACE_ID"); envWs != "" {
 		params["workspace_id"] = envWs
 	}
+}
+
+func socketPathForExplicitWorkspaceArg(workspaceArg string, fallback string) string {
+	workspaceID := headlessNormalizeID(workspaceArg)
+	if workspaceID == "" || workspaceID == "current" {
+		return fallback
+	}
+	rootBase, err := headlessDaemonRoot()
+	if err != nil {
+		return fallback
+	}
+	slot, err := findHeadlessSlotForWorkspace(rootBase, workspaceID)
+	if err != nil {
+		return fallback
+	}
+	socketPath := headlessRelaySocketForSlot(slot)
+	if socketPath == "" {
+		return fallback
+	}
+	return socketPath
 }
 
 func applySurfaceEnvFallback(params map[string]any) {
@@ -904,6 +955,8 @@ func flagToParamKey(key string) string {
 		return "initial_command"
 	case "name":
 		return "title"
+	case "cwd":
+		return "cwd"
 	case "working-directory":
 		return "working_directory"
 	case "max-depth":
@@ -944,6 +997,10 @@ func parseFlags(args []string, keys []string) (parsedFlags, error) {
 			continue
 		}
 		key := strings.TrimPrefix(args[i], "--")
+		if key == "json" {
+			result.flags[key] = "true"
+			continue
+		}
 		if !allowed[key] {
 			return parsedFlags{}, fmt.Errorf("unknown flag --%s", key)
 		}
@@ -954,6 +1011,32 @@ func parseFlags(args []string, keys []string) (parsedFlags, error) {
 		i++
 	}
 	return result, nil
+}
+
+func resolveCLIPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return trimmed
+	}
+	if strings.HasPrefix(trimmed, "~") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if trimmed == "~" {
+				trimmed = home
+			} else if strings.HasPrefix(trimmed, "~/") {
+				trimmed = filepath.Join(home, strings.TrimPrefix(trimmed, "~/"))
+			}
+		}
+	}
+	if filepath.IsAbs(trimmed) {
+		if clean, err := filepath.Abs(trimmed); err == nil {
+			return clean
+		}
+		return filepath.Clean(trimmed)
+	}
+	if abs, err := filepath.Abs(trimmed); err == nil {
+		return abs
+	}
+	return filepath.Clean(trimmed)
 }
 
 // readSocketAddrFile reads the socket address from ~/.cmux/socket_addr as a fallback

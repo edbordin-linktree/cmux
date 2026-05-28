@@ -26,10 +26,12 @@ type headlessSnapshot struct {
 	meta     workspaceSnapshotMeta
 }
 
+var headlessStartPTYFunc = headlessStartPTY
+
 func runHeadlessCLICommand(commandName, method string, params map[string]any, jsonOutput bool, relayErr error) (int, bool) {
 	switch method {
 	case "metadata.set", "metadata.get", "metadata.list", "metadata.clear",
-		"workspace.lookup", "system.tree",
+		"workspace.lookup", "workspace.create", "system.tree",
 		"surface.create", "pane.create", "surface.split", "surface.close",
 		"surface.send_text", "surface.send_key",
 		"workspace.rename", "tab.action",
@@ -69,6 +71,8 @@ func runHeadlessCLIResult(method string, params map[string]any) (map[string]any,
 		return headlessMetadataClear(params)
 	case "workspace.lookup":
 		return headlessWorkspaceLookup(params)
+	case "workspace.create":
+		return headlessCreateWorkspace(params)
 	case "system.tree":
 		snap, err := loadHeadlessSnapshot(params)
 		if err != nil {
@@ -100,21 +104,113 @@ func runHeadlessCLIResult(method string, params map[string]any) (map[string]any,
 	}
 }
 
+func headlessCreateWorkspace(params map[string]any) (map[string]any, error) {
+	workspaceID := strings.ToLower(newHeadlessUUID())
+	surfaceID := strings.ToLower(newHeadlessUUID())
+	slot := "ssh-" + workspaceID
+	paths, err := persistentDaemonPathsForSlot(slot)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensurePersistentDaemonDirectory(paths); err != nil {
+		return nil, err
+	}
+
+	cwd := headlessWorkspaceCreateCWD(params)
+	title := strings.TrimSpace(stringFromAny(params["title"]))
+	if title == "" {
+		title = headlessWorkspaceDefaultTitle(cwd)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	sessionID := "ssh-" + workspaceID + "-" + surfaceID
+	command := headlessPTYCommand(
+		slot,
+		workspaceID,
+		surfaceID,
+		stringFromAny(params["initial_command"]),
+		cwd,
+	)
+	if err := headlessStartPTYFunc(slot, sessionID, surfaceID, command); err != nil {
+		return nil, err
+	}
+
+	body := map[string]any{
+		"version":       1,
+		"workspaceId":   workspaceID,
+		"title":         title,
+		"detachedAt":    now,
+		"displayTarget": headlessDisplayTarget(slot),
+		"splitTree": map[string]any{
+			"type": "pane",
+			"pane": map[string]any{
+				"panelIds":        []string{surfaceID},
+				"selectedPanelId": surfaceID,
+			},
+		},
+		"panes": []map[string]any{{
+			"type": "terminal",
+			"terminal": map[string]any{
+				"paneId":             surfaceID,
+				"remotePTYSessionId": sessionID,
+				"title":              "Terminal",
+				"cwdHint":            cwd,
+			},
+		}},
+		"activePaneId": surfaceID,
+	}
+	description := strings.TrimSpace(stringFromAny(params["description"]))
+	if description != "" {
+		body["metadataEntries"] = map[string]string{"cmux:description": description}
+	}
+	snap := &headlessSnapshot{
+		slot:     slot,
+		root:     paths.root,
+		bodyPath: filepath.Join(paths.root, workspaceSnapshotBodyFile),
+		metaPath: filepath.Join(paths.root, workspaceSnapshotMetaFile),
+		body:     body,
+		meta: workspaceSnapshotMeta{
+			Version:       1,
+			WorkspaceID:   workspaceID,
+			Title:         title,
+			Status:        "detached",
+			DetachedAt:    now,
+			UpdatedAt:     now,
+			SchemaVersion: 1,
+		},
+	}
+	sha, err := storeHeadlessSnapshot(snap)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"workspace_id":           workspaceID,
+		"workspace_ref":          "workspace:" + workspaceID,
+		"surface_id":             surfaceID,
+		"surface_ref":            "surface:" + surfaceID,
+		"persistent_daemon_slot": slot,
+		"detached":               true,
+		"snapshot_sha256":        sha,
+	}, nil
+}
+
 func loadHeadlessSnapshot(params map[string]any) (*headlessSnapshot, error) {
 	workspaceID := headlessWorkspaceID(params)
-	slot := firstNonEmptyEnv("CMUX_REMOTE_DAEMON_SLOT", "CMUX_PERSISTENT_DAEMON_SLOT", "CMUX_DAEMON_SLOT")
+	envSlot := firstNonEmptyEnv("CMUX_REMOTE_DAEMON_SLOT", "CMUX_PERSISTENT_DAEMON_SLOT", "CMUX_DAEMON_SLOT")
 	rootBase, err := headlessDaemonRoot()
 	if err != nil {
 		return nil, err
 	}
+	slot := envSlot
+	if workspaceID != "" {
+		resolvedSlot, resolveErr := findHeadlessSlotForWorkspace(rootBase, workspaceID)
+		if resolveErr == nil {
+			slot = resolvedSlot
+		} else if envSlot == "" {
+			return nil, resolveErr
+		}
+	}
 	if slot == "" {
-		if workspaceID == "" {
-			return nil, errors.New("CMUX_REMOTE_DAEMON_SLOT or CMUX_WORKSPACE_ID is required")
-		}
-		slot, err = findHeadlessSlotForWorkspace(rootBase, workspaceID)
-		if err != nil {
-			return nil, err
-		}
+		return nil, errors.New("CMUX_REMOTE_DAEMON_SLOT or CMUX_WORKSPACE_ID is required")
 	}
 	paths, err := persistentDaemonPathsForSlot(slot)
 	if err != nil {
@@ -381,8 +477,9 @@ func headlessCreateSurface(params map[string]any, splitPane bool) (map[string]an
 			workspaceID,
 			surfaceID,
 			stringFromAny(params["initial_command"]),
+			headlessWorkspaceCreateCWD(params),
 		)
-		if err := headlessStartPTY(snap.slot, sessionID, surfaceID, command); err != nil {
+		if err := headlessStartPTYFunc(snap.slot, sessionID, surfaceID, command); err != nil {
 			return nil, err
 		}
 		paneSnapshot = map[string]any{
@@ -391,6 +488,7 @@ func headlessCreateSurface(params map[string]any, splitPane bool) (map[string]an
 				"paneId":             surfaceID,
 				"remotePTYSessionId": sessionID,
 				"title":              "Terminal",
+				"cwdHint":            headlessWorkspaceCreateCWD(params),
 			},
 		}
 	}
@@ -880,7 +978,21 @@ func headlessSurfaceNode(surfaceID string, snapshot map[string]any, paneID strin
 }
 
 func headlessStartPTY(slot, sessionID, attachmentID, command string) error {
-	_, err := headlessPersistentDaemonRPC(slot, "pty.attach", map[string]any{
+	paths, err := persistentDaemonPathsForSlot(slot)
+	if err != nil {
+		return err
+	}
+	if err := ensurePersistentDaemonDirectory(paths); err != nil {
+		return err
+	}
+	token, err := persistentDaemonToken(paths)
+	if err != nil {
+		return err
+	}
+	if err := ensurePersistentDaemonRunning(paths, token, os.Stderr); err != nil {
+		return err
+	}
+	_, err = headlessPersistentDaemonRPC(slot, "pty.attach", map[string]any{
 		"session_id":              sessionID,
 		"attachment_id":           attachmentID,
 		"client_attachment_token": newHeadlessUUID(),
@@ -934,7 +1046,7 @@ func headlessShouldFocus(params map[string]any) bool {
 	}
 }
 
-func headlessPTYCommand(slot, workspaceID, surfaceID, command string) string {
+func headlessPTYCommand(slot, workspaceID, surfaceID, command string, cwd string) string {
 	exports := []string{
 		"export CMUX_WORKSPACE_ID=" + shellSingleQuote(workspaceID),
 		"export CMUX_TAB_ID=" + shellSingleQuote(workspaceID),
@@ -944,14 +1056,60 @@ func headlessPTYCommand(slot, workspaceID, surfaceID, command string) string {
 		`export PATH="$HOME/.cmux/bin:$PATH"`,
 		`export CMUX_BUNDLED_CLI_PATH="$HOME/.cmux/bin/cmux"`,
 	}
-	if socketPath := strings.TrimSpace(os.Getenv("CMUX_SOCKET_PATH")); socketPath != "" {
+	if socketPath := headlessRelaySocketForSlot(slot); socketPath != "" {
 		exports = append(exports, "export CMUX_SOCKET_PATH="+shellSingleQuote(socketPath))
 	}
-	prefix := strings.Join(exports, "; ")
+	statements := append([]string{}, exports...)
+	cwd = strings.TrimSpace(cwd)
+	if cwd != "" {
+		statements = append(statements, "cd -- "+shellSingleQuote(cwd))
+	}
+	prefix := strings.Join(statements, "; ")
 	if strings.TrimSpace(command) == "" {
 		return prefix + `; exec "${SHELL:-/bin/sh}" -l`
 	}
 	return prefix + "; exec /bin/sh -lc " + shellSingleQuote(command)
+}
+
+func headlessWorkspaceCreateCWD(params map[string]any) string {
+	for _, key := range []string{"working_directory", "cwd"} {
+		if value := strings.TrimSpace(stringFromAny(params[key])); value != "" {
+			return resolveCLIPath(value)
+		}
+	}
+	return ""
+}
+
+func headlessRelaySocketForSlot(slot string) string {
+	paths, err := persistentDaemonPathsForSlot(slot)
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(paths.root, "relay_socket"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func headlessWorkspaceDefaultTitle(cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return "Remote Workspace"
+	}
+	base := filepath.Base(cwd)
+	if base == "." || base == "/" || strings.TrimSpace(base) == "" {
+		return cwd
+	}
+	return base
+}
+
+func headlessDisplayTarget(slot string) string {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		host = "remote"
+	}
+	return host + ":" + slot
 }
 
 func shellSingleQuote(value string) string {
