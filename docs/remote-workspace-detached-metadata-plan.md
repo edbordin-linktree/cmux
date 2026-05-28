@@ -11,6 +11,93 @@ This branch combines two layers:
 - an unmerged upstream remote-session base from `manaflow-ai/cmux#4807` that runs a persistent `cmuxd-remote` daemon on the SSH host;
 - local additions on this branch that snapshot and restore workspace layout around that daemon.
 
+## Build And Run This Fork
+
+Use a tagged debug build so the fork can run beside the installed release build of cmux:
+
+```bash
+git clone https://github.com/edbordin-linktree/cmux.git
+cd cmux
+git checkout local/remote-workspace-snapshots
+./scripts/setup.sh
+CMUX_SKIP_ZIG_BUILD=1 ./scripts/reload.sh --tag rwsnap --launch
+```
+
+`CMUX_SKIP_ZIG_BUILD=1` is useful on machines where Homebrew has Zig `0.16.x` instead of the Ghostty helper's expected Zig `0.15.x`. Omit it if the local Zig toolchain is already compatible and you want the helper built normally.
+
+The tag is the isolation boundary. With `--tag rwsnap`, `reload.sh` creates:
+
+- app name `cmux DEV rwsnap.app`;
+- bundle id `com.cmuxterm.app.debug.rwsnap`;
+- Swift app socket `/tmp/cmux-debug-rwsnap.sock`;
+- local cmuxd socket `~/Library/Application Support/cmux/cmuxd-dev-rwsnap.sock`;
+- debug log `/tmp/cmux-debug-rwsnap.log`;
+- separate DerivedData under `~/Library/Developer/Xcode/DerivedData/cmux-rwsnap`.
+
+Use the tag-bound CLI helper for commands against this fork:
+
+```bash
+CMUX_TAG=rwsnap scripts/cmux-debug-cli.sh list-workspaces
+CMUX_TAG=rwsnap scripts/cmux-debug-cli.sh ssh-workspace-list-detached --json
+```
+
+Avoid `/tmp/cmux-cli` for dogfooding this branch because it points at the most recently reloaded dev build, not necessarily this tagged fork.
+
+### Running Alongside Release cmux On The Mac
+
+The release app and this fork can be open at the same time:
+
+- Keep `/Applications/cmux.app` running as usual.
+- Launch the fork with `CMUX_SKIP_ZIG_BUILD=1 ./scripts/reload.sh --tag rwsnap --launch`.
+- Use `CMUX_TAG=rwsnap scripts/cmux-debug-cli.sh ...` for fork CLI commands.
+- Use the normal release-installed `cmux` command for release CLI commands.
+- To stop only the fork, quit `cmux DEV rwsnap`.
+- To replace the fork build, rerun `reload.sh` with the same tag; it only kills and replaces the matching tagged app.
+
+Do not use an untagged debug app for this workflow. Untagged debug builds share default debug identity and socket paths, which makes it easy to target the wrong cmux instance.
+
+### Remote Host Coexistence With Release Daemons
+
+The fork does not need to replace the release remote daemon globally.
+
+cmux uploads remote daemon binaries under versioned paths:
+
+```text
+~/.cmux/bin/cmuxd-remote/<version>/<goos>-<goarch>/cmuxd-remote
+```
+
+The shared remote wrapper is:
+
+```text
+~/.cmux/bin/cmux
+```
+
+That wrapper is intentionally a dispatcher. For commands running inside an attached remote cmux session, it reads `CMUX_SOCKET_PATH`, derives the relay port, then reads:
+
+```text
+~/.cmux/relay/<relay_port>.daemon_path
+```
+
+and executes the daemon binary recorded for that relay/session. This lets release cmux and this fork coexist on the same remote host, even if their `cmuxd-remote` versions differ.
+
+Outside an attached session, the wrapper falls back to:
+
+```text
+~/.cmux/bin/cmuxd-remote-current
+```
+
+That symlink points at the daemon binary from the most recent cmux bootstrap on the host, so do not rely on the fallback when testing mixed versions. Prefer commands from inside the intended remote cmux session, or use the Mac-side tagged CLI and Host Manager.
+
+When a detached workspace is created, the Mac host registry records the daemon path for that workspace. `ssh-workspace-list-detached`, Host Manager, and attach use that captured daemon path, so fork-created detached snapshots continue to use the fork daemon binary.
+
+Keep these rules when running release and fork together:
+
+- Let cmux bootstrap manage `~/.cmux/bin/cmux` and `~/.cmux/bin/cmuxd-remote-current`; do not manually replace them.
+- Do not delete versioned daemon binaries while workspaces from that version may be live or detached.
+- Release and fork can both have live persistent daemon slots under `~/.cmux/daemon/<slot>/`; a slot is one remote workspace container, not one PTY.
+- If the remote wrapper appears to target the wrong daemon, reconnect with the desired Mac app so bootstrap rewrites the relay metadata and wrapper mapping.
+- Clean up test snapshots with `cmux ssh-workspace-snapshot-clear` and stale registry entries with `cmux ssh-host-forget`; avoid blanket-deleting `~/.cmux/daemon` if release workspaces may still be active.
+
 ## General Model
 
 The remote host does not run the full cmux workspace UI. The Swift app on the Mac still owns the real workspace model while attached: sidebar entries, split layout, tabs, browser surfaces, focus, and most workspace commands are Swift/UI state.
