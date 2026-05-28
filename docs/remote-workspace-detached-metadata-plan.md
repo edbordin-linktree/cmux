@@ -1,20 +1,41 @@
-# Remote Workspace Metadata + Detached Mutation Plan
+# cmux Remote Workspace Capabilities for Craft
 
-This document records the current local-fork design for Craft-oriented remote workspace control. It supersedes the earlier idea of a separate journal, a materialized index, leases, or cmux-owned semantic surface keys.
+Source branch:
 
-The important split is:
+```text
+https://github.com/edbordin-linktree/cmux/tree/local/remote-workspace-snapshots
+```
 
-- Local Mac `cmux` lists and attaches detached workspaces through the host registry.
-- Remote-host `cmux` commands, as injected into SSH terminals by `cmuxd-remote`, first use the existing authenticated relay back to the Swift UI.
-- If that relay is unavailable, the remote-host `cmux` falls back to a restricted local snapshot backend in `cmuxd-remote` and mutates `~/.cmux/daemon/<slot>/workspace-snapshot.json` directly.
+This branch adds detached remote workspace snapshots, hidden workspace metadata, a Host Manager UI, and a restricted remote-headless command path for scripts running on an SSH host.
 
-The remote snapshot is the source of truth whenever the Swift UI reconnects. A detached or temporarily disconnected workspace can therefore keep accepting a small set of supervisor/script operations on the remote host.
+The core behavior Craft should rely on is:
 
-## Cmux Refactor
+- A remote workspace can be detached from the Mac UI while its layout snapshot and PTYs remain on the remote host.
+- The Mac can list detached workspaces and attach them later.
+- A `cmux` command running inside a remote cmux terminal first tries the normal relay back to the Swift UI.
+- If the relay is unavailable, that remote `cmux` command can operate on the local remote snapshot for a restricted set of commands.
+- On reconnect/attach, the remote snapshot wins and Swift rebuilds local layout from it.
 
-### Implemented Capabilities
+## Current cmux Capabilities
 
-The current branch adds these workspace-level primitives:
+### Local Mac Commands
+
+These commands are intended for the Mac-side cmux app/CLI:
+
+```bash
+cmux ssh-workspace-detach --workspace <workspace> [--json]
+cmux ssh-workspace-list-detached [--host <host>] [--json] [--timeout <secs>]
+cmux ssh-workspace-attach --workspace-id <uuid> [--host <host>] [--slot <slot>] [--json]
+cmux ssh-workspace-snapshot-clear (--workspace-id <uuid> | --host <host> --slot <slot>) [--force]
+cmux ssh-host-list [--json]
+cmux ssh-host-forget --host <host> [--force]
+```
+
+`ssh-workspace-list-detached` only shows snapshots whose remote metadata status is `detached`. Attached/reconnected workspaces keep a `live` checkpoint snapshot on the remote host, but those are intentionally hidden from detached listings.
+
+### Workspace Metadata
+
+Hidden metadata is stored with the workspace and is included in remote snapshots. It is not rendered in the sidebar.
 
 ```bash
 cmux metadata set --workspace <workspace> <key> <value>
@@ -22,35 +43,32 @@ cmux metadata set --workspace <workspace> <key> --value-json <json>
 cmux metadata get --workspace <workspace> <key> --json
 cmux metadata list --workspace <workspace> [--prefix <prefix>] --json
 cmux metadata clear --workspace <workspace> <key>
+```
 
+Metadata is persisted in:
+
+- local session persistence;
+- `RemoteWorkspaceSnapshotV1.metadataEntries`;
+- remote snapshot store/fetch round trips;
+- detached remote snapshot mutations.
+
+### Metadata Lookup
+
+Workspace lookup can use hidden metadata instead of title prefixes:
+
+```bash
 cmux workspace lookup \
   --metadata craft:project-id=<id> \
   --metadata craft:task-id=<id> \
-  [--include-detached] \
+  --include-detached \
   --json
-
-cmux tree --workspace <workspace> --json
 ```
 
-Hidden metadata is persisted in local session state and in `RemoteWorkspaceSnapshotV1` as `metadataEntries`. It is not rendered in the sidebar. `workspace lookup` searches attached workspaces first; `--include-detached` also searches remote snapshots discovered through the detached host registry.
+Attached workspaces are searched first. With `--include-detached`, cmux also searches detached remote snapshots discovered from the host registry.
 
-Remote detached fallback currently supports this restricted subset:
+### Remote-Headless Commands
 
-```bash
-cmux metadata set|get|list|clear --workspace current ...
-cmux workspace lookup --metadata <key=value> [--include-detached] --json
-cmux tree --workspace current --json
-cmux new-pane --workspace current --type terminal|browser [--direction <dir>] [--url <url>] [--command <cmd>] [--focus true|false]
-cmux new-surface --workspace current --type terminal|browser [--pane <pane>] [--url <url>] [--command <cmd>] [--focus true|false]
-cmux new-split <dir> --workspace current [--surface <surface>] [--type terminal|browser] [--url <url>] [--command <cmd>] [--focus true|false]
-cmux close-surface --workspace current --surface <surface>
-```
-
-The remote fallback is intentionally small. UI-only commands still require an attached Swift UI and should fail clearly when only the detached snapshot backend is available. In particular, detached fallback does not currently support focus/window movement, `rename-tab`, `send`, `send-key`, or browser automation/navigation commands.
-
-### Remote Execution Model
-
-Remote terminal sessions get enough environment to operate without the Mac relay:
+Inside a remote cmux terminal, the injected `cmux` wrapper has:
 
 ```text
 CMUX_WORKSPACE_ID
@@ -62,79 +80,89 @@ CMUX_SOCKET_PATH
 PATH=$HOME/.cmux/bin:$PATH
 ```
 
-When the relay is alive, remote `cmux` commands use the normal live Swift socket path. When the relay is gone, the same remote `cmux` command loads the snapshot for `CMUX_REMOTE_DAEMON_SLOT` or resolves it by `CMUX_WORKSPACE_ID`.
+When the Mac relay is gone, these commands fall back to mutating or reading the remote snapshot directly:
 
-Terminal creation in detached fallback creates the backing PTY through the persistent daemon first, then records the resulting `remotePTYSessionId` in the snapshot. Browser creation records only URL/title. This is why `new-pane --type terminal --command <cmd>` is the preferred detached supervisor primitive: it starts a live remote process without needing a later `send`/`send-key` replay.
+```bash
+cmux metadata set|get|list|clear --workspace current ...
+cmux workspace lookup --metadata <key=value> [--include-detached] --json
+cmux tree --workspace current --json
+cmux new-pane --workspace current --type terminal|browser [--direction <dir>] [--url <url>] [--command <cmd>] [--focus true|false]
+cmux new-surface --workspace current --type terminal|browser [--pane <pane>] [--url <url>] [--command <cmd>] [--focus true|false]
+cmux new-split <dir> --workspace current [--surface <surface>] [--type terminal|browser] [--url <url>] [--command <cmd>] [--focus true|false]
+cmux close-surface --workspace current --surface <surface>
+```
 
-### Snapshot Lifecycle
+Terminal creation in detached mode starts a real PTY through the persistent daemon before writing the new terminal surface into the snapshot. Browser creation records the initial URL/title only.
 
-Remote snapshots now have a status:
+For supervisor scripts, prefer:
 
-- `detached`: shown by Host Manager and `ssh-workspace-list-detached`.
-- `live`: a checkpoint for an attached/reconnected workspace; intentionally hidden from detached listings.
+```bash
+cmux new-pane --workspace current --type terminal --command '<command>'
+cmux new-pane --workspace current --type browser --url '<url>'
+```
 
-Detach writes a `detached` snapshot and removes the local workspace. Attach restores the workspace using the original snapshot `workspaceId`, preserving the UUID across detach/attach, then rewrites the snapshot as `live` instead of eagerly clearing it. This keeps a recoverable remote copy and gives remote scripts a stable target if the Mac relay drops again.
+That avoids relying on `send` / `send-key`, which are attached-UI-only.
 
-Swift reconnect reconciliation is remote-wins:
+### Attached-Only Commands
 
-- Fetch the remote snapshot.
-- If the snapshot hash/revision differs from the last applied local snapshot, rebuild local layout from the remote snapshot.
-- Validate terminal PTYs during restore; missing PTYs become lost placeholders.
-- After successful attached local mutations, write a fresh `live` snapshot.
+These still require an attached Swift UI:
 
-### Tested Behavior
+- focus and selection commands;
+- workspace/window movement;
+- cosmetic rename operations such as `rename-tab`;
+- `send` and `send-key`;
+- browser automation or navigation after browser creation;
+- access to local Mac browser state such as cookies, scroll position, devtools, or WKWebView session data.
 
-The current E2E test on `ed@tdb` validated:
+Craft should treat failures from these commands as operator-convenience failures, not supervisor-critical failures.
 
-- live multi-pane workspace detach;
-- remote headless `metadata set`;
-- remote headless `tree`;
-- remote headless browser pane creation;
-- remote headless terminal pane creation with a startup command;
-- reattach with the original workspace UUID preserved;
-- restored terminal process output from the detached-created PTY;
-- creating another remote terminal after reattach.
+### Snapshot Reconciliation
 
-### Still Deliberately Unsupported
+Remote snapshots have a `status`:
 
-The detached backend is not a full replacement for the Swift UI socket. Scripts should expect these to require an attached UI:
+- `detached`: workspace is not present in the Mac sidebar and is shown by Host Manager / `ssh-workspace-list-detached`;
+- `live`: workspace is attached or reconnected; snapshot is a remote checkpoint and hidden from detached listings.
 
-- focus, selection, window placement, workspace movement;
-- tab renaming and cosmetic title changes;
-- terminal input injection with `send` / `send-key`;
-- browser automation and navigation after creation;
-- local Mac-only browser state, cookies, scroll, devtools, and WKWebView session data.
+Detach writes a `detached` snapshot and removes the local workspace. Attach restores the workspace using the original `workspaceId`, preserving the UUID across detach/attach, then writes a `live` snapshot instead of clearing it.
 
-## Craft Follow-Up Change
+When Swift reconnects to a workspace whose remote snapshot changed while detached or disconnected, the remote snapshot wins. Swift rebuilds local layout from the remote snapshot and validates PTYs during restore. Missing PTYs become lost placeholders.
 
-Craft should treat cmux as two layers:
+### Validated E2E Behavior
 
-- workspace and surface discovery/manipulation primitives that work while attached or detached;
-- UI/operator conveniences that are best-effort and attached-only.
+The current branch was tested on `ed@tdb` with the dev build:
 
-The current Craft cmux provider still has three brittle patterns:
+- created a remote workspace with multiple panes and browser/terminal surfaces;
+- detached it from the Mac UI;
+- ran remote `cmux` commands after forcing the Mac relay unavailable;
+- set hidden metadata from the remote host;
+- created a browser pane from the remote host;
+- created a terminal pane from the remote host with `--command`;
+- reattached from the Mac;
+- preserved the original workspace UUID;
+- restored the remote-created terminal process and output;
+- created another remote terminal after reattach.
 
-- workspace lookup by structured title prefix in `_mux_ws_ref`;
-- agent/dashboard lookup by tab title in `_mux_surface_by_tab_title`;
-- generic named panes stored in visible `set-status` / `list-status` keys.
+## Craft Integration Plan
 
-Those should move to hidden metadata.
+Craft should move cmux integration away from title-prefix and visible-status conventions. The new cmux branch provides enough hidden metadata and detached-safe primitives for Craft to keep task workspaces controllable while the Mac UI is detached or temporarily disconnected.
 
 ### Workspace Identity
 
-Use hidden metadata for workspace identity. Do not add `workspace.kind`; the project workspace is a special attached-UI control surface, and task workspaces are discoverable by the fields Craft already owns.
+Use hidden metadata as the authoritative workspace identity.
 
-Suggested workspace keys:
+Suggested keys:
 
 ```text
 craft:schema-version=1
 craft:project-id=<stable project slug/id>
-craft:project-dir=<absolute path>
+craft:project-dir=<absolute project path>
 craft:task-id=<task id>              # task workspaces only
-craft:task-dir=<absolute path>       # task workspaces only
+craft:task-dir=<absolute task path>  # task workspaces only
 ```
 
-Titles remain human-readable sidebar labels only. Lookup should be:
+Titles should be human-readable labels only. They can still include task names for the sidebar, but Craft should not use them for lookup.
+
+Task workspace lookup:
 
 ```bash
 cmux workspace lookup \
@@ -144,13 +172,15 @@ cmux workspace lookup \
   --json
 ```
 
-For the project workspace, lookup by `craft:project-id` and absence of `craft:task-id` can be handled by Craft logic after reading matches; cmux does not need a `workspace.kind` field.
+Project workspace lookup can search by `craft:project-id` and then let Craft filter out results that have `craft:task-id`. cmux does not need a dedicated `workspace.kind`.
+
+When Craft creates a workspace, it should immediately write the identity metadata before creating secondary surfaces.
 
 ### Surface Identity
 
-Craft should keep semantic surface keys in workspace metadata. Cmux continues to expose opaque `surface_id`s.
+Craft should keep semantic surface references in hidden workspace metadata. cmux still owns opaque surface IDs.
 
-Suggested keys:
+Suggested metadata keys:
 
 ```text
 craft:surface:agent
@@ -163,25 +193,27 @@ craft:surface:devin-session
 craft:surface:buildkite-status
 ```
 
-Each value should be JSON. Minimum shape:
+Suggested JSON value:
 
 ```json
 {
   "surface_id": "surface-or-uuid",
-  "type": "terminal|browser",
+  "type": "terminal",
   "purpose": "agent",
-  "title": "optional display title",
-  "url": "optional browser url",
-  "agent": "claude|codex|opencode",
+  "title": "task-123",
+  "url": null,
+  "agent": "claude",
   "updated_at": "2026-05-28T00:00:00Z"
 }
 ```
 
-Craft owns the semantic key and any richer policy. Cmux only stores and returns the opaque value.
+For browser surfaces, set `"type": "browser"` and include `"url"`.
 
-### Refactor Recipe
+Craft owns the semantic meaning and retry/ensure policy. cmux only stores the JSON string and exposes `tree` for existence checks.
 
-Add a small cmux provider layer that wraps only JSON-producing commands:
+### Provider Refactor
+
+Add a small cmux provider layer around JSON commands:
 
 ```bash
 _cmux_workspace_lookup_by_metadata
@@ -194,40 +226,70 @@ _cmux_surface_from_metadata
 _cmux_record_surface
 ```
 
-Then refactor existing helpers:
+Then update current Craft helpers:
 
-- `_mux_ws_ref`: replace title-prefix matching with `workspace lookup --metadata ... --include-detached --json`.
-- `_mux_surface_by_tab_title`: replace tab-title matching with `metadata get craft:surface:<key>` plus `tree` existence validation.
-- `ensure_task_session`: after creating a task workspace, immediately write project/task metadata. For existing workspaces, lookup by metadata and only use title as cosmetic refresh.
-- `spawn_task_pane`: create or reuse `craft:surface:agent`; for remote supervisor use `new-pane/new-split --type terminal --command "$cmd"` instead of `send` + `send-key`.
-- `pane_is_running`: read `craft:surface:agent`, then verify the `surface_id` appears in `cmux tree`.
-- `kill_task_pane`: close the recorded `surface_id`, then clear `craft:surface:agent`.
-- `mux_spawn_named_pane`, `mux_send_to_pane`, `mux_pane_exists`, `mux_kill_named_pane`: replace visible status keys `craft:pane:<name>` with hidden `craft:surface:<name>` metadata.
-- Dashboard / Diffhub / GitHub PR / Devin helpers: use the same surface metadata pattern. Creation may work detached if it is just `new-pane --type browser --url <url>` or `new-pane --type terminal --command <cmd>`; focus, renaming, and browser automation remain attached-only best effort.
+- `_mux_ws_ref`: replace title-prefix matching with metadata lookup.
+- `_mux_ws_window`: keep as attached-only; do not make supervisor logic depend on it.
+- `_mux_surface_by_tab_title`: replace with metadata lookup plus `tree` existence validation.
+- `ensure_session`: create/refresh the project workspace, then write `craft:project-id` and `craft:project-dir`.
+- `ensure_task_session`: create/refresh the task workspace, then write `craft:project-id`, `craft:task-id`, and `craft:task-dir`.
+- `spawn_task_pane`: manage `craft:surface:agent`; create the terminal with `new-pane` or `new-split --type terminal --command "$cmd"` and then record the returned `surface_id`.
+- `pane_is_running`: read `craft:surface:agent`, then verify the surface exists in `cmux tree`.
+- `kill_task_pane`: close the recorded surface, then clear `craft:surface:agent`.
+- `mux_spawn_named_pane`: replace visible `set-status craft:pane:<name>` with hidden `metadata set craft:surface:<name> --value-json ...`.
+- `mux_send_to_pane`: keep attached-only because `send` is not detached-safe.
+- `mux_pane_exists`: use hidden metadata plus `tree`.
+- `mux_kill_named_pane`: close the recorded surface and clear the hidden metadata key.
 
-The old discoverer special case should go away. It becomes a normal agent surface launched with a different provider/configuration if still needed.
+The existing discoverer-specific path should become a normal agent surface with different Craft-side configuration. cmux does not need special discoverer behavior.
 
-### Attached vs Detached Rules for Craft
+### Detached-Safe Craft Operations
 
-Operations that should work in attached or detached remote workspaces:
+Craft supervisor scripts can rely on these in attached and detached remote workspaces:
 
-- find task workspace by metadata;
-- read/write Craft metadata;
-- inspect tree;
-- create terminal surfaces with startup command;
-- create browser surfaces with initial URL;
-- close a known surface.
+- find a task workspace by metadata;
+- read/write hidden metadata;
+- inspect workspace tree;
+- create terminal surfaces with startup commands;
+- create browser surfaces with initial URLs;
+- close known surfaces.
 
-Operations that should be attached-only:
+Craft should not require these for detached supervisor correctness:
 
-- focus/select a workspace or surface;
-- move workspace between windows;
-- rename tab/workspace for cosmetics;
-- send interactive input to an already-running terminal;
-- browser automation after creation.
+- selecting or focusing a workspace/surface;
+- moving workspaces between windows;
+- renaming tabs/workspaces;
+- sending input to an already-running terminal;
+- browser automation after initial browser creation.
 
-Craft should surface attached-only failures as non-fatal operator convenience failures where possible. Supervisor-critical logic should be built from the attached-or-detached subset.
+### Example Detached-Safe Supervisor Flow
+
+```bash
+workspace_json="$(cmux workspace lookup \
+  --metadata craft:project-id="$project_id" \
+  --metadata craft:task-id="$task_id" \
+  --include-detached \
+  --json)"
+
+workspace_id="$(printf '%s' "$workspace_json" | jq -r '.matches[0].id')"
+
+surface_json="$(cmux new-pane \
+  --workspace "$workspace_id" \
+  --type terminal \
+  --direction down \
+  --command "$agent_command" \
+  --json)"
+
+surface_id="$(printf '%s' "$surface_json" | jq -r '.surface_id // .surface_ref')"
+
+cmux metadata set \
+  --workspace "$workspace_id" \
+  craft:surface:agent \
+  --value-json "{\"surface_id\":\"$surface_id\",\"type\":\"terminal\",\"purpose\":\"agent\",\"agent\":\"$agent\",\"updated_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+```
+
+When running inside the remote workspace and the Mac relay is unavailable, the same commands operate on the remote snapshot.
 
 ## TODO: Concurrency Control
 
-Once the detached metadata store is working end to end, revisit locking or another lightweight concurrency-control mechanism for remote snapshot metadata and layout mutations. The first pass is intentionally simple, but concurrent remote scripts should not be able to silently overwrite each other's metadata or layout changes long term.
+Add locking or lightweight compare-and-swap semantics for remote snapshot metadata and layout mutations after the concept is stable. Concurrent remote scripts should not be able to silently overwrite each other's metadata or layout changes long term.
