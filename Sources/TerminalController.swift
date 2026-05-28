@@ -5203,11 +5203,29 @@ class TerminalController {
         cwd: String?,
         initialCommand: String?
     ) -> String {
+        v2RemoteSSHWorkspaceTerminalCommand(
+            workspaceID: workspaceID.uuidString,
+            surfaceID: surfaceID.uuidString,
+            persistentDaemonSlot: persistentDaemonSlot,
+            relayPort: relayPort,
+            cwd: cwd,
+            initialCommand: initialCommand
+        )
+    }
+
+    private static func v2RemoteSSHWorkspaceTerminalCommand(
+        workspaceID: String,
+        surfaceID: String,
+        persistentDaemonSlot: String,
+        relayPort: Int,
+        cwd: String?,
+        initialCommand: String?
+    ) -> String {
         var statements = [
-            "export CMUX_WORKSPACE_ID=\(v2ShellSingleQuoted(workspaceID.uuidString))",
-            "export CMUX_TAB_ID=\(v2ShellSingleQuoted(workspaceID.uuidString))",
-            "export CMUX_SURFACE_ID=\(v2ShellSingleQuoted(surfaceID.uuidString))",
-            "export CMUX_PANEL_ID=\(v2ShellSingleQuoted(surfaceID.uuidString))",
+            "export CMUX_WORKSPACE_ID=\(v2ShellSingleQuoted(workspaceID))",
+            "export CMUX_TAB_ID=\(v2ShellSingleQuoted(workspaceID))",
+            "export CMUX_SURFACE_ID=\(v2ShellSingleQuoted(surfaceID))",
+            "export CMUX_PANEL_ID=\(v2ShellSingleQuoted(surfaceID))",
             "export CMUX_REMOTE_DAEMON_SLOT=\(v2ShellSingleQuoted(persistentDaemonSlot))",
             "export CMUX_SOCKET_PATH=\(v2ShellSingleQuoted("127.0.0.1:\(relayPort)"))",
             #"export PATH="$HOME/.cmux/bin:$PATH""#,
@@ -7292,6 +7310,19 @@ class TerminalController {
         let focus = v2Bool(params, "focus") ?? false
         let relayPort = Self.v2GenerateRemoteRelayPort()
         let relayID = UUID().uuidString.lowercased()
+        let persistentDaemonSlot = "ssh-\(UUID().uuidString.lowercased())"
+        let remoteShellCommand = Self.v2RemoteSSHWorkspaceTerminalCommand(
+            workspaceID: "__CMUX_WORKSPACE_ID__",
+            surfaceID: "__CMUX_SURFACE_ID__",
+            persistentDaemonSlot: persistentDaemonSlot,
+            relayPort: relayPort,
+            cwd: cwd,
+            initialCommand: nil
+        )
+        let terminalStartupCommand = SSHPTYAttachStartupCommandBuilder.command(
+            requireExisting: false,
+            command: remoteShellCommand
+        )
         let relayToken: String
         do {
             relayToken = try Self.v2RandomHex(byteCount: 32)
@@ -7300,8 +7331,8 @@ class TerminalController {
         }
 
         let createResult = v2WorkspaceCreate(params: [
-            "cwd": cwd ?? "",
             "title": title ?? "",
+            "initial_command": terminalStartupCommand,
             "focus": focus,
         ])
         let createPayload: [String: Any]
@@ -7320,15 +7351,6 @@ class TerminalController {
             return .err(code: "internal_error", message: "workspace.create did not return workspace and surface IDs", data: createPayload)
         }
 
-        let persistentDaemonSlot = "ssh-\(UUID().uuidString.lowercased())"
-        let terminalStartupCommand = Self.v2RemoteSSHWorkspaceTerminalCommand(
-            workspaceID: workspaceID,
-            surfaceID: surfaceID,
-            persistentDaemonSlot: persistentDaemonSlot,
-            relayPort: relayPort,
-            cwd: cwd,
-            initialCommand: initialCommand
-        )
         var configureParams: [String: Any] = [
             "workspace_id": workspaceID.uuidString,
             "destination": destination,
@@ -7355,6 +7377,13 @@ class TerminalController {
         let configureResult = v2WorkspaceRemoteConfigure(params: configureParams)
         switch configureResult {
         case .ok(let payload as [String: Any]):
+            if let initialCommand, !initialCommand.isEmpty {
+                _ = v2SurfaceSendText(params: [
+                    "workspace_id": workspaceID.uuidString,
+                    "surface_id": surfaceID.uuidString,
+                    "text": "exec /bin/sh -lc \(Self.v2ShellSingleQuoted(initialCommand))\n",
+                ])
+            }
             var merged = payload
             merged["surface_id"] = surfaceID.uuidString
             merged["surface_ref"] = v2Ref(kind: .surface, uuid: surfaceID)
@@ -9733,8 +9762,8 @@ class TerminalController {
                     surfaceId: targetSurfaceId,
                     direction: direction,
                     focus: focus,
-                    workingDirectory: workingDirectory,
-                    initialCommand: initialCommand,
+                    workingDirectory: ws.isRemoteWorkspace ? nil : workingDirectory,
+                    initialCommand: ws.isRemoteWorkspace ? nil : initialCommand,
                     tmuxStartCommand: tmuxStartCommand,
                     startupEnvironment: startupEnvironment,
                     initialDividerPosition: initialDividerPosition.map { CGFloat($0) },
@@ -9743,6 +9772,15 @@ class TerminalController {
             }
 
             if let newId {
+                if let commandError = v2QueueRemoteTerminalStartupInput(
+                    workingDirectory: workingDirectory,
+                    initialCommand: initialCommand,
+                    workspace: ws,
+                    surfaceId: newId
+                ) {
+                    result = commandError
+                    return
+                }
                 let paneUUID = ws.paneId(forPanelId: newId)?.id
                 let windowId = v2ResolveWindowId(tabManager: tabManager)
                 result = .ok([
@@ -9814,8 +9852,8 @@ class TerminalController {
                 newPanelId = ws.newTerminalSurface(
                     inPane: paneId,
                     focus: focus,
-                    workingDirectory: workingDirectory,
-                    initialCommand: initialCommand,
+                    workingDirectory: ws.isRemoteWorkspace ? nil : workingDirectory,
+                    initialCommand: ws.isRemoteWorkspace ? nil : initialCommand,
                     tmuxStartCommand: tmuxStartCommand,
                     startupEnvironment: startupEnvironment,
                     remotePTYSessionID: remotePTYSessionID
@@ -9824,6 +9862,15 @@ class TerminalController {
 
             guard let newPanelId else {
                 result = .err(code: "internal_error", message: "Failed to create surface", data: nil)
+                return
+            }
+            if let commandError = v2QueueRemoteTerminalStartupInput(
+                workingDirectory: workingDirectory,
+                initialCommand: initialCommand,
+                workspace: ws,
+                surfaceId: newPanelId
+            ) {
+                result = commandError
                 return
             }
 
@@ -9878,6 +9925,48 @@ class TerminalController {
                 : .err(code: "internal_error", message: "Failed to close surface", data: ["surface_id": surfaceId.uuidString])
         }
         return result
+    }
+
+    private func v2QueueRemoteTerminalStartupInput(
+        workingDirectory: String?,
+        initialCommand: String?,
+        workspace: Workspace,
+        surfaceId: UUID
+    ) -> V2CallResult? {
+        let normalizedWorkingDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedInitialCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard workspace.isRemoteWorkspace,
+              normalizedWorkingDirectory?.isEmpty == false || normalizedInitialCommand?.isEmpty == false else {
+            return nil
+        }
+        guard let terminalPanel = workspace.terminalPanel(for: surfaceId) else {
+            return .err(code: "invalid_params", message: "Surface is not a terminal", data: ["surface_id": surfaceId.uuidString])
+        }
+
+        var commands: [String] = []
+        if let normalizedWorkingDirectory, !normalizedWorkingDirectory.isEmpty {
+            commands.append("cd -- \(Self.v2ShellSingleQuoted(normalizedWorkingDirectory))")
+        }
+        if let normalizedInitialCommand, !normalizedInitialCommand.isEmpty {
+            commands.append("exec /bin/sh -lc \(Self.v2ShellSingleQuoted(normalizedInitialCommand))")
+        }
+        let input = commands.joined(separator: " && ") + "\n"
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak terminalPanel] in
+            guard let terminalPanel else { return }
+            switch terminalPanel.sendInputResult(input) {
+            case .sent:
+                terminalPanel.surface.forceRefresh(reason: "terminalController.v2QueueRemoteTerminalStartupInput")
+            case .queued:
+                break
+            case .inputQueueFull, .surfaceUnavailable, .processExited:
+                cmuxDebugLog(
+                    "terminalController.v2QueueRemoteTerminalStartupInput.failed " +
+                    "surface=\(surfaceId.uuidString.prefix(8))"
+                )
+            }
+        }
+        return nil
     }
 
     private func v2SurfaceMove(params: [String: Any]) -> V2CallResult {
@@ -11159,8 +11248,8 @@ class TerminalController {
                     orientation: orientation,
                     insertFirst: insertFirst,
                     focus: focus,
-                    workingDirectory: workingDirectory,
-                    initialCommand: initialCommand,
+                    workingDirectory: ws.isRemoteWorkspace ? nil : workingDirectory,
+                    initialCommand: ws.isRemoteWorkspace ? nil : initialCommand,
                     tmuxStartCommand: tmuxStartCommand,
                     startupEnvironment: startupEnvironment,
                     initialDividerPosition: initialDividerPosition.map { CGFloat($0) }
@@ -11169,6 +11258,15 @@ class TerminalController {
 
             guard let newPanelId else {
                 result = .err(code: "internal_error", message: "Failed to create pane", data: nil)
+                return
+            }
+            if let commandError = v2QueueRemoteTerminalStartupInput(
+                workingDirectory: workingDirectory,
+                initialCommand: initialCommand,
+                workspace: ws,
+                surfaceId: newPanelId
+            ) {
+                result = commandError
                 return
             }
             let paneUUID = ws.paneId(forPanelId: newPanelId)?.id

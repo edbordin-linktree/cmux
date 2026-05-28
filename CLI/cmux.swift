@@ -3676,11 +3676,14 @@ struct CMUXCLI {
             let (sfArg, rem2) = parseOption(rem1, name: "--surface")
             let (focusOpt, rem3) = parseOption(rem2, name: "--focus")
             let (windowOpt, rem4) = parseOption(rem3, name: "--window")
+            let (typeOpt, rem5) = parseOption(rem4, name: "--type")
+            let (urlOpt, rem6) = parseOption(rem5, name: "--url")
+            let (commandOpt, rem7) = parseOption(rem6, name: "--command")
             let windowRaw = windowOpt ?? windowId
             let workspaceArg = wsArg ?? (windowRaw == nil ? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"] : nil)
             let surfaceRaw = sfArg ?? panelArg ?? (wsArg == nil && windowRaw == nil ? ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] : nil)
-            let direction = try validatedSplitDirection(rem4.first, commandName: "new-split")
-            if let unknown = rem4.dropFirst().first(where: { $0.hasPrefix("--") }) {
+            let direction = try validatedSplitDirection(rem7.first, commandName: "new-split")
+            if let unknown = rem7.dropFirst().first(where: { $0.hasPrefix("--") }) {
                 throw CLIError(message: "new-split: unknown flag '\(unknown)'")
             }
             var params: [String: Any] = ["direction": direction]
@@ -3690,6 +3693,9 @@ struct CMUXCLI {
             if let wsId { params["workspace_id"] = wsId }
             let sfId = try normalizeSurfaceHandle(surfaceRaw, client: client, workspaceHandle: wsId, windowHandle: winId)
             if let sfId { params["surface_id"] = sfId }
+            if let typeOpt { params["type"] = typeOpt }
+            if let urlOpt { params["url"] = urlOpt }
+            if let commandOpt { params["initial_command"] = commandOpt }
             try applyFocusOption(focusOpt, defaultValue: false, to: &params)
             let payload = try client.sendV2(method: "surface.split", params: params)
             printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: v2OKSummary(payload, idFormat: idFormat))
@@ -3778,6 +3784,7 @@ struct CMUXCLI {
             let type = optionValue(commandArgs, name: "--type")
             let direction = optionValue(commandArgs, name: "--direction") ?? "right"
             let url = optionValue(commandArgs, name: "--url")
+            let command = optionValue(commandArgs, name: "--command")
             let focusOpt = optionValue(commandArgs, name: "--focus")
             var params: [String: Any] = ["direction": direction]
             let winId = try normalizeWindowHandle(windowFromArgsOrOverride(commandArgs, windowOverride: windowId), client: client)
@@ -3786,6 +3793,7 @@ struct CMUXCLI {
             if let wsId { params["workspace_id"] = wsId }
             if let type { params["type"] = type }
             if let url { params["url"] = url }
+            if let command { params["initial_command"] = command }
             try applyFocusOption(focusOpt, defaultValue: false, to: &params)
             let payload = try client.sendV2(method: "pane.create", params: params)
             printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: v2OKSummary(payload, idFormat: idFormat, kinds: ["surface", "pane", "workspace"]))
@@ -3795,6 +3803,7 @@ struct CMUXCLI {
             let type = optionValue(commandArgs, name: "--type")
             let paneRaw = optionValue(commandArgs, name: "--pane")
             let url = optionValue(commandArgs, name: "--url")
+            let command = optionValue(commandArgs, name: "--command")
             let focusOpt = optionValue(commandArgs, name: "--focus")
             var params: [String: Any] = [:]
             let winId = try normalizeWindowHandle(windowFromArgsOrOverride(commandArgs, windowOverride: windowId), client: client)
@@ -3805,6 +3814,7 @@ struct CMUXCLI {
             if let paneId { params["pane_id"] = paneId }
             if let type { params["type"] = type }
             if let url { params["url"] = url }
+            if let command { params["initial_command"] = command }
             try applyFocusOption(focusOpt, defaultValue: false, to: &params)
             let payload = try client.sendV2(method: "surface.create", params: params)
             printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: v2OKSummary(payload, idFormat: idFormat, kinds: ["surface", "pane", "workspace"]))
@@ -6461,8 +6471,11 @@ struct CMUXCLI {
         let port: Int?
         let identityFile: String?
         let workspaceName: String?
+        let cwd: String?
         let windowRaw: String?
         let noFocus: Bool
+        let detached: Bool
+        let jsonOutput: Bool
         let sshOptions: [String]
         let extraArguments: [String]
         let localSocketPath: String
@@ -6477,8 +6490,11 @@ struct CMUXCLI {
             port: Int?,
             identityFile: String?,
             workspaceName: String?,
+            cwd: String? = nil,
             windowRaw: String? = nil,
             noFocus: Bool,
+            detached: Bool = false,
+            jsonOutput: Bool = false,
             sshOptions: [String],
             extraArguments: [String],
             localSocketPath: String,
@@ -6490,8 +6506,11 @@ struct CMUXCLI {
             self.port = port
             self.identityFile = identityFile
             self.workspaceName = workspaceName
+            self.cwd = cwd
             self.windowRaw = windowRaw
             self.noFocus = noFocus
+            self.detached = detached
+            self.jsonOutput = jsonOutput
             self.sshOptions = sshOptions
             self.extraArguments = extraArguments
             self.localSocketPath = localSocketPath
@@ -6583,12 +6602,17 @@ struct CMUXCLI {
             remoteRelayPort: remoteRelayPort,
             windowOverride: windowOverride
         )
+        if sshOptions.detached {
+            throw CLIError(
+                message: "cmux ssh --detached is only supported by the remote cmux wrapper on the SSH host; run it inside a remote cmux session, or omit --detached to create an attached Swift workspace."
+            )
+        }
         try runSSHWithOptions(
             sshOptions,
             relayID: relayID,
             relayToken: relayToken,
             client: client,
-            jsonOutput: jsonOutput,
+            jsonOutput: jsonOutput || sshOptions.jsonOutput,
             idFormat: idFormat
         )
     }
@@ -6637,13 +6661,12 @@ struct CMUXCLI {
         if sshOptions.skipDaemonBootstrap {
             remoteTerminalBootstrapScript = nil
         } else {
-            remoteTerminalBootstrapScript = sshOptions.extraArguments.isEmpty
-                ? buildInteractiveRemoteShellScript(
-                    remoteRelayPort: sshOptions.remoteRelayPort,
-                    shellFeatures: shellFeaturesValue,
-                    terminfoSource: terminfoSource
-                )
-                : nil
+            remoteTerminalBootstrapScript = buildInteractiveRemoteShellScript(
+                remoteRelayPort: sshOptions.remoteRelayPort,
+                shellFeatures: shellFeaturesValue,
+                cwd: sshOptions.cwd,
+                terminfoSource: terminfoSource
+            )
         }
         let remoteTerminalSSHCommand = buildSSHCommandText(
             sshOptions,
@@ -6668,7 +6691,6 @@ struct CMUXCLI {
             : deferredRemoteReconnectToken
         let usesPersistentSSHPTY =
             !sshOptions.skipDaemonBootstrap &&
-            sshOptions.extraArguments.isEmpty &&
             remoteTerminalBootstrapScript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false &&
             deferredRemoteReconnectCommandScript != nil
         let persistentDaemonSlot = usesPersistentSSHPTY
@@ -6751,6 +6773,7 @@ struct CMUXCLI {
             "relayPort=\(sshOptions.remoteRelayPort) localSocket=\(sshOptions.localSocketPath) " +
             "controlPath=\(sshOptionValue(named: "ControlPath", in: remoteSSHOptions) ?? "nil") " +
             "workspaceName=\(sshOptions.workspaceName?.replacingOccurrences(of: " ", with: "_") ?? "nil") " +
+            "cwd=\(sshOptions.cwd?.replacingOccurrences(of: " ", with: "_") ?? "nil") " +
             "extraArgs=\(sshOptions.extraArguments.count)"
         )
 
@@ -6860,6 +6883,18 @@ struct CMUXCLI {
                     "workspace=\(String(workspaceId.prefix(8))) stage=workspace.select elapsedMs=\(Int(Date().timeIntervalSince(selectStartedAt) * 1000))"
                 )
             }
+            if !sshOptions.extraArguments.isEmpty {
+                guard let workspaceInitialSurfaceId else {
+                    throw CLIError(message: "cmux could not resolve the initial terminal surface for remote command startup")
+                }
+                let remoteCommand = sshRemoteInitialCommandText(sshOptions.extraArguments)
+                let sendText = "exec /bin/sh -lc \(shellQuote(remoteCommand))\n"
+                _ = try client.sendV2(method: "surface.send_text", params: [
+                    "workspace_id": workspaceId,
+                    "surface_id": workspaceInitialSurfaceId,
+                    "text": sendText,
+                ])
+            }
             let remoteState = ((configuredPayload["remote"] as? [String: Any])?["state"] as? String) ?? "unknown"
             cliDebugLog(
                 "cli.ssh.remote.configure.ok workspace=\(String(workspaceId.prefix(8))) state=\(remoteState)"
@@ -6926,8 +6961,11 @@ struct CMUXCLI {
         var port: Int?
         var identityFile: String?
         var workspaceName: String?
+        var cwd: String?
         var windowRaw: String?
         var noFocus = false
+        var detached = false
+        var trailingJSONOutput = false
         var sshOptions: [String] = []
         var extraArguments: [String] = []
 
@@ -6944,6 +6982,9 @@ struct CMUXCLI {
             switch arg {
             case "--":
                 passthrough = true
+                index += 1
+            case "--json":
+                trailingJSONOutput = true
                 index += 1
             case "--port":
                 guard index + 1 < commandArgs.count else {
@@ -6966,6 +7007,15 @@ struct CMUXCLI {
                 }
                 workspaceName = commandArgs[index + 1]
                 index += 2
+            case "--cwd", "--working-directory":
+                guard index + 1 < commandArgs.count else {
+                    throw CLIError(message: "ssh: \(arg) requires a path")
+                }
+                let value = commandArgs[index + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty {
+                    cwd = value
+                }
+                index += 2
             case "--window":
                 guard index + 1 < commandArgs.count else {
                     throw CLIError(message: "ssh: --window requires a window id")
@@ -6974,6 +7024,9 @@ struct CMUXCLI {
                 index += 2
             case "--no-focus":
                 noFocus = true
+                index += 1
+            case "--detached":
+                detached = true
                 index += 1
             case "--ssh-option":
                 guard index + 1 < commandArgs.count else {
@@ -7010,8 +7063,11 @@ struct CMUXCLI {
             port: port,
             identityFile: identityFile,
             workspaceName: workspaceName,
+            cwd: cwd,
             windowRaw: windowRaw ?? windowOverride,
             noFocus: noFocus,
+            detached: detached,
+            jsonOutput: trailingJSONOutput,
             sshOptions: sshOptions,
             extraArguments: extraArguments,
             localSocketPath: localSocketPath,
@@ -7042,7 +7098,7 @@ struct CMUXCLI {
         let trimmedRemoteBootstrap = remoteBootstrapScript?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if options.extraArguments.isEmpty {
+        if options.extraArguments.isEmpty || trimmedRemoteBootstrap?.isEmpty == false {
             if let trimmedRemoteBootstrap, !trimmedRemoteBootstrap.isEmpty {
                 let remoteCommand = openSSHRemoteCommandValue(
                     shellScript: encodedRemoteBootstrapCommand(
@@ -7061,6 +7117,13 @@ struct CMUXCLI {
             parts.append(contentsOf: options.extraArguments)
         }
         return parts
+    }
+
+    private func sshRemoteInitialCommandText(_ args: [String]) -> String {
+        if args.count == 1 {
+            return args[0]
+        }
+        return args.map(shellQuote).joined(separator: " ")
     }
 
     func buildBootstrapSSHStartupCommand(
@@ -7264,6 +7327,7 @@ struct CMUXCLI {
     func buildInteractiveRemoteShellScript(
         remoteRelayPort: Int,
         shellFeatures: String,
+        cwd: String? = nil,
         terminfoSource: String? = nil
     ) -> String {
         let remoteTerminalLines = interactiveRemoteTerminalSetupLines(terminfoSource: terminfoSource)
@@ -7332,6 +7396,9 @@ struct CMUXCLI {
             ]
         }
         outerLines.append(contentsOf: commonShellExportLines)
+        if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
+            outerLines.append("cd -- \(shellQuote(cwd)) || exit $?")
+        }
         outerLines += [
             "CMUX_LOGIN_SHELL=\"${SHELL:-/bin/zsh}\"",
             "case \"${CMUX_LOGIN_SHELL##*/}\" in",
@@ -7450,11 +7517,13 @@ struct CMUXCLI {
     func buildInteractiveRemoteShellCommand(
         remoteRelayPort: Int,
         shellFeatures: String,
+        cwd: String? = nil,
         terminfoSource: String? = nil
     ) -> String {
         let script = buildInteractiveRemoteShellScript(
             remoteRelayPort: remoteRelayPort,
             shellFeatures: shellFeatures,
+            cwd: cwd,
             terminfoSource: terminfoSource
         )
         return posixShellCommand(script)
@@ -12460,14 +12529,19 @@ struct CMUXCLI {
 
             Flags:
               --name <title>          Optional workspace title
+              --cwd <path>            Remote working directory for the shell or command
               --port <n>              SSH port
               --identity <path>       SSH identity file path
               --ssh-option <opt>      Extra SSH -o option (repeatable)
               --window <id|ref|index> Target window for the managed workspace
               --no-focus              Create workspace without switching to it
+              --json                  Print machine-readable JSON output
+              --detached              Remote wrapper only; Swift CLI reports a clear unsupported-mode error
 
             Example:
               cmux ssh dev@my-host
+              cmux ssh dev@my-host --cwd /srv/app --json
+              cmux ssh dev@my-host --cwd /srv/app -- ./scripts/start-worker
               cmux ssh dev@my-host --name "gpu-box" --port 2222 --identity ~/.ssh/id_ed25519
               cmux ssh dev@my-host --ssh-option UserKnownHostsFile=/dev/null --ssh-option StrictHostKeyChecking=no
             """
@@ -12610,6 +12684,10 @@ struct CMUXCLI {
               --panel <id|ref>       Alias for --surface
               --window <id|ref|index>
                                       Window context for workspace/surface refs and indexes
+              --type <terminal|browser>
+                                      New split surface type (default: terminal)
+              --url <url>            URL for browser splits
+              --command <text>       Initial command for terminal splits
               --focus <true|false>   Focus the new split (default: false)
 
             Example:
@@ -12754,6 +12832,7 @@ struct CMUXCLI {
               --workspace <id|ref|index>          Target workspace (default: $CMUX_WORKSPACE_ID)
               --window <id|ref|index>             Window context for workspace refs and indexes
               --url <url>                         URL for browser panes
+              --command <text>                    Initial command for terminal panes
               --focus <true|false>                Focus the new pane (default: false)
 
             Example:
@@ -12772,6 +12851,7 @@ struct CMUXCLI {
               --workspace <id|ref|index>  Target workspace (default: $CMUX_WORKSPACE_ID)
               --window <id|ref|index>     Window context for workspace/pane refs and indexes
               --url <url>                 URL for browser surfaces
+              --command <text>            Initial command for terminal surfaces
               --focus <true|false>        Focus the new surface (default: false)
 
             Example:
@@ -30075,7 +30155,7 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           move-tab-to-new-workspace [--tab <id|ref|index>] [--surface <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--title <text>] [--focus <true|false>]
           list-workspaces [--window <id|ref|index>]
           new-workspace [--name <title>] [--description <text>] [--cwd <path>] [--command <text>] [--layout <json>] [--window <id|ref|index>] [--focus <true|false>]
-          ssh <destination> [--name <title>] [--port <n>] [--identity <path>] [--ssh-option <opt>] [--window <id|ref|index>] [--no-focus] [-- <remote-command-args>]
+          ssh <destination> [--cwd <path>] [--name <title>] [--port <n>] [--identity <path>] [--ssh-option <opt>] [--window <id|ref|index>] [--no-focus] [--json] [-- <remote-command-args>]
           ssh-workspace-detach --workspace <id|ref|index> [--json]
           ssh-workspace-list-detached [--host <h>] [--json] [--timeout <secs>]
           ssh-workspace-attach --workspace-id <uuid> [--host <h>] [--slot <s>] [--window <id|ref|index>] [--json]
@@ -30086,15 +30166,15 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           ssh-session-attach --session-id <id> [--workspace <id|ref|index>] [--pane <id|ref|index> | --split <left|right|up|down>]
           ssh-session-cleanup [--workspace <id|ref|index> | --all-workspaces] (--session-id <id> | --all)
           remote-daemon-status [--os <darwin|linux>] [--arch <arm64|amd64>]
-          new-split <left|right|up|down> [--workspace <id|ref|index>] [--surface <id|ref|index>] [--panel <id|ref|index>] [--window <id|ref|index>] [--focus <true|false>]
+          new-split <left|right|up|down> [--workspace <id|ref|index>] [--surface <id|ref|index>] [--panel <id|ref|index>] [--window <id|ref|index>] [--type <terminal|browser>] [--url <url>] [--command <text>] [--focus <true|false>]
           list-panes [--workspace <id|ref|index>] [--window <id|ref|index>]
           list-pane-surfaces [--workspace <id|ref|index>] [--pane <id|ref|index>] [--window <id|ref|index>]
           tree [--all] [--workspace <id|ref|index>] [--window <id|ref|index>]
           top [--all] [--workspace <id|ref|index>] [--window <id|ref|index>] [--processes] [--sort <cpu|mem|proc>] [--flat] [--format <tree|tsv>]
           memory [--all] [--workspace <id|ref|index>] [--groups <count>]
           focus-pane --pane <id|ref|index> [--workspace <id|ref|index>] [--window <id|ref|index>]
-          new-pane [--type <terminal|browser>] [--direction <left|right|up|down>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--url <url>] [--focus <true|false>]
-          new-surface [--type <terminal|browser>] [--pane <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--url <url>] [--focus <true|false>]
+          new-pane [--type <terminal|browser>] [--direction <left|right|up|down>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--url <url>] [--command <text>] [--focus <true|false>]
+          new-surface [--type <terminal|browser>] [--pane <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--url <url>] [--command <text>] [--focus <true|false>]
           close-surface [--surface <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>]
           move-surface --surface <id|ref|index> [--pane <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--before <id|ref|index>] [--after <id|ref|index>] [--index <n>] [--focus <true|false>]
           split-off --surface <id|ref|index> <left|right|up|down> [--workspace <id|ref|index>] [--window <id|ref|index>] [--focus <true|false>]

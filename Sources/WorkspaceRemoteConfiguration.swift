@@ -124,6 +124,7 @@ nonisolated enum SSHPTYAttachStartupCommandBuilder {
         sessionID: String? = nil,
         foregroundAuth: ForegroundAuth? = nil,
         requireExisting: Bool = true,
+        command: String? = nil,
         preferredCLIPath: String? = defaultBundledCLIPath()
     ) -> String {
         let preferredCLIPath = normalized(preferredCLIPath)
@@ -147,7 +148,13 @@ nonisolated enum SSHPTYAttachStartupCommandBuilder {
             lines += foregroundAuthLines(foregroundAuth)
         }
         let requireExistingFlag = requireExisting ? " --require-existing" : ""
-        let attachCommand = "\"$cmux_ssh_attach_cli\" --socket \"$CMUX_SOCKET_PATH\" ssh-pty-attach --wait\(requireExistingFlag) --workspace \"$CMUX_WORKSPACE_ID\" --session-id \"$cmux_ssh_attach_session_id\" --attachment-id \"${CMUX_SURFACE_ID:-}\""
+        let commandFlag: String
+        if let command = normalized(command) {
+            commandFlag = " --command-b64 \(shellQuote(Data(command.utf8).base64EncodedString()))"
+        } else {
+            commandFlag = ""
+        }
+        let attachCommand = "\"$cmux_ssh_attach_cli\" --socket \"$CMUX_SOCKET_PATH\" ssh-pty-attach --wait\(requireExistingFlag) --workspace \"$CMUX_WORKSPACE_ID\" --session-id \"$cmux_ssh_attach_session_id\" --attachment-id \"${CMUX_SURFACE_ID:-}\"\(commandFlag)"
         lines += retryingAttachLines(command: attachCommand)
         return lines.joined(separator: "\n")
     }

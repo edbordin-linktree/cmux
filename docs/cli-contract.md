@@ -100,7 +100,7 @@ Environment:
 | `move-tab-to-new-workspace` | Move a tab or surface into a newly created workspace. |
 | `list-workspaces` | List workspaces. |
 | `new-workspace` | Create a workspace, optionally with cwd, command, description, and layout. |
-| `ssh` | Open an SSH-backed workspace. The Mac Swift CLI supports the standard SSH workspace flags; the remote wrapper adds same-host `--cwd`, `--detached`, and `--json` support for supervisor scripts. |
+| `ssh` | Open an SSH-backed workspace. The Mac Swift CLI accepts `--cwd`, command-local `--json`, and remote command args while preserving the persistent remote-PTY path. The remote wrapper also supports same-host `--detached` creation for supervisor scripts. |
 | `remote-daemon-status` | Print bundled remote daemon version, asset, checksum, and cache status. |
 | `ssh-workspace-detach` | Store a remote workspace snapshot on its persistent daemon host and remove the local workspace. Supports `--json`. |
 | `ssh-workspace-list-detached` | List snapshots whose remote metadata status is `detached` across known hosts, or one host with `--host`. Supports `--json`; live checkpoints are intentionally hidden. |
