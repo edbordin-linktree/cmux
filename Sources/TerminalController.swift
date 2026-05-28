@@ -7331,20 +7331,13 @@ class TerminalController {
             initialCommand: initialCommand
         )
         let terminalStartupCommand = SSHPTYAttachStartupCommandBuilder.command(
-            foregroundAuth: SSHPTYAttachStartupCommandBuilder.ForegroundAuth(
-                destination: destination,
-                port: sshPort,
-                identityFile: identityFile?.isEmpty == true ? nil : identityFile,
-                sshOptions: sshOptions,
-                token: foregroundAuthToken
-            ),
+            foregroundAuth: nil,
             requireExisting: false,
             command: remoteShellCommand
         )
 
         let createResult = v2WorkspaceCreate(params: [
             "title": title ?? "",
-            "initial_command": terminalStartupCommand,
             "focus": focus,
         ])
         let createPayload: [String: Any]
@@ -7390,8 +7383,46 @@ class TerminalController {
         switch configureResult {
         case .ok(let payload as [String: Any]):
             var merged = payload
-            merged["surface_id"] = surfaceID.uuidString
-            merged["surface_ref"] = v2Ref(kind: .surface, uuid: surfaceID)
+            if case .ok(let authPayload as [String: Any]) = v2WorkspaceRemoteForegroundAuthReady(params: [
+                "workspace_id": workspaceID.uuidString,
+                "foreground_auth_token": foregroundAuthToken,
+            ]) {
+                merged["remote"] = authPayload["remote"] ?? merged["remote"] ?? NSNull()
+            }
+            let surfaceCreateResult = v2SurfaceCreate(params: [
+                "workspace_id": workspaceID.uuidString,
+                "type": "terminal",
+                "focus": focus,
+            ])
+            switch surfaceCreateResult {
+            case .ok(let surfacePayload as [String: Any]):
+                if let remoteSurfaceIDRaw = surfacePayload["surface_id"] as? String,
+                   let remoteSurfaceID = UUID(uuidString: remoteSurfaceIDRaw) {
+                    _ = v2SurfaceClose(params: [
+                        "workspace_id": workspaceID.uuidString,
+                        "surface_id": surfaceID.uuidString,
+                    ])
+                    merged["surface_id"] = remoteSurfaceID.uuidString
+                    merged["surface_ref"] = v2Ref(kind: .surface, uuid: remoteSurfaceID)
+                } else {
+                    _ = v2WorkspaceClose(params: ["workspace_id": workspaceID.uuidString])
+                    return .err(
+                        code: "internal_error",
+                        message: "surface.create did not return a remote terminal surface ID",
+                        data: surfacePayload
+                    )
+                }
+            case .ok(let surfacePayload):
+                _ = v2WorkspaceClose(params: ["workspace_id": workspaceID.uuidString])
+                return .err(
+                    code: "internal_error",
+                    message: "surface.create returned invalid payload",
+                    data: surfacePayload
+                )
+            case .err(let code, let message, let data):
+                _ = v2WorkspaceClose(params: ["workspace_id": workspaceID.uuidString])
+                return .err(code: code, message: message, data: data)
+            }
             merged["persistent_daemon_slot"] = persistentDaemonSlot
             merged["remote_relay_port"] = relayPort
             return .ok(merged)

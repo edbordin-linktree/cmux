@@ -9140,7 +9140,9 @@ struct CMUXCLI {
                 responseTimeout: waitForReady ? 185 : nil
             )
         } catch {
-            throw CLIError(message: "ssh-pty-attach: \(userFacingRemotePTYErrorMessage(error))")
+            let message = userFacingRemotePTYErrorMessage(error)
+            let exitCode: Int32 = message == "remote daemon is not ready" ? 254 : 1
+            throw CLIError(message: "ssh-pty-attach: \(message)", exitCode: exitCode)
         }
         var connectedFD: Int32?
         let controlSocketLock = NSLock()
