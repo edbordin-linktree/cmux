@@ -373,6 +373,12 @@ When Craft creates a workspace, it should immediately write the identity metadat
 
 Craft should keep semantic surface references in hidden workspace metadata. cmux still owns opaque surface IDs.
 
+Do not keep separate cmux integration paths for "task panes" and "named panes". Both are semantic surfaces:
+
+- the main task agent is the canonical task surface, usually `craft:surface:agent`;
+- plugin or auxiliary panes are additional semantic surfaces, for example `craft:surface:diffhub-review` or `craft:surface:logs`;
+- task-specific helpers should be thin wrappers over the same semantic-surface provider primitives.
+
 Suggested metadata keys:
 
 ```text
@@ -417,6 +423,9 @@ _cmux_tree_json
 _cmux_surface_exists
 _cmux_surface_from_metadata
 _cmux_record_surface
+_cmux_ensure_surface
+_cmux_send_to_surface
+_cmux_close_surface
 ```
 
 Then update current Craft helpers:
@@ -426,13 +435,10 @@ Then update current Craft helpers:
 - `_mux_surface_by_tab_title`: replace with metadata lookup plus `tree` existence validation.
 - `ensure_session`: create/refresh the project workspace, then write `craft:project-id` and `craft:project-dir`.
 - `ensure_task_session`: create/refresh the task workspace, then write `craft:project-id`, `craft:task-id`, and `craft:task-dir`.
-- `spawn_task_pane`: manage `craft:surface:agent`; create the terminal with `new-pane` or `new-split --type terminal --command "$cmd"` and then record the returned `surface_id`.
-- `pane_is_running`: read `craft:surface:agent`, then verify the surface exists in `cmux tree`.
-- `kill_task_pane`: close the recorded surface, then clear `craft:surface:agent`.
-- `mux_spawn_named_pane`: replace visible `set-status craft:pane:<name>` with hidden `metadata set craft:surface:<name> --value-json ...`.
+- `spawn_task_pane` and `mux_spawn_named_pane`: collapse into one semantic-surface creation path. The task agent is just `craft:surface:agent`; other named panes are other `craft:surface:<name>` keys.
+- `pane_is_running` and `mux_pane_exists`: collapse into one surface existence check that reads the semantic surface metadata, then validates the recorded `surface_id` against `cmux tree`.
+- `kill_task_pane` and `mux_kill_named_pane`: collapse into one close path that closes the recorded surface and clears the corresponding semantic surface metadata key.
 - `mux_send_to_pane`: send to the recorded terminal `surface_id`; this is detached-safe for terminal/agent surfaces only.
-- `mux_pane_exists`: use hidden metadata plus `tree`.
-- `mux_kill_named_pane`: close the recorded surface and clear the hidden metadata key.
 - status/banner helpers: keep using `set-status`, `clear-status`, and `list-status` for visible operator feedback. Do not use status entries as identity or lookup state.
 
 The existing discoverer-specific path should become a normal agent surface with different Craft-side configuration. cmux does not need special discoverer behavior.
