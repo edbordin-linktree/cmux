@@ -211,7 +211,7 @@ doneFlags:
 	// refreshAddr is set when the address came from socket_addr file (not env/flag),
 	// allowing one stale-address refresh if another workspace has replaced socket_addr.
 	var refreshAddr func() string
-	if socketPath == "" {
+	if socketPath == "" && !shouldSkipImplicitSocketAddr(cmdName) {
 		socketPath = readSocketAddrFile()
 		refreshAddr = readSocketAddrFile
 	}
@@ -284,6 +284,16 @@ doneFlags:
 		fmt.Fprintf(os.Stderr, "cmux: internal error: unknown protocol for %q\n", cmdName)
 		return 1
 	}
+}
+
+func shouldSkipImplicitSocketAddr(cmdName string) bool {
+	if !hasHeadlessRemoteContext() {
+		return false
+	}
+	if cmdName == "ssh" {
+		return true
+	}
+	return commandMayUseHeadlessNoSocket(cmdName)
 }
 
 // execV1 sends a v1 text command over the socket.

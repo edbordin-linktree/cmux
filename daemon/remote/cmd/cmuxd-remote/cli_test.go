@@ -1660,6 +1660,71 @@ func TestCLIHeadlessSSHSameHostFallbackCreatesDetachedSnapshot(t *testing.T) {
 	}
 }
 
+func TestCLIHeadlessSSHIgnoresImplicitSocketAddrInRemoteContext(t *testing.T) {
+	root := t.TempDir()
+	cwd := filepath.Join(root, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	home := t.TempDir()
+	cmuxDir := filepath.Join(home, ".cmux")
+	if err := os.MkdirAll(cmuxDir, 0o700); err != nil {
+		t.Fatalf("mkdir cmux dir: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CMUX_SOCKET_PATH", "")
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", "caller-workspace")
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", "ssh-caller")
+
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+	if err := os.WriteFile(filepath.Join(cmuxDir, "socket_addr"), []byte(sockPath), 0o600); err != nil {
+		t.Fatalf("write socket_addr: %v", err)
+	}
+
+	oldStartPTY := headlessStartPTYFunc
+	var startedSlot string
+	headlessStartPTYFunc = func(slot, sessionID, attachmentID, command string) error {
+		startedSlot = slot
+		return nil
+	}
+	t.Cleanup(func() { headlessStartPTYFunc = oldStartPTY })
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--json", "ssh", "localhost", "--cwd", cwd, "--name", "No Socket Detached Task"})
+		if code != 0 {
+			t.Fatalf("ssh returned %d", code)
+		}
+	})
+	select {
+	case req := <-requests:
+		t.Fatalf("ssh without explicit socket should not borrow implicit socket_addr in remote context, got request %#v", req)
+	case <-time.After(100 * time.Millisecond):
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	slot := stringFromAny(result["persistent_daemon_slot"])
+	if slot == "" || startedSlot != slot {
+		t.Fatalf("slot result=%q started=%q", slot, startedSlot)
+	}
+	if got, _ := result["detached"].(bool); !got {
+		t.Fatalf("detached = %v, want true", result["detached"])
+	}
+	var meta workspaceSnapshotMeta
+	metaBytes, err := os.ReadFile(filepath.Join(root, slot, workspaceSnapshotMetaFile))
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("decode meta: %v", err)
+	}
+	if meta.Status != "detached" {
+		t.Fatalf("meta status = %q, want detached", meta.Status)
+	}
+}
+
 func TestCLIHeadlessNewWorkspaceDoesNotCreateDetachedSnapshot(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
