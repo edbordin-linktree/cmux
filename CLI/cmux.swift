@@ -7375,45 +7375,11 @@ struct CMUXCLI {
             "rehash >/dev/null 2>&1 || true",
         ])
         let relayWarmupLines = interactiveRemoteRelayWarmupLines(remoteRelayPort: remoteRelayPort)
-        var zshShellLines = commonShellExportLines
-        zshShellLines.append(
-            #"if [ "${CMUX_SHELL_INTEGRATION:-1}" != "0" ] && [ -r "${CMUX_SHELL_INTEGRATION_DIR}/cmux-zsh-integration.zsh" ]; then . "${CMUX_SHELL_INTEGRATION_DIR}/cmux-zsh-integration.zsh"; fi"#
-        )
-        var bashShellLines = commonShellExportLines
-        bashShellLines.append(
-            #"if [ "${CMUX_SHELL_INTEGRATION:-1}" != "0" ] && [ -r "${CMUX_SHELL_INTEGRATION_DIR}/cmux-bash-integration.bash" ]; then . "${CMUX_SHELL_INTEGRATION_DIR}/cmux-bash-integration.bash"; fi"#
-        )
-        let zshBootstrap = RemoteRelayZshBootstrap(shellStateDir: shellStateDir)
-        let zshEnvLines = zshBootstrap.zshEnvLines
-        let zshProfileLines = zshBootstrap.zshProfileLines
-        let zshRCLines = zshBootstrap.zshRCLines(commonShellLines: zshShellLines)
-        let zshLoginLines = zshBootstrap.zshLoginLines
-        let bundledZshIntegration = bundledShellIntegrationScript(named: "cmux-zsh-integration.zsh")
-        let bundledBashIntegration = bundledShellIntegrationScript(named: "cmux-bash-integration.bash")
-        let bashRCLines = [
-            "if [ -f \"$HOME/.bash_profile\" ]; then . \"$HOME/.bash_profile\"; elif [ -f \"$HOME/.bash_login\" ]; then . \"$HOME/.bash_login\"; elif [ -f \"$HOME/.profile\" ]; then . \"$HOME/.profile\"; fi",
-            "[ -f \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"",
-        ] + bashShellLines
 
         var outerLines: [String] = [
             "mkdir -p \"$HOME/.cmux/relay\"",
-            "cmux_shell_dir=\"\(shellStateDir)\"",
-            "mkdir -p \"$cmux_shell_dir\"",
+            "mkdir -p \"\(shellStateDir)\"",
         ]
-        if let bundledZshIntegration {
-            outerLines += [
-                "cat > \"$cmux_shell_dir/cmux-zsh-integration.zsh\" <<'CMUXCMUXZSH'",
-                bundledZshIntegration,
-                "CMUXCMUXZSH",
-            ]
-        }
-        if let bundledBashIntegration {
-            outerLines += [
-                "cat > \"$cmux_shell_dir/cmux-bash-integration.bash\" <<'CMUXCMUXBASH'",
-                bundledBashIntegration,
-                "CMUXCMUXBASH",
-            ]
-        }
         outerLines.append(contentsOf: commonShellExportLines)
         if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
             outerLines.append("cd -- \(shellQuote(cwd)) || exit $?")
@@ -7425,57 +7391,8 @@ struct CMUXCLI {
             return outerLines.joined(separator: "\n")
         }
         outerLines += [
-            "CMUX_LOGIN_SHELL=\"${SHELL:-/bin/zsh}\"",
-            "case \"${CMUX_LOGIN_SHELL##*/}\" in",
-            "  zsh)",
-            "    cat > \"$cmux_shell_dir/.zshenv\" <<'CMUXZSHENV'",
-        ]
-        outerLines.append(contentsOf: zshEnvLines)
-        outerLines += [
-            "CMUXZSHENV",
-            "    cat > \"$cmux_shell_dir/.zprofile\" <<'CMUXZSHPROFILE'",
-        ]
-        outerLines.append(contentsOf: zshProfileLines)
-        outerLines += [
-            "CMUXZSHPROFILE",
-            "    cat > \"$cmux_shell_dir/.zshrc\" <<'CMUXZSHRC'",
-        ]
-        outerLines.append(contentsOf: zshRCLines)
-        outerLines += [
-            "CMUXZSHRC",
-            "    cat > \"$cmux_shell_dir/.zlogin\" <<'CMUXZSHLOGIN'",
-        ]
-        outerLines.append(contentsOf: zshLoginLines)
-        outerLines += [
-            "CMUXZSHLOGIN",
-            "    chmod 600 \"$cmux_shell_dir/.zshenv\" \"$cmux_shell_dir/.zprofile\" \"$cmux_shell_dir/.zshrc\" \"$cmux_shell_dir/.zlogin\" >/dev/null 2>&1 || true",
-        ]
-        outerLines.append(contentsOf: relayWarmupLines.map { "    " + $0 })
-        outerLines += [
-            "    export CMUX_REAL_ZDOTDIR=\"${ZDOTDIR:-$HOME}\"",
-            "    export ZDOTDIR=\"$cmux_shell_dir\"",
-            "    exec \"$CMUX_LOGIN_SHELL\" -il",
-            "    ;;",
-            "  bash)",
-            "    cat > \"$cmux_shell_dir/.bashrc\" <<'CMUXBASHRC'",
-        ]
-        outerLines.append(contentsOf: bashRCLines)
-        outerLines += [
-            "CMUXBASHRC",
-            "    chmod 600 \"$cmux_shell_dir/.bashrc\" >/dev/null 2>&1 || true",
-        ]
-        outerLines.append(contentsOf: relayWarmupLines.map { "    " + $0 })
-        outerLines += [
-            "    exec \"$CMUX_LOGIN_SHELL\" --rcfile \"$cmux_shell_dir/.bashrc\" -i",
-            "    ;;",
-            "  *)",
-        ]
-        outerLines.append(contentsOf: commonShellExportLines)
-        outerLines.append(contentsOf: relayWarmupLines)
-        outerLines += [
-            "exec \"$CMUX_LOGIN_SHELL\" -i",
-            ";;",
-            "esac",
+            "CMUX_LOGIN_SHELL=\"${SHELL:-/bin/bash}\"",
+            "exec \"$CMUX_LOGIN_SHELL\" -l",
         ]
 
         return outerLines.joined(separator: "\n")
