@@ -14445,7 +14445,9 @@ private struct TabItemView: View, Equatable {
                     _ = try await RemoteWorkspaceSnapshotDetachController.detach(workspaceID: workspaceId)
                 } catch {
                     NSSound.beep()
+#if DEBUG
                     cmuxDebugLog("sidebar.contextMenu.detach.failed workspace=\(workspaceId) error=\(error.localizedDescription)")
+#endif
                 }
             }
         }

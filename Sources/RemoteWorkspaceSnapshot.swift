@@ -23,6 +23,7 @@ struct RemoteWorkspaceSnapshotV1: Codable, Sendable, Equatable {
     var activePaneId: UUID?
     var displayTarget: String
     var metadataEntries: [String: String]? = nil
+    var statusEntries: [RemoteWorkspaceStatusEntrySnapshot]? = nil
 }
 
 enum PaneSnapshot: Codable, Sendable, Equatable {
@@ -89,6 +90,17 @@ struct BrowserPaneSnapshot: Codable, Sendable, Equatable {
 struct MarkdownViewerPaneSnapshot: Codable, Sendable, Equatable {
     var paneId: UUID
     var path: String
+}
+
+struct RemoteWorkspaceStatusEntrySnapshot: Codable, Sendable, Equatable {
+    var key: String
+    var value: String
+    var icon: String?
+    var color: String?
+    var url: String?
+    var priority: Int
+    var format: String
+    var timestamp: Date
 }
 
 enum RemoteWorkspaceSnapshotCodec {
@@ -635,7 +647,10 @@ extension Workspace {
             displayTarget: configuration.displayTarget + slotSuffix,
             metadataEntries: session.metadataEntries.map { entries in
                 Dictionary(uniqueKeysWithValues: entries.map { ($0.key, $0.value) })
-            }
+            },
+            statusEntries: statusEntries.values
+                .sorted { lhs, rhs in lhs.key < rhs.key }
+                .map(Self.remoteStatusEntrySnapshot(from:))
         )
     }
 
@@ -674,6 +689,7 @@ extension Workspace {
     ) -> RemoteWorkspaceRestoreResult {
         let session = Self.sessionSnapshot(from: snapshot, remote: remote)
         let panelIdMap = restoreSessionSnapshot(session)
+        applyRemoteWorkspaceStatusEntries(snapshot.statusEntries)
         let restored = snapshot.panes.reduce(0) { count, pane in
             count + (panelIdMap[Self.panelId(from: pane)] == nil ? 0 : 1)
         }
@@ -682,6 +698,40 @@ extension Workspace {
             panesRestored: restored,
             panesLost: max(0, snapshot.panes.count - restored)
         )
+    }
+
+    private static func remoteStatusEntrySnapshot(from entry: SidebarStatusEntry) -> RemoteWorkspaceStatusEntrySnapshot {
+        RemoteWorkspaceStatusEntrySnapshot(
+            key: entry.key,
+            value: entry.value,
+            icon: entry.icon,
+            color: entry.color,
+            url: entry.url?.absoluteString,
+            priority: entry.priority,
+            format: entry.format.rawValue,
+            timestamp: entry.timestamp
+        )
+    }
+
+    private func applyRemoteWorkspaceStatusEntries(_ entries: [RemoteWorkspaceStatusEntrySnapshot]?) {
+        statusEntries.removeAll(keepingCapacity: true)
+        guard let entries else { return }
+        for entry in entries {
+            let trimmedKey = entry.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedKey.isEmpty else { continue }
+            let url = entry.url
+                .flatMap { URL(string: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            statusEntries[trimmedKey] = SidebarStatusEntry(
+                key: trimmedKey,
+                value: entry.value,
+                icon: entry.icon,
+                color: entry.color,
+                url: url,
+                priority: entry.priority,
+                format: SidebarMetadataFormat(rawValue: entry.format) ?? .plain,
+                timestamp: entry.timestamp
+            )
+        }
     }
 
     private static func remotePaneSnapshot(from panel: SessionPanelSnapshot) throws -> PaneSnapshot {

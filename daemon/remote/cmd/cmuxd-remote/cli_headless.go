@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,7 +31,9 @@ func runHeadlessCLICommand(commandName, method string, params map[string]any, js
 	case "metadata.set", "metadata.get", "metadata.list", "metadata.clear",
 		"workspace.lookup", "system.tree",
 		"surface.create", "pane.create", "surface.split", "surface.close",
-		"surface.send_text", "surface.send_key":
+		"surface.send_text", "surface.send_key",
+		"workspace.rename", "tab.action",
+		"status.set", "status.clear", "status.list":
 	default:
 		return 0, false
 	}
@@ -82,6 +85,16 @@ func runHeadlessCLIResult(method string, params map[string]any) (map[string]any,
 		return headlessSendText(params)
 	case "surface.send_key":
 		return headlessSendKey(params)
+	case "workspace.rename":
+		return headlessRenameWorkspace(params)
+	case "tab.action":
+		return headlessTabAction(params)
+	case "status.set":
+		return headlessStatusSet(params)
+	case "status.clear":
+		return headlessStatusClear(params)
+	case "status.list":
+		return headlessStatusList(params)
 	default:
 		return nil, fmt.Errorf("unsupported detached command %q", method)
 	}
@@ -447,6 +460,117 @@ func headlessCloseSurface(params map[string]any) (map[string]any, error) {
 	}, nil
 }
 
+func headlessRenameWorkspace(params map[string]any) (map[string]any, error) {
+	title := strings.TrimSpace(stringFromAny(params["title"]))
+	if title == "" {
+		return nil, errors.New("workspace.rename requires title")
+	}
+	snap, err := loadHeadlessSnapshot(params)
+	if err != nil {
+		return nil, err
+	}
+	snap.body["title"] = title
+	snap.meta.Title = title
+	sha, err := storeHeadlessSnapshot(snap)
+	if err != nil {
+		return nil, err
+	}
+	workspaceID := snap.meta.WorkspaceID
+	if workspaceID == "" {
+		workspaceID = stringFromAny(snap.body["workspaceId"])
+	}
+	return map[string]any{
+		"workspace_id":    workspaceID,
+		"workspace_ref":   "workspace:" + workspaceID,
+		"title":           title,
+		"detached":        true,
+		"snapshot_sha256": sha,
+	}, nil
+}
+
+func headlessTabAction(params map[string]any) (map[string]any, error) {
+	action := strings.ToLower(strings.TrimSpace(stringFromAny(params["action"])))
+	if action == "" {
+		action = "rename"
+	}
+	if action != "rename" {
+		return nil, fmt.Errorf("unsupported detached tab action %q", action)
+	}
+	return headlessRenameSurface(params)
+}
+
+func headlessRenameSurface(params map[string]any) (map[string]any, error) {
+	title := strings.TrimSpace(stringFromAny(params["title"]))
+	if title == "" {
+		return nil, errors.New("tab.action rename requires title")
+	}
+	snap, err := loadHeadlessSnapshot(params)
+	if err != nil {
+		return nil, err
+	}
+	surfaceID := headlessNormalizeID(stringFromAny(params["surface_id"]))
+	if surfaceID == "" {
+		surfaceID = headlessNormalizeID(os.Getenv("CMUX_TAB_ID"))
+	}
+	if surfaceID == "" {
+		surfaceID = headlessNormalizeID(os.Getenv("CMUX_SURFACE_ID"))
+	}
+	if surfaceID == "" {
+		surfaceID = headlessNormalizeID(stringFromAny(snap.body["activePaneId"]))
+	}
+	if surfaceID == "" {
+		return nil, errors.New("tab.action rename requires surface_id or active surface")
+	}
+	panes := headlessPaneSnapshots(snap.body)
+	found := false
+	for _, pane := range panes {
+		if !strings.EqualFold(headlessPaneSnapshotID(pane), surfaceID) {
+			continue
+		}
+		found = true
+		switch stringFromAny(pane["type"]) {
+		case "terminal":
+			terminal, _ := pane["terminal"].(map[string]any)
+			if terminal == nil {
+				terminal = map[string]any{}
+				pane["terminal"] = terminal
+			}
+			terminal["title"] = title
+		case "browser":
+			browser, _ := pane["browser"].(map[string]any)
+			if browser == nil {
+				browser = map[string]any{}
+				pane["browser"] = browser
+			}
+			browser["title"] = title
+		default:
+			return nil, fmt.Errorf("surface %s does not support detached rename", surfaceID)
+		}
+		break
+	}
+	if !found {
+		return nil, fmt.Errorf("surface %s not found in detached snapshot", surfaceID)
+	}
+	snap.body["panes"] = panes
+	sha, err := storeHeadlessSnapshot(snap)
+	if err != nil {
+		return nil, err
+	}
+	workspaceID := snap.meta.WorkspaceID
+	if workspaceID == "" {
+		workspaceID = stringFromAny(snap.body["workspaceId"])
+	}
+	return map[string]any{
+		"workspace_id":    workspaceID,
+		"workspace_ref":   "workspace:" + workspaceID,
+		"surface_id":      surfaceID,
+		"surface_ref":     "surface:" + surfaceID,
+		"title":           title,
+		"detached":        true,
+		"snapshot_sha256": sha,
+	}, nil
+}
+
 func headlessSendText(params map[string]any) (map[string]any, error) {
 	snap, surfaceID, sessionID, err := headlessTargetTerminal(params)
 	if err != nil {
@@ -464,6 +588,100 @@ func headlessSendText(params map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	return headlessSendResultPayload(snap, surfaceID, result), nil
+}
+
+func headlessStatusSet(params map[string]any) (map[string]any, error) {
+	key := strings.TrimSpace(stringFromAny(params["key"]))
+	value := stringFromAny(params["value"])
+	if key == "" {
+		return nil, errors.New("status.set requires key")
+	}
+	snap, err := loadHeadlessSnapshot(params)
+	if err != nil {
+		return nil, err
+	}
+	entry := map[string]any{
+		"key":       key,
+		"value":     value,
+		"priority":  intFromAny(params["priority"]),
+		"format":    firstNonEmptyString(stringFromAny(params["format"]), "plain"),
+		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	for _, field := range []string{"icon", "color", "url"} {
+		if value := strings.TrimSpace(stringFromAny(params[field])); value != "" {
+			entry[field] = value
+		}
+	}
+	entries := headlessStatusEntries(snap.body)
+	replaced := false
+	for i, existing := range entries {
+		if strings.EqualFold(stringFromAny(existing["key"]), key) {
+			entries[i] = entry
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		entries = append(entries, entry)
+	}
+	snap.body["statusEntries"] = entries
+	sha, err := storeHeadlessSnapshot(snap)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"key":             key,
+		"value":           value,
+		"detached":        true,
+		"snapshot_sha256": sha,
+	}, nil
+}
+
+func headlessStatusClear(params map[string]any) (map[string]any, error) {
+	key := strings.TrimSpace(stringFromAny(params["key"]))
+	if key == "" {
+		return nil, errors.New("status.clear requires key")
+	}
+	snap, err := loadHeadlessSnapshot(params)
+	if err != nil {
+		return nil, err
+	}
+	entries := headlessStatusEntries(snap.body)
+	out := entries[:0]
+	cleared := false
+	for _, entry := range entries {
+		if strings.EqualFold(stringFromAny(entry["key"]), key) {
+			cleared = true
+			continue
+		}
+		out = append(out, entry)
+	}
+	if len(out) == 0 {
+		delete(snap.body, "statusEntries")
+	} else {
+		snap.body["statusEntries"] = out
+	}
+	sha, err := storeHeadlessSnapshot(snap)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"key":             key,
+		"cleared":         cleared,
+		"detached":        true,
+		"snapshot_sha256": sha,
+	}, nil
+}
+
+func headlessStatusList(params map[string]any) (map[string]any, error) {
+	snap, err := loadHeadlessSnapshot(params)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"entries":  headlessStatusEntries(snap.body),
+		"detached": true,
+	}, nil
 }
 
 func headlessSendKey(params map[string]any) (map[string]any, error) {
@@ -930,6 +1148,23 @@ func headlessPaneSnapshots(body map[string]any) []map[string]any {
 	return out
 }
 
+func headlessStatusEntries(body map[string]any) []map[string]any {
+	if typed, ok := body["statusEntries"].([]map[string]any); ok {
+		return append([]map[string]any(nil), typed...)
+	}
+	raw, _ := body["statusEntries"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		if m, ok := item.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return stringFromAny(out[i]["key"]) < stringFromAny(out[j]["key"])
+	})
+	return out
+}
+
 func headlessPaneSnapshotID(pane map[string]any) string {
 	switch stringFromAny(pane["type"]) {
 	case "terminal":
@@ -1051,6 +1286,9 @@ func intFromAny(value any) int {
 	case json.Number:
 		i, _ := typed.Int64()
 		return int(i)
+	case string:
+		i, _ := strconv.Atoi(strings.TrimSpace(typed))
+		return i
 	default:
 		return 0
 	}

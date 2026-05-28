@@ -77,6 +77,8 @@ var commands = []commandSpec{
 	{name: "close-workspace", proto: protoV2, v2Method: "workspace.close", flagKeys: []string{"workspace"}},
 	{name: "select-workspace", proto: protoV2, v2Method: "workspace.select", flagKeys: []string{"workspace"}},
 	{name: "current-workspace", proto: protoV2, v2Method: "workspace.current", noParams: true},
+	{name: "rename-workspace", proto: protoV2, v2Method: "workspace.rename", flagKeys: []string{"workspace", "title"}},
+	{name: "rename-window", proto: protoV2, v2Method: "workspace.rename", flagKeys: []string{"workspace", "title"}},
 	{name: "list-panels", proto: protoV2, v2Method: "surface.list", flagKeys: []string{"workspace"}},
 	{name: "focus-panel", proto: protoV2, v2Method: "surface.focus", flagKeys: []string{"panel", "workspace"}, paramKeyOverrides: map[string]string{"panel": "surface_id"}},
 	{name: "list-panes", proto: protoV2, v2Method: "pane.list", flagKeys: []string{"workspace"}},
@@ -87,6 +89,7 @@ var commands = []commandSpec{
 	{name: "close-surface", proto: protoV2, v2Method: "surface.close", flagKeys: []string{"surface"}},
 	{name: "send", proto: protoV2, v2Method: "surface.send_text", flagKeys: []string{"surface", "text"}},
 	{name: "send-key", proto: protoV2, v2Method: "surface.send_key", flagKeys: []string{"surface", "key"}},
+	{name: "rename-tab", proto: protoV2, v2Method: "tab.action", flagKeys: []string{"workspace", "surface", "tab", "title"}, paramKeyOverrides: map[string]string{"tab": "surface_id"}, defaultParams: map[string]any{"action": "rename"}},
 	{name: "notify", proto: protoV2, v2Method: "notification.create", flagKeys: []string{"title", "body", "workspace"}},
 	{name: "refresh-surfaces", proto: protoV2, v2Method: "surface.refresh", noParams: true},
 }
@@ -199,6 +202,9 @@ doneFlags:
 	if cmdName == "workspace" {
 		return runWorkspaceRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
 	}
+	if cmdName == "set-status" || cmdName == "clear-status" || cmdName == "list-status" {
+		return runStatusRelay(socketPath, cmdName, cmdArgs, jsonOutput, refreshAddr)
+	}
 
 	// Agent launch commands
 	if cmdName == "claude-teams" {
@@ -301,6 +307,10 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 			if _, ok := params["key"]; !ok && len(parsed.positional) > 0 {
 				params["key"] = parsed.positional[0]
 			}
+		case "rename-workspace", "rename-window", "rename-tab":
+			if _, ok := params["title"]; !ok && len(parsed.positional) > 0 {
+				params["title"] = strings.Join(parsed.positional, " ")
+			}
 		default:
 			// First positional arg is used as initial_command if --command wasn't given.
 			if _, ok := params["initial_command"]; !ok && len(parsed.positional) > 0 {
@@ -327,6 +337,128 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 		fmt.Println(defaultRelayOutput(resp))
 	}
 	return 0
+}
+
+func runStatusRelay(socketPath string, cmdName string, args []string, jsonOutput bool, refreshAddr func() string) int {
+	var method string
+	var socketCommand string
+	var params map[string]any
+	var err error
+	switch cmdName {
+	case "set-status":
+		method = "status.set"
+		socketCommand, params, err = parseSetStatusCommand(args)
+	case "clear-status":
+		method = "status.clear"
+		socketCommand, params, err = parseClearStatusCommand(args)
+	case "list-status":
+		method = "status.list"
+		socketCommand, params, err = parseListStatusCommand(args)
+	default:
+		err = fmt.Errorf("unsupported status command %q", cmdName)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
+		return 2
+	}
+	resp, err := socketRoundTrip(socketPath, socketCommand, refreshAddr)
+	if err != nil {
+		if code, handled := runHeadlessCLICommand(cmdName, method, params, jsonOutput, err); handled {
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
+		return 1
+	}
+	fmt.Print(resp)
+	if !strings.HasSuffix(resp, "\n") {
+		fmt.Println()
+	}
+	return 0
+}
+
+func parseSetStatusCommand(args []string) (string, map[string]any, error) {
+	parsed, err := parseFlags(args, []string{"workspace", "icon", "color", "url", "priority", "format"})
+	if err != nil {
+		return "", nil, err
+	}
+	if len(parsed.positional) < 2 {
+		return "", nil, errors.New("set-status requires <key> <value>")
+	}
+	params := map[string]any{
+		"key":   parsed.positional[0],
+		"value": strings.Join(parsed.positional[1:], " "),
+	}
+	parts := []string{"set_status", shellQuoteForSocket(params["key"].(string)), shellQuoteForSocket(params["value"].(string))}
+	for _, flag := range []string{"icon", "color", "url", "priority", "format"} {
+		if value, ok := parsed.flags[flag]; ok {
+			params[flag] = value
+			parts = append(parts, fmt.Sprintf("--%s=%s", flag, shellQuoteForSocket(value)))
+		}
+	}
+	if workspace, ok := parsed.flags["workspace"]; ok {
+		params["workspace_id"] = workspace
+		parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
+	} else {
+		applyWorkspaceEnvFallback(params)
+		if workspace := stringFromAny(params["workspace_id"]); workspace != "" {
+			parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
+		}
+	}
+	return strings.Join(parts, " "), params, nil
+}
+
+func parseClearStatusCommand(args []string) (string, map[string]any, error) {
+	parsed, err := parseFlags(args, []string{"workspace"})
+	if err != nil {
+		return "", nil, err
+	}
+	if len(parsed.positional) != 1 {
+		return "", nil, errors.New("clear-status requires <key>")
+	}
+	params := map[string]any{"key": parsed.positional[0]}
+	parts := []string{"clear_status", shellQuoteForSocket(parsed.positional[0])}
+	if workspace, ok := parsed.flags["workspace"]; ok {
+		params["workspace_id"] = workspace
+		parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
+	} else {
+		applyWorkspaceEnvFallback(params)
+		if workspace := stringFromAny(params["workspace_id"]); workspace != "" {
+			parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
+		}
+	}
+	return strings.Join(parts, " "), params, nil
+}
+
+func parseListStatusCommand(args []string) (string, map[string]any, error) {
+	parsed, err := parseFlags(args, []string{"workspace"})
+	if err != nil {
+		return "", nil, err
+	}
+	if len(parsed.positional) > 0 {
+		return "", nil, errors.New("list-status does not accept positional arguments")
+	}
+	params := map[string]any{}
+	parts := []string{"list_status"}
+	if workspace, ok := parsed.flags["workspace"]; ok {
+		params["workspace_id"] = workspace
+		parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
+	} else {
+		applyWorkspaceEnvFallback(params)
+		if workspace := stringFromAny(params["workspace_id"]); workspace != "" {
+			parts = append(parts, "--tab="+shellQuoteForSocket(workspace))
+		}
+	}
+	return strings.Join(parts, " "), params, nil
+}
+
+func shellQuoteForSocket(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(value, " \t\n\r'\"\\$`!|&;()<>*?[]{}") {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func runTreeRelay(socketPath string, args []string, jsonOutput bool, refreshAddr func() string) int {
@@ -764,6 +896,8 @@ func flagToParamKey(key string) string {
 		return "panel_id"
 	case "pane":
 		return "pane_id"
+	case "tab":
+		return "surface_id"
 	case "window":
 		return "window_id"
 	case "command":

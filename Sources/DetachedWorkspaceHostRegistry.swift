@@ -127,7 +127,9 @@ enum DetachedWorkspaceHostRegistry {
         let backupURL = fileURL.deletingLastPathComponent()
             .appendingPathComponent("detached-hosts.json.bak.\(stamp)")
         try FileManager.default.moveItem(at: fileURL, to: backupURL)
+#if DEBUG
         cmuxDebugLog("detached-hosts unsupported version; moved to \(backupURL.path)")
+#endif
     }
 
     private static func fsyncFile(at url: URL) throws {

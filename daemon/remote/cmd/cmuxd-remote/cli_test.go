@@ -1283,6 +1283,99 @@ func TestCLIHeadlessNewPaneAcceptsFocusFalse(t *testing.T) {
 	}
 }
 
+func TestCLIHeadlessRenameWorkspaceAndTabFallbackMutatesSnapshot(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+	t.Setenv("CMUX_SURFACE_ID", "11111111-1111-4111-8111-111111111111")
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "rename-workspace", "Detached Renamed"})
+		if code != 0 {
+			t.Fatalf("rename-workspace returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"title":"Detached Renamed"`) {
+		t.Fatalf("rename-workspace output = %s", output)
+	}
+	body := readHeadlessCLITestBody(t, root, slot)
+	if got := stringFromAny(body["title"]); got != "Detached Renamed" {
+		t.Fatalf("workspace title = %q, want Detached Renamed", got)
+	}
+
+	output = captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "rename-tab", "--surface", "surface:11111111-1111-4111-8111-111111111111", "Agent Surface"})
+		if code != 0 {
+			t.Fatalf("rename-tab returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"title":"Agent Surface"`) {
+		t.Fatalf("rename-tab output = %s", output)
+	}
+	body = readHeadlessCLITestBody(t, root, slot)
+	panes := headlessPaneSnapshots(body)
+	terminal, _ := panes[0]["terminal"].(map[string]any)
+	if got := stringFromAny(terminal["title"]); got != "Agent Surface" {
+		t.Fatalf("terminal title = %q, want Agent Surface", got)
+	}
+}
+
+func TestCLIHeadlessStatusFallbackMutatesSnapshot(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "set-status", "build", "compiling", "--icon", "hammer", "--color", "#ff9500", "--priority", "80"})
+		if code != 0 {
+			t.Fatalf("set-status returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"snapshot_sha256"`) {
+		t.Fatalf("set-status output missing snapshot hash: %s", output)
+	}
+	body := readHeadlessCLITestBody(t, root, slot)
+	entries := headlessStatusEntries(body)
+	if len(entries) != 1 {
+		t.Fatalf("status entries = %v, want one", entries)
+	}
+	if got := stringFromAny(entries[0]["key"]); got != "build" {
+		t.Fatalf("status key = %q, want build", got)
+	}
+	if got := stringFromAny(entries[0]["value"]); got != "compiling" {
+		t.Fatalf("status value = %q, want compiling", got)
+	}
+	if got := intFromAny(entries[0]["priority"]); got != 80 {
+		t.Fatalf("status priority = %d, want 80", got)
+	}
+
+	output = captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "list-status"})
+		if code != 0 {
+			t.Fatalf("list-status returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"key":"build"`) {
+		t.Fatalf("list-status output = %s", output)
+	}
+
+	output = captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "clear-status", "build"})
+		if code != 0 {
+			t.Fatalf("clear-status returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"cleared":true`) {
+		t.Fatalf("clear-status output = %s", output)
+	}
+	body = readHeadlessCLITestBody(t, root, slot)
+	if got := len(headlessStatusEntries(body)); got != 0 {
+		t.Fatalf("status entries after clear = %d, want 0", got)
+	}
+}
+
 func writeHeadlessCLITestSnapshot(t *testing.T) (root string, workspaceID string, slot string) {
 	t.Helper()
 	root = t.TempDir()

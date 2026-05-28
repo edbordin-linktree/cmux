@@ -21,7 +21,7 @@ This branch builds a workspace illusion on top of that PTY layer:
 
 - while attached, Swift periodically writes a workspace snapshot to the remote daemon slot;
 - when the user detaches, Swift stores a final `detached` snapshot, detaches terminal surfaces from their PTYs, releases local browser/UI surfaces, and removes the workspace from the Mac sidebar;
-- while detached or disconnected, scripts on the remote host can perform a restricted set of mutations against that snapshot;
+- while detached or disconnected, scripts on the remote host can perform a restricted set of mutations against that snapshot, including metadata, layout, names, and status banners;
 - while detached or disconnected, scripts can also send input to known terminal surfaces through authenticated daemon PTY-session RPCs;
 - when the user attaches or reconnects, Swift fetches the remote snapshot, rebuilds the workspace UI locally, and reattaches terminal surfaces to the still-running remote PTYs.
 
@@ -44,7 +44,7 @@ PTYs are identified separately by `session_id` values, usually derived from work
 
 ## Current Branch Additions
 
-This branch adds detached remote workspace snapshots, hidden workspace metadata, a Host Manager UI, and a restricted remote-headless command path for scripts running on an SSH host.
+This branch adds detached remote workspace snapshots, hidden workspace metadata, snapshot-backed workspace status banners, a Host Manager UI, and a restricted remote-headless command path for scripts running on an SSH host.
 
 The core behavior Craft should rely on is:
 
@@ -55,6 +55,7 @@ The core behavior Craft should rely on is:
 - A `cmux` command running inside a remote cmux terminal first tries the normal relay back to the Swift UI.
 - If the relay is unavailable, that remote `cmux` command can operate on the local remote snapshot for a restricted set of commands.
 - Detached `cmux send` and `cmux send-key` resolve a terminal surface from the snapshot, then call authenticated daemon PTY-session RPCs; they do not create temporary attachments.
+- Detached workspace/tab rename commands and status-banner commands mutate the remote snapshot directly, so the restored Swift UI reflects the remote-side state.
 - On reconnect/attach, the remote snapshot wins and Swift rebuilds local layout from it.
 
 ## Architecture Diagrams
@@ -88,8 +89,8 @@ flowchart LR
     PTY["persistent daemon PTY hub"]
     DCLI --> Headless
     Headless --> SlotDaemon
-    Headless -->|layout + metadata mutations| Snapshot
-    Headless -->|layout + metadata mutations| Meta
+    Headless -->|layout, metadata, name, status mutations| Snapshot
+    Headless -->|workspace title metadata| Meta
     Headless -->|send / send-key| SlotDaemon
     SlotDaemon -->|PTY session writes| PTY
   end
@@ -112,7 +113,7 @@ flowchart TB
     Slot["~/.cmux/daemon/<slot>/\none remote workspace container"]
     Daemon["cmuxd-remote\npersistent daemon"]
     PTYs["PTY sessions\nmany per slot"]
-    Body["workspace-snapshot.json\nlayout + panes + metadata"]
+    Body["workspace-snapshot.json\nlayout + panes + metadata + statuses"]
     Sidecar["workspace-snapshot.meta.json\nlist/attach metadata"]
 
     Wrapper --> Daemon
@@ -138,7 +139,7 @@ sequenceDiagram
   participant Snap as Remote snapshot files
   participant RemoteCLI as remote cmux CLI
 
-  Swift->>Swift: Workspace layout or metadata changes
+  Swift->>Swift: Workspace layout, metadata, name, or status changes
   Swift->>Daemon: workspace.snapshot.store(status=live)
   Daemon->>Snap: Atomic body + sidecar write
 
@@ -219,6 +220,8 @@ Metadata is persisted in:
 - remote snapshot store/fetch round trips;
 - detached remote snapshot mutations.
 
+Visible status banners are separate from hidden metadata. They are persisted in `RemoteWorkspaceSnapshotV1.statusEntries` and are restored after the workspace session snapshot is replayed.
+
 ### Metadata Lookup
 
 Workspace lookup can use hidden metadata instead of title prefixes:
@@ -257,6 +260,12 @@ cmux new-pane --workspace current --type terminal|browser [--direction <dir>] [-
 cmux new-surface --workspace current --type terminal|browser [--pane <pane>] [--url <url>] [--command <cmd>] [--focus true|false]
 cmux new-split <dir> --workspace current [--surface <surface>] [--type terminal|browser] [--url <url>] [--command <cmd>] [--focus true|false]
 cmux close-surface --workspace current --surface <surface>
+cmux rename-workspace [--workspace current] '<title>'
+cmux rename-window [--workspace current] '<title>'
+cmux rename-tab --surface <surface> '<title>'
+cmux set-status <key> <value> [--icon <icon>] [--color <color>] [--priority <n>]
+cmux clear-status <key>
+cmux list-status
 cmux send --surface <surface> -- '<text>'
 cmux send-key --surface <surface> <key>
 ```
@@ -282,13 +291,16 @@ cmux new-pane --workspace current --type browser --url '<url>'
 
 Use `send` / `send-key` when the script intentionally needs to interact with an already-running terminal process.
 
+`rename-workspace` and `rename-window` are aliases in this branch. In detached mode they update both the snapshot body title and the discovery sidecar title. `rename-tab` updates the saved pane title for terminal and browser surfaces; unsupported surface types return a clear error.
+
+`set-status`, `clear-status`, and `list-status` keep using the Swift socket while the relay is available. When the relay is unavailable, they mutate or read `RemoteWorkspaceSnapshotV1.statusEntries` in the remote snapshot. Status entries are visible UI state, not hidden metadata: they are intended for banners/badges that should reappear when Swift attaches or reconnects.
+
 ### Attached-Only Commands
 
 These still require an attached Swift UI:
 
 - focus and selection commands;
 - workspace/window movement;
-- cosmetic rename operations such as `rename-tab`;
 - browser automation or navigation after browser creation;
 - access to local Mac browser state such as cookies, scroll position, devtools, or WKWebView session data.
 
@@ -303,7 +315,7 @@ Remote snapshots have a `status`:
 
 Detach writes a `detached` snapshot and removes the local workspace. Attach restores the workspace using the original `workspaceId`, preserving the UUID across detach/attach, then writes a `live` snapshot instead of clearing it.
 
-When Swift reconnects to a workspace whose remote snapshot changed while detached or disconnected, the remote snapshot wins. Swift rebuilds local layout from the remote snapshot and validates PTYs during restore. Missing PTYs become lost placeholders.
+When Swift reconnects to a workspace whose remote snapshot changed while detached or disconnected, the remote snapshot wins. Swift rebuilds local layout from the remote snapshot, reapplies snapshot-backed status banners, and validates PTYs during restore. Missing PTYs become lost placeholders.
 
 ### Validated E2E Behavior
 
@@ -316,6 +328,8 @@ The current branch was tested on `ed@tdb` with the dev build:
 - created a browser pane from the remote host;
 - created a terminal pane from the remote host with `--command`;
 - sent text and `ctrl-d` to a detached terminal PTY through the remote daemon without creating a temporary attachment;
+- renamed the detached workspace and a terminal surface from the remote host;
+- set/listed/cleared a detached status banner through the remote snapshot;
 - reattached from the Mac;
 - preserved the original workspace UUID;
 - restored the remote-created terminal process and output;
@@ -323,7 +337,7 @@ The current branch was tested on `ed@tdb` with the dev build:
 
 ## Craft Integration Plan
 
-Craft should move cmux integration away from title-prefix and visible-status conventions. The new cmux branch provides enough hidden metadata and detached-safe primitives for Craft to keep task workspaces controllable while the Mac UI is detached or temporarily disconnected.
+Craft should move cmux integration away from title-prefix conventions. The new cmux branch provides enough hidden metadata and detached-safe primitives for Craft to keep task workspaces controllable while the Mac UI is detached or temporarily disconnected. Visible status banners can still be used for operator feedback because they now survive detach/attach and can be set from a detached remote session.
 
 ### Workspace Identity
 
@@ -419,6 +433,7 @@ Then update current Craft helpers:
 - `mux_send_to_pane`: send to the recorded terminal `surface_id`; this is detached-safe for terminal/agent surfaces only.
 - `mux_pane_exists`: use hidden metadata plus `tree`.
 - `mux_kill_named_pane`: close the recorded surface and clear the hidden metadata key.
+- status/banner helpers: keep using `set-status`, `clear-status`, and `list-status` for visible operator feedback. Do not use status entries as identity or lookup state.
 
 The existing discoverer-specific path should become a normal agent surface with different Craft-side configuration. cmux does not need special discoverer behavior.
 
@@ -433,12 +448,13 @@ Craft supervisor scripts can rely on these in attached and detached remote works
 - create browser surfaces with initial URLs;
 - send text or common keys to known terminal/agent surfaces;
 - close known surfaces.
+- rename task workspaces and known terminal/browser surfaces;
+- set, list, and clear visible status banners.
 
 Craft should not require these for detached supervisor correctness:
 
 - selecting or focusing a workspace/surface;
 - moving workspaces between windows;
-- renaming tabs/workspaces;
 - browser automation after initial browser creation.
 
 ### Example Detached-Safe Supervisor Flow
