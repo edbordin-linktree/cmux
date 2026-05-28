@@ -457,6 +457,29 @@ Craft should not require these for detached supervisor correctness:
 - moving workspaces between windows;
 - browser automation after initial browser creation.
 
+### Dashboard UI Actions
+
+The Craft dashboard web server should ideally run on the remote host inside the dashboard's cmux workspace. When that dashboard workspace is attached to the Mac Swift UI, the injected remote `cmux` wrapper has a live relay/socket path back to Swift. In that state, user-facing UI actions can use normal cmux commands and should behave as they do locally:
+
+```bash
+cmux select-workspace --workspace <workspace>
+cmux focus-panel --panel <surface>
+cmux ssh-workspace-attach --workspace-id <workspace-id> --json
+```
+
+These actions are different from supervisor-critical detached operations. They need an attached Swift UI because their purpose is to show or focus something in the Mac app. The remote daemon can keep PTYs and snapshots alive, but it cannot focus a Mac window or create a sidebar workspace by itself.
+
+Craft backend behavior should be:
+
+- resolve workspace and surface identity using detached-safe metadata/tree commands;
+- when a user clicks a UI action such as "show terminal", first attempt to focus/select through the relay;
+- if focus/select fails because the relay or Swift socket is unavailable, optionally run `cmux ssh-workspace-attach --workspace-id <id> --json` through the same relay when enough host/slot information is available;
+- after a successful attach, retry the focus/select action once;
+- if attach is unavailable or fails because there is no live Swift relay, return a graceful non-fatal response such as `cmux_ui_unavailable` instead of treating it as a backend crash;
+- do not retry UI focus/attach in a loop from background supervisor logic.
+
+This means a detached task can continue to run and mutate its remote snapshot, while dashboard affordances that require the Mac UI degrade cleanly. It may be desirable for "show terminal", "open task workspace", and similar buttons to auto-attach the workspace before focusing the requested surface, because that is the interaction a user probably expects when operating from an attached dashboard.
+
 ### Example Detached-Safe Supervisor Flow
 
 ```bash
