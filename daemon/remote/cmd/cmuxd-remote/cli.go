@@ -49,6 +49,8 @@ const (
 	protoV2
 )
 
+const detachedSnapshotRelayTimeout = 60 * time.Second
+
 // commandSpec describes a single CLI command and how to relay it.
 type commandSpec struct {
 	name     string          // CLI command name (e.g. "ping", "new-window")
@@ -485,7 +487,7 @@ func runStatusRelay(socketPath string, cmdName string, args []string, jsonOutput
 		return 1
 	}
 	_ = socketCommand // Kept for parser parity with the legacy v1 command shape.
-	resp, err := socketRoundTripV2(socketPath, method, params, refreshAddr)
+	resp, err := socketRoundTripV2WithTimeout(socketPath, method, params, refreshAddr, detachedSnapshotRelayTimeout)
 	if err != nil {
 		if shouldTryHeadlessFallback(err) {
 			if code, handled := runHeadlessCLICommand(cmdName, method, params, jsonOutput, err); handled {
@@ -1041,7 +1043,7 @@ func runMetadataRelay(socketPath string, args []string, jsonOutput bool, refresh
 		return 1
 	}
 
-	resp, err := socketRoundTripV2(socketPath, method, params, refreshAddr)
+	resp, err := socketRoundTripV2WithTimeout(socketPath, method, params, refreshAddr, detachedSnapshotRelayTimeout)
 	if err != nil {
 		if shouldTryHeadlessFallback(err) {
 			if code, handled := runHeadlessCLICommand("metadata "+sub, method, params, jsonOutput, err); handled {
@@ -1738,6 +1740,10 @@ func socketRoundTrip(socketPath, command string, refreshAddr func() string) (str
 
 // socketRoundTripV2 sends a JSON-RPC request and returns the result JSON.
 func socketRoundTripV2(socketPath, method string, params map[string]any, refreshAddr func() string) (string, error) {
+	return socketRoundTripV2WithTimeout(socketPath, method, params, refreshAddr, 15*time.Second)
+}
+
+func socketRoundTripV2WithTimeout(socketPath, method string, params map[string]any, refreshAddr func() string, timeout time.Duration) (string, error) {
 	conn, err := dialSocket(socketPath, refreshAddr)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to %s: %w", socketPath, err)
@@ -1764,7 +1770,10 @@ func socketRoundTripV2(socketPath, method string, params map[string]any, refresh
 		return "", fmt.Errorf("failed to send request: %w", err)
 	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadString('\n')
 	if err != nil {

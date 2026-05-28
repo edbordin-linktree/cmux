@@ -2405,6 +2405,7 @@ struct CMUXCLI {
     private static let vmCreateIdempotencyTTLSeconds: TimeInterval = 10 * 60
     private static let vmCreateResponseTimeoutSeconds: TimeInterval = 16 * 60
     private static let vmAttachResponseTimeoutSeconds: TimeInterval = 16 * 60
+    private static let detachedSnapshotMutationResponseTimeoutSeconds: TimeInterval = 60
     private static let claudeCodeStatusKey = "claude_code"
 
     private static var allowedAgentLifecycleStatusKeys: Set<String> {
@@ -6184,7 +6185,11 @@ struct CMUXCLI {
             }
             parsed.params["key"] = key
             parsed.params[jsonValueOpt == nil ? "value" : "json_value"] = value
-            let payload = try client.sendV2(method: "metadata.set", params: parsed.params)
+            let payload = try client.sendV2(
+                method: "metadata.set",
+                params: parsed.params,
+                responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds
+            )
             printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
 
         case "get":
@@ -6192,7 +6197,11 @@ struct CMUXCLI {
                 throw CLIError(message: "metadata get requires <key>")
             }
             parsed.params["key"] = key
-            let payload = try client.sendV2(method: "metadata.get", params: parsed.params)
+            let payload = try client.sendV2(
+                method: "metadata.get",
+                params: parsed.params,
+                responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds
+            )
             if jsonOutput {
                 print(jsonString(formatIDs(payload, mode: idFormat)))
             } else if (payload["exists"] as? Bool) == true {
@@ -6207,7 +6216,11 @@ struct CMUXCLI {
             if let prefixOpt {
                 parsed.params["prefix"] = prefixOpt
             }
-            let payload = try client.sendV2(method: "metadata.list", params: parsed.params)
+            let payload = try client.sendV2(
+                method: "metadata.list",
+                params: parsed.params,
+                responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds
+            )
             if jsonOutput {
                 print(jsonString(formatIDs(payload, mode: idFormat)))
             } else {
@@ -6224,7 +6237,11 @@ struct CMUXCLI {
                 throw CLIError(message: "metadata clear requires <key>")
             }
             parsed.params["key"] = key
-            let payload = try client.sendV2(method: "metadata.clear", params: parsed.params)
+            let payload = try client.sendV2(
+                method: "metadata.clear",
+                params: parsed.params,
+                responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds
+            )
             printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
 
         default:
@@ -6262,7 +6279,11 @@ struct CMUXCLI {
             if let url = urlOpt ?? linkOpt { parsed.params["url"] = url }
             if let priorityOpt { parsed.params["priority"] = priorityOpt }
             if let formatOpt { parsed.params["format"] = formatOpt }
-            let payload = try client.sendV2(method: "status.set", params: parsed.params)
+            let payload = try client.sendV2(
+                method: "status.set",
+                params: parsed.params,
+                responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds
+            )
             printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
 
         case "clear":
@@ -6270,7 +6291,11 @@ struct CMUXCLI {
                 throw CLIError(message: "clear-status requires <key>")
             }
             parsed.params["key"] = parsed.remaining[0]
-            let payload = try client.sendV2(method: "status.clear", params: parsed.params)
+            let payload = try client.sendV2(
+                method: "status.clear",
+                params: parsed.params,
+                responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds
+            )
             printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
 
         case "list":
@@ -6280,7 +6305,11 @@ struct CMUXCLI {
             guard parsed.remaining.isEmpty else {
                 throw CLIError(message: "list-status does not accept positional arguments")
             }
-            let payload = try client.sendV2(method: "status.list", params: parsed.params)
+            let payload = try client.sendV2(
+                method: "status.list",
+                params: parsed.params,
+                responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds
+            )
             if jsonOutput {
                 print(jsonString(formatIDs(payload, mode: idFormat)))
             } else {
