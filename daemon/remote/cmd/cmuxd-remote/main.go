@@ -1217,6 +1217,7 @@ func (s *rpcServer) handleRequest(req rpcRequest) rpcResponse {
 					"pty.session",
 					"pty.session.token",
 					"pty.session.persistent_daemon",
+					"pty.session.direct_write",
 					"workspace.snapshot",
 				},
 			},
@@ -1253,6 +1254,12 @@ func (s *rpcServer) handleRequest(req rpcRequest) rpcResponse {
 		return s.handlePTYAttach(req)
 	case "pty.write":
 		return s.handlePTYWrite(req)
+	case "pty.write_session":
+		return s.handlePTYWriteSession(req)
+	case "pty.send":
+		return s.handlePTYSend(req)
+	case "pty.send_key":
+		return s.handlePTYSendKey(req)
 	case "pty.resize":
 		return s.handlePTYResize(req)
 	case "pty.detach":
@@ -2198,6 +2205,208 @@ func (s *rpcServer) handlePTYWrite(req rpcRequest) rpcResponse {
 			"written": len(payload),
 		},
 	}
+}
+
+func (s *rpcServer) handlePTYWriteSession(req rpcRequest) rpcResponse {
+	sessionID, payload, badResp := parsePTYSessionWriteParams(req, "pty.write_session")
+	if badResp != nil {
+		return *badResp
+	}
+	return s.writePTYSessionPayload(req.ID, sessionID, payload)
+}
+
+func (s *rpcServer) handlePTYSend(req rpcRequest) rpcResponse {
+	sessionID, ok := getStringParam(req.Params, "session_id")
+	if !ok || strings.TrimSpace(sessionID) == "" {
+		return rpcResponse{
+			ID: req.ID,
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_params",
+				Message: "pty.send requires session_id",
+			},
+		}
+	}
+	text, ok := getStringParam(req.Params, "text")
+	if !ok {
+		return rpcResponse{
+			ID: req.ID,
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_params",
+				Message: "pty.send requires text",
+			},
+		}
+	}
+	return s.writePTYSessionPayload(req.ID, sessionID, []byte(text))
+}
+
+func (s *rpcServer) handlePTYSendKey(req rpcRequest) rpcResponse {
+	sessionID, ok := getStringParam(req.Params, "session_id")
+	if !ok || strings.TrimSpace(sessionID) == "" {
+		return rpcResponse{
+			ID: req.ID,
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_params",
+				Message: "pty.send_key requires session_id",
+			},
+		}
+	}
+	key, ok := getStringParam(req.Params, "key")
+	if !ok || strings.TrimSpace(key) == "" {
+		return rpcResponse{
+			ID: req.ID,
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_params",
+				Message: "pty.send_key requires key",
+			},
+		}
+	}
+	payload, ok := ptyKeyPayload(key)
+	if !ok {
+		return rpcResponse{
+			ID: req.ID,
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_params",
+				Message: "pty.send_key unsupported key",
+			},
+		}
+	}
+	resp := s.writePTYSessionPayload(req.ID, sessionID, payload)
+	if resp.OK {
+		if result, ok := resp.Result.(map[string]any); ok {
+			result["key"] = strings.ToLower(strings.TrimSpace(key))
+		}
+	}
+	return resp
+}
+
+func parsePTYSessionWriteParams(req rpcRequest, method string) (string, []byte, *rpcResponse) {
+	sessionID, ok := getStringParam(req.Params, "session_id")
+	if !ok || strings.TrimSpace(sessionID) == "" {
+		resp := rpcResponse{
+			ID: req.ID,
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_params",
+				Message: method + " requires session_id",
+			},
+		}
+		return "", nil, &resp
+	}
+	dataBase64, ok := getStringParam(req.Params, "data_base64")
+	if !ok {
+		resp := rpcResponse{
+			ID: req.ID,
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_params",
+				Message: method + " requires data_base64",
+			},
+		}
+		return "", nil, &resp
+	}
+	payload, err := base64.StdEncoding.DecodeString(dataBase64)
+	if err != nil {
+		resp := rpcResponse{
+			ID: req.ID,
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_params",
+				Message: "data_base64 must be valid base64",
+			},
+		}
+		return "", nil, &resp
+	}
+	return strings.TrimSpace(sessionID), payload, nil
+}
+
+func (s *rpcServer) writePTYSessionPayload(id any, sessionID string, payload []byte) rpcResponse {
+	writeStatus := wsPTYInputWriteNotFound
+	if s.ptyHub != nil {
+		writeStatus = s.ptyHub.writeInputBySessionID(sessionID, payload)
+	}
+	if writeStatus == wsPTYInputWriteQueueFull {
+		return rpcResponse{
+			ID: id,
+			OK: false,
+			Error: &rpcError{
+				Code:    "pty_input_queue_full",
+				Message: "PTY input queue is full",
+			},
+		}
+	}
+	if writeStatus != wsPTYInputWriteOK {
+		return rpcResponse{
+			ID: id,
+			OK: false,
+			Error: &rpcError{
+				Code:    "not_found",
+				Message: "PTY session not found",
+			},
+		}
+	}
+	return rpcResponse{
+		ID: id,
+		OK: true,
+		Result: map[string]any{
+			"session_id": strings.TrimSpace(sessionID),
+			"written":    len(payload),
+		},
+	}
+}
+
+func ptyKeyPayload(key string) ([]byte, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	switch normalized {
+	case "enter", "return":
+		return []byte("\r"), true
+	case "tab":
+		return []byte("\t"), true
+	case "escape", "esc":
+		return []byte{0x1b}, true
+	case "backspace":
+		return []byte{0x7f}, true
+	case "delete", "del", "forward_delete":
+		return []byte("\x1b[3~"), true
+	case "up", "arrow_up", "arrowup":
+		return []byte("\x1b[A"), true
+	case "down", "arrow_down", "arrowdown":
+		return []byte("\x1b[B"), true
+	case "right", "arrow_right", "arrowright":
+		return []byte("\x1b[C"), true
+	case "left", "arrow_left", "arrowleft":
+		return []byte("\x1b[D"), true
+	case "home":
+		return []byte("\x1b[H"), true
+	case "end":
+		return []byte("\x1b[F"), true
+	case "pageup", "page_up":
+		return []byte("\x1b[5~"), true
+	case "pagedown", "page_down":
+		return []byte("\x1b[6~"), true
+	case "space":
+		return []byte(" "), true
+	case "ctrl-c", "ctrl+c", "sigint":
+		return []byte{0x03}, true
+	case "ctrl-d", "ctrl+d", "eof":
+		return []byte{0x04}, true
+	case "ctrl-z", "ctrl+z", "sigtstp":
+		return []byte{0x1a}, true
+	case "ctrl-\\", "ctrl+\\", "sigquit":
+		return []byte{0x1c}, true
+	}
+	parts := strings.FieldsFunc(normalized, func(r rune) bool { return r == '-' || r == '+' })
+	if len(parts) == 2 && (parts[0] == "ctrl" || parts[0] == "control") && len(parts[1]) == 1 {
+		ch := parts[1][0]
+		if ch >= 'a' && ch <= 'z' {
+			return []byte{ch - 'a' + 1}, true
+		}
+	}
+	return nil, false
 }
 
 func (s *rpcServer) handlePTYResize(req rpcRequest) rpcResponse {

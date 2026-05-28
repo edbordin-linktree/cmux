@@ -22,6 +22,7 @@ This branch builds a workspace illusion on top of that PTY layer:
 - while attached, Swift periodically writes a workspace snapshot to the remote daemon slot;
 - when the user detaches, Swift stores a final `detached` snapshot, detaches terminal surfaces from their PTYs, releases local browser/UI surfaces, and removes the workspace from the Mac sidebar;
 - while detached or disconnected, scripts on the remote host can perform a restricted set of mutations against that snapshot;
+- while detached or disconnected, scripts can also send input to known terminal surfaces through authenticated daemon PTY-session RPCs;
 - when the user attaches or reconnects, Swift fetches the remote snapshot, rebuilds the workspace UI locally, and reattaches terminal surfaces to the still-running remote PTYs.
 
 So the workspace appears to be maintained on the server, but that is mostly a snapshot/recreate mechanism. Terminal process state is genuinely server-side because the daemon owns the PTYs. Browser state, split-tree rendering, sidebar presence, focus, and most UI behavior are reconstructed by the Mac app from the saved snapshot.
@@ -53,6 +54,7 @@ The core behavior Craft should rely on is:
 - Detached workspace discovery uses a one-shot `cmuxd-remote workspace-snapshot-list-all --json` command over SSH, not ad hoc shell filesystem commands.
 - A `cmux` command running inside a remote cmux terminal first tries the normal relay back to the Swift UI.
 - If the relay is unavailable, that remote `cmux` command can operate on the local remote snapshot for a restricted set of commands.
+- Detached `cmux send` and `cmux send-key` resolve a terminal surface from the snapshot, then call authenticated daemon PTY-session RPCs; they do not create temporary attachments.
 - On reconnect/attach, the remote snapshot wins and Swift rebuilds local layout from it.
 
 ## Architecture Diagrams
@@ -86,9 +88,10 @@ flowchart LR
     PTY["persistent daemon PTY hub"]
     DCLI --> Headless
     Headless --> SlotDaemon
-    SlotDaemon --> PTY
-    Headless --> Snapshot
-    Headless --> Meta
+    Headless -->|layout + metadata mutations| Snapshot
+    Headless -->|layout + metadata mutations| Meta
+    Headless -->|send / send-key| SlotDaemon
+    SlotDaemon -->|PTY session writes| PTY
   end
 ```
 
@@ -144,6 +147,8 @@ sequenceDiagram
   RemoteCLI->>Snap: Read current snapshot
   RemoteCLI->>Daemon: Create PTY for new terminal surface
   RemoteCLI->>Snap: Write mutated snapshot
+  RemoteCLI->>Snap: Resolve terminal surface to session_id
+  RemoteCLI->>Daemon: pty.send / pty.send_key
 
   Note over Swift,Snap: Swift reconnects or attaches
 
@@ -252,18 +257,30 @@ cmux new-pane --workspace current --type terminal|browser [--direction <dir>] [-
 cmux new-surface --workspace current --type terminal|browser [--pane <pane>] [--url <url>] [--command <cmd>] [--focus true|false]
 cmux new-split <dir> --workspace current [--surface <surface>] [--type terminal|browser] [--url <url>] [--command <cmd>] [--focus true|false]
 cmux close-surface --workspace current --surface <surface>
+cmux send --surface <surface> -- '<text>'
+cmux send-key --surface <surface> <key>
 ```
 
 Terminal creation in detached mode starts a real PTY through the persistent daemon before writing the new terminal surface into the snapshot. Browser creation records the initial URL/title only.
 
-For supervisor scripts, prefer:
+Detached `send` / `send-key` only work for terminal or agent surfaces whose snapshot contains a `remotePTYSessionId`. They resolve the terminal surface from the snapshot and call the slot daemon directly:
+
+```text
+pty.write_session { session_id, data_base64 }
+pty.send          { session_id, text }
+pty.send_key      { session_id, key }
+```
+
+These RPCs require normal daemon auth and write to the PTY session input queue without creating a temporary attachment. `send-key` intentionally supports the common supervisor keys rather than a full keyboard model: `enter`, `tab`, `escape`, `backspace`, arrow keys, `home`, `end`, `delete`, `pageup`, `pagedown`, `space`, and `ctrl-<letter>` aliases including `ctrl-c`, `ctrl-d`, `ctrl-z`, and `ctrl-\`.
+
+For supervisor scripts, prefer startup commands when creating new surfaces:
 
 ```bash
 cmux new-pane --workspace current --type terminal --command '<command>'
 cmux new-pane --workspace current --type browser --url '<url>'
 ```
 
-That avoids relying on `send` / `send-key`, which are attached-UI-only.
+Use `send` / `send-key` when the script intentionally needs to interact with an already-running terminal process.
 
 ### Attached-Only Commands
 
@@ -272,7 +289,6 @@ These still require an attached Swift UI:
 - focus and selection commands;
 - workspace/window movement;
 - cosmetic rename operations such as `rename-tab`;
-- `send` and `send-key`;
 - browser automation or navigation after browser creation;
 - access to local Mac browser state such as cookies, scroll position, devtools, or WKWebView session data.
 
@@ -299,6 +315,7 @@ The current branch was tested on `ed@tdb` with the dev build:
 - set hidden metadata from the remote host;
 - created a browser pane from the remote host;
 - created a terminal pane from the remote host with `--command`;
+- sent text and `ctrl-d` to a detached terminal PTY through the remote daemon without creating a temporary attachment;
 - reattached from the Mac;
 - preserved the original workspace UUID;
 - restored the remote-created terminal process and output;
@@ -399,7 +416,7 @@ Then update current Craft helpers:
 - `pane_is_running`: read `craft:surface:agent`, then verify the surface exists in `cmux tree`.
 - `kill_task_pane`: close the recorded surface, then clear `craft:surface:agent`.
 - `mux_spawn_named_pane`: replace visible `set-status craft:pane:<name>` with hidden `metadata set craft:surface:<name> --value-json ...`.
-- `mux_send_to_pane`: keep attached-only because `send` is not detached-safe.
+- `mux_send_to_pane`: send to the recorded terminal `surface_id`; this is detached-safe for terminal/agent surfaces only.
 - `mux_pane_exists`: use hidden metadata plus `tree`.
 - `mux_kill_named_pane`: close the recorded surface and clear the hidden metadata key.
 
@@ -414,6 +431,7 @@ Craft supervisor scripts can rely on these in attached and detached remote works
 - inspect workspace tree;
 - create terminal surfaces with startup commands;
 - create browser surfaces with initial URLs;
+- send text or common keys to known terminal/agent surfaces;
 - close known surfaces.
 
 Craft should not require these for detached supervisor correctness:
@@ -421,7 +439,6 @@ Craft should not require these for detached supervisor correctness:
 - selecting or focusing a workspace/surface;
 - moving workspaces between windows;
 - renaming tabs/workspaces;
-- sending input to an already-running terminal;
 - browser automation after initial browser creation.
 
 ### Example Detached-Safe Supervisor Flow

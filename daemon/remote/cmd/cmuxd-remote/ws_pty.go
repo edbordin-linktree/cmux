@@ -870,6 +870,18 @@ func (h *wsPTYHub) writeInputByID(sessionID string, attachmentID string, attachm
 	return h.writeInput(attachment, payload)
 }
 
+func (h *wsPTYHub) writeInputBySessionID(sessionID string, payload []byte) wsPTYInputWriteStatus {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return wsPTYInputWriteNotFound
+	}
+	session := h.sessionForAttachment(persistentPTYSessionKey(sessionID))
+	if session == nil {
+		return wsPTYInputWriteNotFound
+	}
+	return h.writeInputToSession(session, "", nil, payload)
+}
+
 func (h *wsPTYHub) resizeByID(sessionID string, attachmentID string, attachmentToken string, cols int, rows int) bool {
 	attachment := h.attachmentByID(sessionID, attachmentID, attachmentToken)
 	if attachment == nil {
@@ -1247,14 +1259,18 @@ func (h *wsPTYHub) writeInput(attachment *wsPTYAttachment, payload []byte) wsPTY
 	if session == nil {
 		return wsPTYInputWriteNotFound
 	}
+	return h.writeInputToSession(session, attachment.id, attachment, payload)
+}
+
+func (h *wsPTYHub) writeInputToSession(session *wsPTYSession, attachmentID string, attachment *wsPTYAttachment, payload []byte) wsPTYInputWriteStatus {
 	if len(payload) == 0 {
 		return wsPTYInputWriteOK
 	}
 
 	h.mu.Lock()
-	current := h.sessions[attachment.sessionKey] == session &&
+	current := h.sessions[session.key] == session &&
 		!session.closed &&
-		session.attachments[attachment.id] == attachment &&
+		(attachment == nil || session.attachments[attachmentID] == attachment) &&
 		session.input != nil
 	h.mu.Unlock()
 	if !current {
@@ -1268,7 +1284,7 @@ func (h *wsPTYHub) writeInput(attachment *wsPTYAttachment, payload []byte) wsPTY
 			chunkLen = defaultPTYInputChunkBytes
 		}
 		chunks = append(chunks, wsPTYInputChunk{
-			attachmentID: attachment.id,
+			attachmentID: attachmentID,
 			attachment:   attachment,
 			payload:      append([]byte(nil), payload[:chunkLen]...),
 		})
@@ -1279,9 +1295,9 @@ func (h *wsPTYHub) writeInput(attachment *wsPTYAttachment, payload []byte) wsPTY
 	defer session.inputEnqueueMu.Unlock()
 
 	h.mu.Lock()
-	current = h.sessions[attachment.sessionKey] == session &&
+	current = h.sessions[session.key] == session &&
 		!session.closed &&
-		session.attachments[attachment.id] == attachment &&
+		(attachment == nil || session.attachments[attachmentID] == attachment) &&
 		session.input != nil
 	h.mu.Unlock()
 	if !current {
@@ -1289,7 +1305,7 @@ func (h *wsPTYHub) writeInput(attachment *wsPTYAttachment, payload []byte) wsPTY
 	}
 	if len(chunks) > cap(session.input)-len(session.input) {
 		if h.stderr != nil {
-			_, _ = fmt.Fprintf(h.stderr, "ws pty input queue full session=%s attachment=%s\n", session.id, attachment.id)
+			_, _ = fmt.Fprintf(h.stderr, "ws pty input queue full session=%s attachment=%s\n", session.id, attachmentID)
 		}
 		return wsPTYInputWriteQueueFull
 	}
@@ -1321,7 +1337,7 @@ func (h *wsPTYHub) writeInputChunk(session *wsPTYSession, chunk wsPTYInputChunk)
 	h.mu.Lock()
 	current := h.sessions[session.key] == session &&
 		!session.closed &&
-		session.attachments[chunk.attachmentID] == chunk.attachment
+		(chunk.attachment == nil || session.attachments[chunk.attachmentID] == chunk.attachment)
 	ptyFile := session.ptyFile
 	h.mu.Unlock()
 	if !current || ptyFile == nil {

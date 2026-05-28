@@ -289,9 +289,23 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 			}
 		}
 
-		// First positional arg is used as initial_command if --command wasn't given
-		if _, ok := params["initial_command"]; !ok && len(parsed.positional) > 0 {
-			params["initial_command"] = parsed.positional[0]
+		switch spec.name {
+		case "send":
+			if _, ok := params["text"]; !ok && len(parsed.positional) > 0 {
+				params["text"] = strings.Join(parsed.positional, " ")
+			}
+			if text, ok := params["text"].(string); ok {
+				params["text"] = unescapeCLIText(text)
+			}
+		case "send-key":
+			if _, ok := params["key"]; !ok && len(parsed.positional) > 0 {
+				params["key"] = parsed.positional[0]
+			}
+		default:
+			// First positional arg is used as initial_command if --command wasn't given.
+			if _, ok := params["initial_command"]; !ok && len(parsed.positional) > 0 {
+				params["initial_command"] = parsed.positional[0]
+			}
 		}
 
 		applyWorkspaceEnvFallback(params)
@@ -698,6 +712,45 @@ func relayResultIsEmpty(result any) bool {
 	default:
 		return false
 	}
+}
+
+func unescapeCLIText(text string) string {
+	if !strings.Contains(text, "\\") {
+		return text
+	}
+	var out strings.Builder
+	out.Grow(len(text))
+	escaped := false
+	for _, r := range text {
+		if !escaped {
+			if r == '\\' {
+				escaped = true
+				continue
+			}
+			out.WriteRune(r)
+			continue
+		}
+		switch r {
+		case 'n':
+			out.WriteByte('\n')
+		case 'r':
+			out.WriteByte('\r')
+		case 't':
+			out.WriteByte('\t')
+		case 'e':
+			out.WriteByte(0x1b)
+		case '\\':
+			out.WriteByte('\\')
+		default:
+			out.WriteByte('\\')
+			out.WriteRune(r)
+		}
+		escaped = false
+	}
+	if escaped {
+		out.WriteByte('\\')
+	}
+	return out.String()
 }
 
 // flagToParamKey maps a CLI flag name to its JSON-RPC param key.

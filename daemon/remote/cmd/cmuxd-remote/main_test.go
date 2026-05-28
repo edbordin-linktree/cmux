@@ -1028,6 +1028,139 @@ func TestPTYRPCSessionReattachListAndClose(t *testing.T) {
 	}
 }
 
+func TestPTYRPCDirectSessionSendWhileDetached(t *testing.T) {
+	eventOutput := newNotifyingBuffer()
+	server := &rpcServer{
+		nextStreamID:  1,
+		nextSessionID: 1,
+		streams:       map[string]*streamState{},
+		sessions:      map[string]*sessionState{},
+		ptyHub: newWebSocketPTYHub(wsPTYServerConfig{
+			ScrollbackLimit: 4096,
+			SessionIdleTTL:  time.Hour,
+		}, io.Discard),
+		ownsPTYHub: true,
+		frameWriter: &stdioFrameWriter{
+			writer: bufio.NewWriter(eventOutput),
+		},
+	}
+	defer server.closeAll()
+
+	attachResp := server.handleRequest(rpcRequest{
+		ID:     1,
+		Method: "pty.attach",
+		Params: map[string]any{
+			"session_id":              "pty-direct-send",
+			"attachment_id":           "a1",
+			"client_attachment_token": "token-a1",
+			"cols":                    80,
+			"rows":                    24,
+			"command":                 "cat",
+		},
+	})
+	if !attachResp.OK {
+		t.Fatalf("pty.attach failed: %+v", attachResp)
+	}
+	waitForRPCEvent(t, eventOutput, 0, func(event map[string]any) bool {
+		return event["event"] == "pty.ready" && event["attachment_id"] == "a1"
+	})
+
+	detachResp := server.handleRequest(rpcRequest{
+		ID:     2,
+		Method: "pty.detach",
+		Params: map[string]any{
+			"session_id":              "pty-direct-send",
+			"attachment_id":           "a1",
+			"client_attachment_token": "token-a1",
+		},
+	})
+	if !detachResp.OK {
+		t.Fatalf("pty.detach failed: %+v", detachResp)
+	}
+
+	sendResp := server.handleRequest(rpcRequest{
+		ID:     3,
+		Method: "pty.send",
+		Params: map[string]any{
+			"session_id": "pty-direct-send",
+			"text":       "detached-direct-send",
+		},
+	})
+	if !sendResp.OK {
+		t.Fatalf("pty.send failed: %+v", sendResp)
+	}
+	sendKeyResp := server.handleRequest(rpcRequest{
+		ID:     4,
+		Method: "pty.send_key",
+		Params: map[string]any{
+			"session_id": "pty-direct-send",
+			"key":        "enter",
+		},
+	})
+	if !sendKeyResp.OK {
+		t.Fatalf("pty.send_key failed: %+v", sendKeyResp)
+	}
+
+	lineCountBeforeReattach := rpcEventLineCount(eventOutput)
+	reattachResp := server.handleRequest(rpcRequest{
+		ID:     5,
+		Method: "pty.attach",
+		Params: map[string]any{
+			"session_id":              "pty-direct-send",
+			"attachment_id":           "a2",
+			"client_attachment_token": "token-a2",
+			"cols":                    100,
+			"rows":                    30,
+			"require_existing":        true,
+		},
+	})
+	if !reattachResp.OK {
+		t.Fatalf("pty reattach failed: %+v", reattachResp)
+	}
+	waitForRPCEvent(t, eventOutput, lineCountBeforeReattach, func(event map[string]any) bool {
+		if event["event"] != "pty.data" || event["attachment_id"] != "a2" {
+			return false
+		}
+		payload, err := base64.StdEncoding.DecodeString(event["data_base64"].(string))
+		return err == nil && strings.Contains(string(payload), "detached-direct-send")
+	})
+}
+
+func TestPTYRPCWriteSessionValidationAndKeyMapping(t *testing.T) {
+	server := &rpcServer{
+		ptyHub: newWebSocketPTYHub(wsPTYServerConfig{
+			SessionIdleTTL: time.Hour,
+		}, io.Discard),
+		ownsPTYHub: true,
+		frameWriter: &stdioFrameWriter{
+			writer: bufio.NewWriter(io.Discard),
+		},
+	}
+	defer server.closeAll()
+
+	badBase64 := server.handleRequest(rpcRequest{
+		ID:     1,
+		Method: "pty.write_session",
+		Params: map[string]any{
+			"session_id":  "missing",
+			"data_base64": "not-base64",
+		},
+	})
+	if badBase64.OK || badBase64.Error == nil || badBase64.Error.Code != "invalid_params" {
+		t.Fatalf("bad pty.write_session = %+v, want invalid_params", badBase64)
+	}
+
+	if payload, ok := ptyKeyPayload("ctrl-c"); !ok || !bytes.Equal(payload, []byte{0x03}) {
+		t.Fatalf("ctrl-c payload = %v ok=%v, want 0x03", payload, ok)
+	}
+	if payload, ok := ptyKeyPayload("up"); !ok || string(payload) != "\x1b[A" {
+		t.Fatalf("up payload = %q ok=%v, want ESC[A", string(payload), ok)
+	}
+	if _, ok := ptyKeyPayload("definitely-not-a-key"); ok {
+		t.Fatal("unsupported key unexpectedly mapped")
+	}
+}
+
 func TestPTYRPCCommandUsesPOSIXShellForConfiguredLoginShell(t *testing.T) {
 	if _, err := os.Stat("/usr/bin/false"); err != nil {
 		t.Skip("/usr/bin/false is not available")

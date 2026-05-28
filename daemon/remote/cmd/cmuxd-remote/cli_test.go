@@ -646,6 +646,55 @@ func TestCLIV2FlagMapping(t *testing.T) {
 	}
 }
 
+func TestCLISendPositionalMapsToTextAndUnescapes(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cmux-cli-send-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "cmux.sock")
+
+	receivedParamsCh := make(chan map[string]any, 1)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 4096)
+		n, _ := conn.Read(buf)
+		var req map[string]any
+		_ = json.Unmarshal(buf[:n], &req)
+		receivedParams, _ := req["params"].(map[string]any)
+		receivedParamsCh <- receivedParams
+		resp := map[string]any{"id": req["id"], "ok": true, "result": map[string]any{}}
+		payload, _ := json.Marshal(resp)
+		_, _ = conn.Write(append(payload, '\n'))
+	}()
+
+	code := runCLI([]string{"--socket", sockPath, "--json", "send", "--surface", "surface-a", "--", "echo hello\\n"})
+	if code != 0 {
+		t.Fatalf("send should return 0, got %d", code)
+	}
+	select {
+	case receivedParams := <-receivedParamsCh:
+		if receivedParams["surface_id"] != "surface-a" {
+			t.Fatalf("expected surface_id=surface-a, got %v", receivedParams)
+		}
+		if receivedParams["text"] != "echo hello\n" {
+			t.Fatalf("expected unescaped text, got %#v", receivedParams["text"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for send payload")
+	}
+}
+
 func TestBusyboxArgv0Detection(t *testing.T) {
 	// Verify that when argv[0] base is "cmux", we enter CLI mode
 	base := filepath.Base("cmux")

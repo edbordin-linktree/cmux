@@ -29,7 +29,8 @@ func runHeadlessCLICommand(commandName, method string, params map[string]any, js
 	switch method {
 	case "metadata.set", "metadata.get", "metadata.list", "metadata.clear",
 		"workspace.lookup", "system.tree",
-		"surface.create", "pane.create", "surface.split", "surface.close":
+		"surface.create", "pane.create", "surface.split", "surface.close",
+		"surface.send_text", "surface.send_key":
 	default:
 		return 0, false
 	}
@@ -77,6 +78,10 @@ func runHeadlessCLIResult(method string, params map[string]any) (map[string]any,
 		return headlessCreateSurface(params, true)
 	case "surface.close":
 		return headlessCloseSurface(params)
+	case "surface.send_text":
+		return headlessSendText(params)
+	case "surface.send_key":
+		return headlessSendKey(params)
 	default:
 		return nil, fmt.Errorf("unsupported detached command %q", method)
 	}
@@ -413,9 +418,9 @@ func headlessCreateSurface(params map[string]any, splitPane bool) (map[string]an
 }
 
 func headlessCloseSurface(params map[string]any) (map[string]any, error) {
-	surfaceID := strings.ToLower(strings.TrimSpace(stringFromAny(params["surface_id"])))
+	surfaceID := headlessNormalizeID(stringFromAny(params["surface_id"]))
 	if surfaceID == "" {
-		surfaceID = strings.ToLower(strings.TrimSpace(os.Getenv("CMUX_SURFACE_ID")))
+		surfaceID = headlessNormalizeID(os.Getenv("CMUX_SURFACE_ID"))
 	}
 	if surfaceID == "" {
 		return nil, errors.New("surface.close requires surface_id")
@@ -440,6 +445,95 @@ func headlessCloseSurface(params map[string]any) (map[string]any, error) {
 		"detached":        true,
 		"snapshot_sha256": sha,
 	}, nil
+}
+
+func headlessSendText(params map[string]any) (map[string]any, error) {
+	snap, surfaceID, sessionID, err := headlessTargetTerminal(params)
+	if err != nil {
+		return nil, err
+	}
+	text, ok := params["text"].(string)
+	if !ok {
+		return nil, errors.New("surface.send_text requires text")
+	}
+	result, err := headlessPersistentDaemonRPC(snap.slot, "pty.send", map[string]any{
+		"session_id": sessionID,
+		"text":       text,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return headlessSendResultPayload(snap, surfaceID, result), nil
+}
+
+func headlessSendKey(params map[string]any) (map[string]any, error) {
+	snap, surfaceID, sessionID, err := headlessTargetTerminal(params)
+	if err != nil {
+		return nil, err
+	}
+	key := strings.TrimSpace(stringFromAny(params["key"]))
+	if key == "" {
+		return nil, errors.New("surface.send_key requires key")
+	}
+	result, err := headlessPersistentDaemonRPC(snap.slot, "pty.send_key", map[string]any{
+		"session_id": sessionID,
+		"key":        key,
+	})
+	if err != nil {
+		return nil, err
+	}
+	payload := headlessSendResultPayload(snap, surfaceID, result)
+	payload["key"] = strings.ToLower(key)
+	return payload, nil
+}
+
+func headlessTargetTerminal(params map[string]any) (*headlessSnapshot, string, string, error) {
+	snap, err := loadHeadlessSnapshot(params)
+	if err != nil {
+		return nil, "", "", err
+	}
+	surfaceID := headlessNormalizeID(stringFromAny(params["surface_id"]))
+	if surfaceID == "" {
+		surfaceID = headlessNormalizeID(os.Getenv("CMUX_SURFACE_ID"))
+	}
+	if surfaceID == "" {
+		surfaceID = headlessNormalizeID(stringFromAny(snap.body["activePaneId"]))
+	}
+	if surfaceID == "" {
+		return nil, "", "", errors.New("surface send requires surface_id or active terminal surface")
+	}
+	for _, pane := range headlessPaneSnapshots(snap.body) {
+		if !strings.EqualFold(headlessPaneSnapshotID(pane), surfaceID) {
+			continue
+		}
+		if stringFromAny(pane["type"]) != "terminal" {
+			return nil, "", "", fmt.Errorf("surface %s is not a terminal", surfaceID)
+		}
+		terminal, _ := pane["terminal"].(map[string]any)
+		sessionID := strings.TrimSpace(stringFromAny(terminal["remotePTYSessionId"]))
+		if sessionID == "" {
+			return nil, "", "", fmt.Errorf("terminal surface %s has no remotePTYSessionId", surfaceID)
+		}
+		return snap, surfaceID, sessionID, nil
+	}
+	return nil, "", "", fmt.Errorf("surface %s not found in detached snapshot", surfaceID)
+}
+
+func headlessSendResultPayload(snap *headlessSnapshot, surfaceID string, result map[string]any) map[string]any {
+	workspaceID := snap.meta.WorkspaceID
+	if workspaceID == "" {
+		workspaceID = stringFromAny(snap.body["workspaceId"])
+	}
+	written := intFromAny(result["written"])
+	return map[string]any{
+		"workspace_id":  workspaceID,
+		"workspace_ref": "workspace:" + workspaceID,
+		"surface_id":    surfaceID,
+		"surface_ref":   "surface:" + surfaceID,
+		"session_id":    stringFromAny(result["session_id"]),
+		"written":       written,
+		"detached":      true,
+	}
 }
 
 func headlessTreePayload(snap *headlessSnapshot) map[string]any {
@@ -568,24 +662,7 @@ func headlessSurfaceNode(surfaceID string, snapshot map[string]any, paneID strin
 }
 
 func headlessStartPTY(slot, sessionID, attachmentID, command string) error {
-	paths, err := persistentDaemonPathsForSlot(slot)
-	if err != nil {
-		return err
-	}
-	token, err := readPersistentDaemonTokenFile(paths.tokenFile)
-	if err != nil {
-		return fmt.Errorf("read persistent daemon token: %w", err)
-	}
-	conn, err := net.DialTimeout("unix", paths.socket, 2*time.Second)
-	if err != nil {
-		return fmt.Errorf("connect persistent daemon: %w", err)
-	}
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
-	if _, err := persistentDaemonRPC(conn, reader, persistentDaemonAuthMethod, map[string]any{"token": token}); err != nil {
-		return err
-	}
-	_, err = persistentDaemonRPC(conn, reader, "pty.attach", map[string]any{
+	_, err := headlessPersistentDaemonRPC(slot, "pty.attach", map[string]any{
 		"session_id":              sessionID,
 		"attachment_id":           attachmentID,
 		"client_attachment_token": newHeadlessUUID(),
@@ -594,6 +671,27 @@ func headlessStartPTY(slot, sessionID, attachmentID, command string) error {
 		"command":                 command,
 	})
 	return err
+}
+
+func headlessPersistentDaemonRPC(slot, method string, params map[string]any) (map[string]any, error) {
+	paths, err := persistentDaemonPathsForSlot(slot)
+	if err != nil {
+		return nil, err
+	}
+	token, err := readPersistentDaemonTokenFile(paths.tokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("read persistent daemon token: %w", err)
+	}
+	conn, err := net.DialTimeout("unix", paths.socket, 2*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("connect persistent daemon: %w", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	if _, err := persistentDaemonRPC(conn, reader, persistentDaemonAuthMethod, map[string]any{"token": token}); err != nil {
+		return nil, err
+	}
+	return persistentDaemonRPC(conn, reader, method, params)
 }
 
 func headlessShouldFocus(params map[string]any) bool {
@@ -846,6 +944,14 @@ func headlessPaneSnapshotID(pane map[string]any) string {
 	default:
 		return ""
 	}
+}
+
+func headlessNormalizeID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, prefix := range []string{"surface:", "panel:", "pane:", "workspace:"} {
+		value = strings.TrimPrefix(value, prefix)
+	}
+	return value
 }
 
 func headlessMetadataMap(body map[string]any) map[string]string {
