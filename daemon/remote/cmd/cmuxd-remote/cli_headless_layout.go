@@ -39,6 +39,7 @@ func headlessWorkspaceSummary(snap *headlessSnapshot) map[string]any {
 	if workspaceID == "" {
 		workspaceID, _ = snap.body["workspaceId"].(string)
 	}
+	workspaceID = canonicalHeadlessID(workspaceID)
 	title := snap.meta.Title
 	if title == "" {
 		title, _ = snap.body["title"].(string)
@@ -101,6 +102,8 @@ func headlessTreePanes(body map[string]any) []map[string]any {
 }
 
 func headlessSurfaceNode(surfaceID string, snapshot map[string]any, paneID string, index int, selected bool, focused bool) map[string]any {
+	surfaceID = canonicalHeadlessID(surfaceID)
+	paneID = canonicalHeadlessID(paneID)
 	node := map[string]any{
 		"id":               surfaceID,
 		"ref":              "surface:" + surfaceID,

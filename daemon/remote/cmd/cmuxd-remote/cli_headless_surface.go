@@ -13,6 +13,7 @@ func headlessCreateSurface(params map[string]any, splitPane bool) (map[string]an
 		if workspaceID == "" {
 			workspaceID, _ = snap.body["workspaceId"].(string)
 		}
+		workspaceID = canonicalHeadlessID(workspaceID)
 		surfaceID := strings.ToLower(newHeadlessUUID())
 		panelType := strings.ToLower(strings.TrimSpace(stringFromAny(params["type"])))
 		if panelType == "" {
@@ -104,8 +105,8 @@ func headlessCloseSurface(params map[string]any) (map[string]any, error) {
 			snap.body["activePaneId"] = firstHeadlessSurfaceID(snap.body["splitTree"])
 		}
 		return map[string]any{
-			"workspace_id": snap.meta.WorkspaceID,
-			"surface_id":   surfaceID,
+			"workspace_id": canonicalHeadlessID(snap.meta.WorkspaceID),
+			"surface_id":   canonicalHeadlessID(surfaceID),
 			"closed":       removed,
 		}, nil
 	})
@@ -188,6 +189,8 @@ func headlessSendResultPayload(snap *headlessSnapshot, surfaceID string, result 
 	if workspaceID == "" {
 		workspaceID = stringFromAny(snap.body["workspaceId"])
 	}
+	workspaceID = canonicalHeadlessID(workspaceID)
+	surfaceID = canonicalHeadlessID(surfaceID)
 	written := intFromAny(result["written"])
 	return map[string]any{
 		"workspace_id":  workspaceID,

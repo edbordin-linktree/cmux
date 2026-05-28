@@ -3987,10 +3987,16 @@ struct CMUXCLI {
                 }
             }
 
-        case "focus-panel":
+        case "focus-panel", "focus-surface":
             let workspaceArg = workspaceFromArgsOrEnv(commandArgs, windowOverride: windowId)
-            guard let panelRaw = optionValue(commandArgs, name: "--panel") else {
-                throw CLIError(message: "focus-panel requires --panel")
+            let panelRaw: String?
+            if command == "focus-surface" {
+                panelRaw = optionValue(commandArgs, name: "--surface") ?? firstPositional(commandArgs)
+            } else {
+                panelRaw = optionValue(commandArgs, name: "--panel")
+            }
+            guard let panelRaw, !panelRaw.isEmpty else {
+                throw CLIError(message: command == "focus-surface" ? "focus-surface requires <surface> or --surface" : "focus-panel requires --panel")
             }
             var params: [String: Any] = [:]
             let winId = try normalizeWindowHandle(windowFromArgsOrOverride(commandArgs, windowOverride: windowId), client: client)
@@ -4379,7 +4385,11 @@ struct CMUXCLI {
                 client: client,
                 windowOverride: windowId
             )
-            print(response)
+            if jsonOutput {
+                print(jsonString(statusListJSONPayload(response)))
+            } else {
+                print(response)
+            }
 
         case "set-progress":
             let response = try forwardSidebarMetadataCommand(
@@ -12961,6 +12971,21 @@ struct CMUXCLI {
               cmux focus-panel --panel surface:2
               cmux focus-panel --panel surface:5 --workspace workspace:2
             """
+        case "focus-surface":
+            return """
+            Usage: cmux focus-surface <id|ref|index> [--workspace <id|ref|index>] [--window <id|ref|index>]
+
+            Focus a specific surface. Alias for surface focus.
+
+            Flags:
+              --surface <id|ref|index>     Surface to focus (alternative to positional)
+              --workspace <id|ref|index>   Workspace context (default: $CMUX_WORKSPACE_ID)
+              --window <id|ref|index>      Window context for workspace/surface refs and indexes
+
+            Example:
+              cmux focus-surface surface:2
+              cmux focus-surface --surface surface:5 --workspace workspace:2
+            """
         case "close-workspace":
             return """
             Usage: cmux close-workspace --workspace <id|ref|index> [--window <id|ref|index>]
@@ -13406,10 +13431,11 @@ struct CMUXCLI {
             Flags:
               --workspace <id|ref|index>   Target workspace (default: $CMUX_WORKSPACE_ID)
               --window <id|ref|index>      Window context for workspace refs and indexes
+              --json                        Print entries as JSON
 
             Example:
               cmux list-status
-              cmux list-status --workspace workspace:2
+              cmux list-status --workspace workspace:2 --json
             """
         case "set-progress":
             return """
@@ -13774,6 +13800,27 @@ struct CMUXCLI {
             if arg.hasPrefix("\(name)=") {
                 return String(arg.dropFirst(name.count + 1))
             }
+        }
+        return nil
+    }
+
+    func firstPositional(_ args: [String]) -> String? {
+        var skipNext = false
+        for arg in args {
+            if skipNext {
+                skipNext = false
+                continue
+            }
+            if arg == "--" {
+                continue
+            }
+            if arg.hasPrefix("--") {
+                if !arg.contains("=") {
+                    skipNext = true
+                }
+                continue
+            }
+            return arg
         }
         return nil
     }
@@ -15603,6 +15650,48 @@ struct CMUXCLI {
             return "{}"
         }
         return output
+    }
+
+    func statusListJSONPayload(_ response: String) -> [String: Any] {
+        let entries = response
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { statusEntryJSON(String($0)) }
+        return ["entries": entries, "count": entries.count]
+    }
+
+    private func statusEntryJSON(_ line: String) -> [String: Any]? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed != "No status entries",
+              !trimmed.hasPrefix("ERROR:"),
+              let eq = trimmed.firstIndex(of: "=") else {
+            return nil
+        }
+        let key = String(trimmed[..<eq])
+        let rest = String(trimmed[trimmed.index(after: eq)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = rest.split(separator: " ").map(String.init)
+        let optionStart = parts.firstIndex { statusEntryOptionKey($0) != nil } ?? parts.count
+        var entry: [String: Any] = [
+            "key": key,
+            "value": optionStart == parts.count ? rest : parts[..<optionStart].joined(separator: " ")
+        ]
+        for part in parts.dropFirst(optionStart) {
+            guard let optionKey = statusEntryOptionKey(part) else { continue }
+            let value = String(part.dropFirst(optionKey.count + 1))
+            if optionKey == "priority" {
+                entry[optionKey] = Int(value) ?? 0
+            } else {
+                entry[optionKey] = value
+            }
+        }
+        return entry
+    }
+
+    private func statusEntryOptionKey(_ part: String) -> String? {
+        for key in ["icon", "color", "url", "priority", "format"] where part.hasPrefix("\(key)=") {
+            return key
+        }
+        return nil
     }
 
     private func parseRPCParams(_ args: [String]) throws -> [String: Any] {
@@ -30134,6 +30223,7 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           trigger-flash [--workspace <id|ref|index>] [--surface <id|ref|index>] [--window <id|ref|index>]
           list-panels [--workspace <id|ref|index>] [--window <id|ref|index>]
           focus-panel --panel <id|ref|index> [--workspace <id|ref|index>] [--window <id|ref|index>]
+          focus-surface <id|ref|index> [--workspace <id|ref|index>] [--window <id|ref|index>]
           close-workspace --workspace <id|ref|index> [--window <id|ref|index>]
           select-workspace --workspace <id|ref|index> [--window <id|ref|index>]
           rename-workspace [--workspace <id|ref|index>] [--window <id|ref|index>] <title>

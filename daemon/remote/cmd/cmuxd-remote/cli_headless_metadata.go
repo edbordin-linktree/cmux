@@ -21,7 +21,7 @@ func headlessMetadataSet(params map[string]any) (map[string]any, error) {
 		metadata[key] = value
 		snap.body["metadataEntries"] = metadata
 		return map[string]any{
-			"workspace_id": snap.meta.WorkspaceID,
+			"workspace_id": canonicalHeadlessID(snap.meta.WorkspaceID),
 			"key":          key,
 			"value":        value,
 		}, nil
@@ -40,7 +40,7 @@ func headlessMetadataGet(params map[string]any) (map[string]any, error) {
 	metadata := headlessMetadataMap(snap.body)
 	value, exists := metadata[key]
 	result := map[string]any{
-		"workspace_id": snap.meta.WorkspaceID,
+		"workspace_id": canonicalHeadlessID(snap.meta.WorkspaceID),
 		"key":          key,
 		"exists":       exists,
 		"detached":     true,
@@ -70,7 +70,7 @@ func headlessMetadataList(params map[string]any) (map[string]any, error) {
 		entries = append(entries, map[string]any{"key": key, "value": metadata[key]})
 	}
 	return map[string]any{
-		"workspace_id": snap.meta.WorkspaceID,
+		"workspace_id": canonicalHeadlessID(snap.meta.WorkspaceID),
 		"entries":      entries,
 		"count":        len(entries),
 		"detached":     true,
@@ -88,7 +88,7 @@ func headlessMetadataClear(params map[string]any) (map[string]any, error) {
 		delete(metadata, key)
 		snap.body["metadataEntries"] = metadata
 		return map[string]any{
-			"workspace_id": snap.meta.WorkspaceID,
+			"workspace_id": canonicalHeadlessID(snap.meta.WorkspaceID),
 			"key":          key,
 			"cleared":      existed,
 		}, nil

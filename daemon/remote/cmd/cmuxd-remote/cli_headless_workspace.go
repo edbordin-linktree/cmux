@@ -111,6 +111,7 @@ func headlessRenameWorkspace(params map[string]any) (map[string]any, error) {
 		if workspaceID == "" {
 			workspaceID = stringFromAny(snap.body["workspaceId"])
 		}
+		workspaceID = canonicalHeadlessID(workspaceID)
 		return map[string]any{
 			"workspace_id":  workspaceID,
 			"workspace_ref": "workspace:" + workspaceID,
@@ -184,6 +185,8 @@ func headlessRenameSurface(params map[string]any) (map[string]any, error) {
 		if workspaceID == "" {
 			workspaceID = stringFromAny(snap.body["workspaceId"])
 		}
+		workspaceID = canonicalHeadlessID(workspaceID)
+		surfaceID = canonicalHeadlessID(surfaceID)
 		return map[string]any{
 			"workspace_id":  workspaceID,
 			"workspace_ref": "workspace:" + workspaceID,

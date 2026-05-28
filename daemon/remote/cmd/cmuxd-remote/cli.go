@@ -99,6 +99,7 @@ var commands = []commandSpec{
 	{name: "rename-window", proto: protoV2, v2Method: "workspace.rename", flagKeys: []string{"workspace", "title"}},
 	{name: "list-panels", proto: protoV2, v2Method: "surface.list", flagKeys: []string{"workspace"}},
 	{name: "focus-panel", proto: protoV2, v2Method: "surface.focus", flagKeys: []string{"panel", "workspace"}, paramKeyOverrides: map[string]string{"panel": "surface_id"}},
+	{name: "focus-surface", proto: protoV2, v2Method: "surface.focus", flagKeys: []string{"surface", "workspace"}},
 	{name: "list-panes", proto: protoV2, v2Method: "pane.list", flagKeys: []string{"workspace"}},
 	{name: "list-pane-surfaces", proto: protoV2, v2Method: "pane.surfaces", flagKeys: []string{"pane"}},
 	{name: "new-pane", proto: protoV2, v2Method: "pane.create", flagKeys: []string{"workspace", "surface", "direction", "type", "url", "command", "focus"}, defaultParams: map[string]any{"direction": "right"}},
@@ -169,6 +170,29 @@ func commandMayUseHeadlessNoSocket(cmdName string) bool {
 	return false
 }
 
+func extractCommandJSONFlag(args []string) ([]string, bool) {
+	out := make([]string, 0, len(args))
+	found := false
+	passthrough := false
+	for _, arg := range args {
+		if passthrough {
+			out = append(out, arg)
+			continue
+		}
+		if arg == "--" {
+			passthrough = true
+			out = append(out, arg)
+			continue
+		}
+		if arg == "--json" {
+			found = true
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out, found
+}
+
 // runCLI is the entry point for the "cli" subcommand (or busybox "cmux" invocation).
 func runCLI(args []string) int {
 	socketPath := os.Getenv("CMUX_SOCKET_PATH")
@@ -206,6 +230,11 @@ doneFlags:
 	if cmdName == "help" {
 		cliUsage()
 		return 0
+	}
+	var commandJSON bool
+	cmdArgs, commandJSON = extractCommandJSONFlag(cmdArgs)
+	if commandJSON {
+		jsonOutput = true
 	}
 
 	// refreshAddr is set when the address came from socket_addr file (not env/flag),
@@ -368,6 +397,10 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 			if _, ok := params["key"]; !ok && len(parsed.positional) > 0 {
 				params["key"] = parsed.positional[0]
 			}
+		case "focus-surface":
+			if _, ok := params["surface_id"]; !ok && len(parsed.positional) > 0 {
+				params["surface_id"] = parsed.positional[0]
+			}
 		case "rename-workspace", "rename-window", "rename-tab":
 			if _, ok := params["title"]; !ok && len(parsed.positional) > 0 {
 				params["title"] = strings.Join(parsed.positional, " ")
@@ -461,11 +494,117 @@ func runStatusRelay(socketPath string, cmdName string, args []string, jsonOutput
 		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
 		return 1
 	}
+	if jsonOutput {
+		payload := statusRelayJSONPayload(cmdName, params, resp)
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cmux: failed to encode status result: %v\n", err)
+			return 1
+		}
+		fmt.Println(string(encoded))
+		return 0
+	}
 	fmt.Print(resp)
 	if !strings.HasSuffix(resp, "\n") {
 		fmt.Println()
 	}
 	return 0
+}
+
+func statusRelayJSONPayload(cmdName string, params map[string]any, resp string) map[string]any {
+	switch cmdName {
+	case "list-status":
+		entries := parseStatusListResponse(resp)
+		return map[string]any{
+			"entries": entries,
+			"count":   len(entries),
+		}
+	case "set-status":
+		payload := map[string]any{
+			"key":   stringFromAny(params["key"]),
+			"value": stringFromAny(params["value"]),
+		}
+		for _, key := range []string{"workspace_id", "icon", "color", "url", "format"} {
+			if value := stringFromAny(params[key]); value != "" {
+				payload[key] = value
+			}
+		}
+		if _, ok := params["priority"]; ok {
+			payload["priority"] = intFromAny(params["priority"])
+		}
+		return payload
+	case "clear-status":
+		return map[string]any{
+			"key":     stringFromAny(params["key"]),
+			"cleared": !strings.HasPrefix(strings.TrimSpace(resp), "ERROR:"),
+		}
+	default:
+		return map[string]any{"response": strings.TrimSpace(resp)}
+	}
+}
+
+func parseStatusListResponse(resp string) []map[string]any {
+	var entries []map[string]any
+	for _, line := range strings.Split(resp, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "No status entries" || strings.HasPrefix(line, "ERROR:") {
+			continue
+		}
+		entry := parseStatusLine(line)
+		if len(entry) > 0 {
+			entries = append(entries, entry)
+		}
+	}
+	if entries == nil {
+		return []map[string]any{}
+	}
+	return entries
+}
+
+func parseStatusLine(line string) map[string]any {
+	eq := strings.Index(line, "=")
+	if eq <= 0 {
+		return nil
+	}
+	key := line[:eq]
+	rest := strings.TrimSpace(line[eq+1:])
+	parts := strings.Fields(rest)
+	optionStart := len(parts)
+	for i, part := range parts {
+		if statusLineOptionKey(part) != "" {
+			optionStart = i
+			break
+		}
+	}
+	entry := map[string]any{
+		"key":   key,
+		"value": strings.Join(parts[:optionStart], " "),
+	}
+	if optionStart == len(parts) && rest != "" {
+		entry["value"] = rest
+	}
+	for _, part := range parts[optionStart:] {
+		optionKey := statusLineOptionKey(part)
+		if optionKey == "" {
+			continue
+		}
+		value := strings.TrimPrefix(part, optionKey+"=")
+		if optionKey == "priority" {
+			entry[optionKey] = intFromAny(value)
+		} else {
+			entry[optionKey] = value
+		}
+	}
+	return entry
+}
+
+func statusLineOptionKey(part string) string {
+	for _, key := range []string{"icon", "color", "url", "priority", "format"} {
+		if strings.HasPrefix(part, key+"=") {
+			return key
+		}
+	}
+	return ""
 }
 
 type remoteSSHCLIOptions struct {
@@ -1741,8 +1880,10 @@ func cliUsage() {
 	fmt.Fprintln(os.Stderr, "  close-surface             Close a surface")
 	fmt.Fprintln(os.Stderr, "  close-workspace           Close a workspace")
 	fmt.Fprintln(os.Stderr, "  select-workspace          Select a workspace")
+	fmt.Fprintln(os.Stderr, "  focus-surface             Focus a surface")
 	fmt.Fprintln(os.Stderr, "  send                      Send text to a surface")
 	fmt.Fprintln(os.Stderr, "  send-key                  Send a key to a surface")
+	fmt.Fprintln(os.Stderr, "  set-status/list-status    Manage workspace status entries; list-status supports --json")
 	fmt.Fprintln(os.Stderr, "  notify                    Create a notification")
 	fmt.Fprintln(os.Stderr, "  browser <sub>             Browser commands through the local cmux browser relay")
 	fmt.Fprintln(os.Stderr, "  claude-teams [args...]     Launch Claude Code in teammate mode")

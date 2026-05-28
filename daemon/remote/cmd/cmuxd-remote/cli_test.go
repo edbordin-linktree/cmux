@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -948,6 +949,30 @@ func TestCLIFocusPanelUsesSurfaceFocus(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for focus-panel request")
+	}
+}
+
+func TestCLIFocusSurfaceUsesSurfaceFocus(t *testing.T) {
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+	code := runCLI([]string{"--socket", sockPath, "--json", "focus-surface", "--workspace", "ws-1", "surface-1"})
+	if code != 0 {
+		t.Fatalf("focus-surface should return 0, got %d", code)
+	}
+
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "surface.focus" {
+			t.Fatalf("expected surface.focus, got %v", got)
+		}
+		params, _ := req["params"].(map[string]any)
+		if got := params["workspace_id"]; got != "ws-1" {
+			t.Fatalf("expected workspace_id ws-1, got %v", got)
+		}
+		if got := params["surface_id"]; got != "surface-1" {
+			t.Fatalf("expected surface_id surface-1, got %v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for focus-surface request")
 	}
 }
 
@@ -2075,6 +2100,94 @@ func TestCLIHeadlessStatusFallbackMutatesSnapshot(t *testing.T) {
 	body = readHeadlessCLITestBody(t, root, slot)
 	if got := len(headlessStatusEntries(body)); got != 0 {
 		t.Fatalf("status entries after clear = %d, want 0", got)
+	}
+}
+
+func TestCLIListStatusJSONParsesRelayTextResponse(t *testing.T) {
+	sockPath := startMockSocket(t, "task_state=running icon=bolt.fill color=#4C8DFF priority=100\nreview=needs input format=markdown")
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", sockPath, "list-status", "--workspace", "workspace:1", "--json"})
+		if code != 0 {
+			t.Fatalf("list-status returned %d", code)
+		}
+	})
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	entries, _ := result["entries"].([]any)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %v, want 2", result["entries"])
+	}
+	first, _ := entries[0].(map[string]any)
+	if got := first["key"]; got != "task_state" {
+		t.Fatalf("first key = %v, want task_state", got)
+	}
+	if got := first["value"]; got != "running" {
+		t.Fatalf("first value = %v, want running", got)
+	}
+	if got := first["icon"]; got != "bolt.fill" {
+		t.Fatalf("first icon = %v, want bolt.fill", got)
+	}
+	if got := intFromAny(first["priority"]); got != 100 {
+		t.Fatalf("first priority = %v, want 100", first["priority"])
+	}
+	second, _ := entries[1].(map[string]any)
+	if got := second["value"]; got != "needs input" {
+		t.Fatalf("second value = %v, want needs input", got)
+	}
+	if got := second["format"]; got != "markdown" {
+		t.Fatalf("second format = %v, want markdown", got)
+	}
+}
+
+func TestCLICommandJSONFlagDoesNotConsumePassthroughArgs(t *testing.T) {
+	args, found := extractCommandJSONFlag([]string{"ed@tdb", "--json", "--", "printf", "--json"})
+	if !found {
+		t.Fatal("expected command-level --json to be found")
+	}
+	want := []string{"ed@tdb", "--", "printf", "--json"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestCLIHeadlessTreeCanonicalizesUppercaseSnapshotIDs(t *testing.T) {
+	root := t.TempDir()
+	workspaceID := "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+	surfaceID := "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB"
+	slot := "slot-upper"
+	writeHeadlessCLITestSnapshotAt(t, root, workspaceID, slot, "Uppercase IDs", surfaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", strings.ToLower(workspaceID))
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", filepath.Join(t.TempDir(), "missing.sock"), "--json", "tree", "--workspace", strings.ToLower(workspaceID)})
+		if code != 0 {
+			t.Fatalf("tree returned %d", code)
+		}
+	})
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	windows, _ := result["windows"].([]any)
+	window, _ := windows[0].(map[string]any)
+	workspaces, _ := window["workspaces"].([]any)
+	workspace, _ := workspaces[0].(map[string]any)
+	if got := workspace["id"]; got != strings.ToLower(workspaceID) {
+		t.Fatalf("workspace id = %v, want lowercase", got)
+	}
+	panes, _ := workspace["panes"].([]any)
+	pane, _ := panes[0].(map[string]any)
+	surfaces, _ := pane["surfaces"].([]any)
+	surface, _ := surfaces[0].(map[string]any)
+	if got := surface["id"]; got != strings.ToLower(surfaceID) {
+		t.Fatalf("surface id = %v, want lowercase", got)
+	}
+	if got := surface["ref"]; got != "surface:"+strings.ToLower(surfaceID) {
+		t.Fatalf("surface ref = %v, want lowercase prefixed ref", got)
 	}
 }
 

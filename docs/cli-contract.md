@@ -133,6 +133,7 @@ Environment:
 | `trigger-flash` | Trigger a visual flash on a workspace or surface. |
 | `list-panels` | List panels. Compatibility alias over pane/surface data. |
 | `focus-panel` | Focus a panel. Compatibility alias over surface focus. |
+| `focus-surface` | Focus a surface. |
 | `close-workspace` | Close a workspace. |
 | `select-workspace` | Select a workspace. |
 | `rename-workspace`, `rename-window` | Rename a workspace. `rename-window` is a compatibility alias. |
@@ -152,7 +153,7 @@ Environment:
 | `right-sidebar` | Control right sidebar visibility, mode, focus, and state reads. |
 | `set-status` | Set a sidebar status pill. |
 | `clear-status` | Remove a sidebar status pill. |
-| `list-status` | List sidebar status pills. |
+| `list-status` | List sidebar status pills. Supports `--json`, returning `entries` and `count`. |
 | `set-progress` | Set sidebar progress. |
 | `clear-progress` | Clear sidebar progress. |
 | `log` | Append a sidebar log entry. |
@@ -466,6 +467,7 @@ the expected text without connecting to a cmux socket.
 - `cmux trigger-flash --help` -> `Usage: cmux trigger-flash`
 - `cmux list-panels --help` -> `Usage: cmux list-panels`
 - `cmux focus-panel --help` -> `Usage: cmux focus-panel`
+- `cmux focus-surface --help` -> `Usage: cmux focus-surface`
 - `cmux close-workspace --help` -> `Usage: cmux close-workspace`
 - `cmux select-workspace --help` -> `Usage: cmux select-workspace`
 - `cmux rename-workspace --help` -> `Usage: cmux rename-workspace`

@@ -19,6 +19,10 @@ func headlessNormalizeID(value string) string {
 	return value
 }
 
+func canonicalHeadlessID(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
 func headlessMetadataMap(body map[string]any) map[string]string {
 	result := map[string]string{}
 	raw, _ := body["metadataEntries"].(map[string]any)
