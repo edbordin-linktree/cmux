@@ -29,6 +29,32 @@ should_skip_ghostty_cli_helper_zig_build() {
   return 1
 }
 
+ensure_submodule_at_gitlink() {
+  local path="$1"
+  local expected=""
+  local actual=""
+  local ls_tree=""
+
+  ls_tree="$(git ls-tree HEAD "$path" 2>/dev/null || true)"
+  expected="$(awk '{print $3}' <<<"$ls_tree")"
+  [[ -n "$expected" ]] || return 0
+
+  if [[ -d "$path/.git" || -f "$path/.git" ]]; then
+    actual="$(git -C "$path" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$actual" == "$expected" ]]; then
+      return 0
+    fi
+    if ! git -C "$path" diff --quiet --ignore-submodules=all HEAD --; then
+      echo "error: $path has local tracked changes and is not at the expected commit $expected" >&2
+      echo "       Commit/stash those changes or run: git submodule update --init $path" >&2
+      exit 1
+    fi
+  fi
+
+  echo "==> updating $path submodule to $expected"
+  git submodule update --init "$path"
+}
+
 write_dev_cli_shim() {
   local target="$1"
   local fallback_bin="$2"
@@ -539,6 +565,7 @@ trap reload_finalize EXIT
 # Tell the user we're starting (visible even though body output is redirected).
 echo "==> reload starting (tag: ${TAG}, log: ${RELOAD_LOG})" >&3
 
+ensure_submodule_at_gitlink vendor/bonsplit
 "$PWD/scripts/ensure-ghosttykit.sh"
 
 if should_skip_ghostty_cli_helper_zig_build; then
