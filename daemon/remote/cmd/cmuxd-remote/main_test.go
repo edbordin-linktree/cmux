@@ -378,6 +378,87 @@ func TestPersistentDaemonPathsIncludeDaemonVersion(t *testing.T) {
 	}
 }
 
+func TestEnsurePersistentDaemonDirectoryMigratesLegacyWorkspaceSnapshot(t *testing.T) {
+	rootBase := filepath.Join(t.TempDir(), "daemon-root")
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", rootBase)
+	t.Setenv("CMUX_REMOTE_DAEMON_SOCKET_DIR", "")
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "v-migrate"
+
+	paths, err := persistentDaemonPathsForSlot("legacy-migrate-slot")
+	if err != nil {
+		t.Fatalf("persistentDaemonPathsForSlot returned error: %v", err)
+	}
+	legacyRoot, ok := legacyPersistentDaemonRoot(paths)
+	if !ok {
+		t.Fatalf("legacyPersistentDaemonRoot returned ok=false for %q", paths.root)
+	}
+	body := `{"version":1,"title":"legacy"}`
+	writeWorkspaceSnapshotFilesForTest(t, legacyRoot, body, "legacy")
+
+	if _, err := ensurePersistentDaemonDirectory(paths); err != nil {
+		t.Fatalf("ensurePersistentDaemonDirectory returned error: %v", err)
+	}
+
+	currentBody, err := os.ReadFile(filepath.Join(paths.root, workspaceSnapshotBodyFile))
+	if err != nil {
+		t.Fatalf("read migrated body: %v", err)
+	}
+	if string(currentBody) != body {
+		t.Fatalf("migrated body = %q, want %q", string(currentBody), body)
+	}
+	if _, err := os.Stat(filepath.Join(paths.root, workspaceSnapshotMetaFile)); err != nil {
+		t.Fatalf("stat migrated meta: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyRoot, workspaceSnapshotBodyFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy body stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyRoot, workspaceSnapshotMetaFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy meta stat err = %v, want not exist", err)
+	}
+}
+
+func TestEnsurePersistentDaemonDirectoryCurrentSnapshotWinsOverLegacy(t *testing.T) {
+	rootBase := filepath.Join(t.TempDir(), "daemon-root")
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", rootBase)
+	t.Setenv("CMUX_REMOTE_DAEMON_SOCKET_DIR", "")
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "v-current-wins"
+
+	paths, err := persistentDaemonPathsForSlot("current-wins-slot")
+	if err != nil {
+		t.Fatalf("persistentDaemonPathsForSlot returned error: %v", err)
+	}
+	legacyRoot, ok := legacyPersistentDaemonRoot(paths)
+	if !ok {
+		t.Fatalf("legacyPersistentDaemonRoot returned ok=false for %q", paths.root)
+	}
+	legacyBody := `{"version":1,"title":"legacy"}`
+	currentBody := `{"version":1,"title":"current"}`
+	writeWorkspaceSnapshotFilesForTest(t, legacyRoot, legacyBody, "legacy")
+	writeWorkspaceSnapshotFilesForTest(t, paths.root, currentBody, "current")
+
+	if _, err := ensurePersistentDaemonDirectory(paths); err != nil {
+		t.Fatalf("ensurePersistentDaemonDirectory returned error: %v", err)
+	}
+
+	gotBody, err := os.ReadFile(filepath.Join(paths.root, workspaceSnapshotBodyFile))
+	if err != nil {
+		t.Fatalf("read current body: %v", err)
+	}
+	if string(gotBody) != currentBody {
+		t.Fatalf("current body = %q, want %q", string(gotBody), currentBody)
+	}
+	if _, err := os.Stat(filepath.Join(legacyRoot, workspaceSnapshotBodyFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy body stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyRoot, workspaceSnapshotMetaFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy meta stat err = %v, want not exist", err)
+	}
+}
+
 func TestPersistentDaemonSocketDirOverrideUsesPrivateChild(t *testing.T) {
 	rootBase := filepath.Join(t.TempDir(), "daemon-root")
 	socketParent := filepath.Join(t.TempDir(), "caller-socket-dir")
@@ -2477,6 +2558,37 @@ func workspaceSnapshotStoreParams(body string) map[string]any {
 		"schema_version": 1,
 		"body":           body,
 		"body_sha256":    sha256Hex(body),
+	}
+}
+
+func writeWorkspaceSnapshotFilesForTest(t *testing.T, root string, body string, title string) {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("create snapshot root: %v", err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatalf("chmod snapshot root: %v", err)
+	}
+	meta := workspaceSnapshotMeta{
+		Version:        1,
+		WorkspaceID:    "3f4a8d21-6a8f-4ef9-a979-7d712f2a8d9e",
+		Title:          title,
+		Status:         "detached",
+		DetachedAt:     "2026-05-27T01:02:03.123Z",
+		UpdatedAt:      "2026-05-27T01:02:03.123Z",
+		SchemaVersion:  1,
+		SnapshotSHA256: sha256Hex(body),
+		BodyByteLength: len(body),
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal snapshot meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, workspaceSnapshotBodyFile), []byte(body), 0o600); err != nil {
+		t.Fatalf("write snapshot body: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, workspaceSnapshotMetaFile), metaBytes, 0o600); err != nil {
+		t.Fatalf("write snapshot meta: %v", err)
 	}
 }
 

@@ -631,6 +631,9 @@ func ensurePersistentDaemonDirectory(paths persistentDaemonPaths) (persistentDae
 	if err := verifyPrivateDaemonDirectory(paths.root); err != nil {
 		return paths, err
 	}
+	if err := migrateLegacyWorkspaceSnapshotIfNeeded(paths); err != nil {
+		return paths, err
+	}
 	socketDir := filepath.Dir(paths.socket)
 	secureSocketDir, err := ensurePersistentDaemonSocketDirectory(paths.root, socketDir)
 	if err != nil {
@@ -638,6 +641,142 @@ func ensurePersistentDaemonDirectory(paths persistentDaemonPaths) (persistentDae
 	}
 	paths.socket = filepath.Join(secureSocketDir, filepath.Base(paths.socket))
 	return paths, nil
+}
+
+func migrateLegacyWorkspaceSnapshotIfNeeded(paths persistentDaemonPaths) error {
+	legacyRoot, ok := legacyPersistentDaemonRoot(paths)
+	if !ok {
+		return nil
+	}
+	legacyBody, legacyMeta, err := workspaceSnapshotFilePresence(legacyRoot)
+	if err != nil {
+		return err
+	}
+	if !legacyBody && !legacyMeta {
+		return nil
+	}
+
+	unlockLegacy, err := lockWorkspaceSnapshot(legacyRoot)
+	if err != nil {
+		return err
+	}
+	defer unlockLegacy()
+	unlockCurrent, err := lockWorkspaceSnapshot(paths.root)
+	if err != nil {
+		return err
+	}
+	defer unlockCurrent()
+
+	currentBody, currentMeta, err := workspaceSnapshotFilePresence(paths.root)
+	if err != nil {
+		return err
+	}
+	legacyBody, legacyMeta, err = workspaceSnapshotFilePresence(legacyRoot)
+	if err != nil {
+		return err
+	}
+	if currentBody && currentMeta {
+		if legacyBody || legacyMeta {
+			return removeWorkspaceSnapshotPair(legacyRoot)
+		}
+		return nil
+	}
+	if currentBody || currentMeta || !legacyBody || !legacyMeta {
+		return nil
+	}
+
+	bodyPath := filepath.Join(legacyRoot, workspaceSnapshotBodyFile)
+	metaPath := filepath.Join(legacyRoot, workspaceSnapshotMetaFile)
+	body, err := os.ReadFile(bodyPath)
+	if err != nil {
+		return err
+	}
+	if len(body) > workspaceSnapshotMaxBytes {
+		return fmt.Errorf("legacy workspace snapshot body is too large: %d bytes", len(body))
+	}
+	metaBytes, err := os.ReadFile(metaPath)
+	if err != nil {
+		return err
+	}
+	if len(metaBytes) > workspaceSnapshotMetaMaxBytes {
+		return fmt.Errorf("legacy workspace snapshot metadata is too large: %d bytes", len(metaBytes))
+	}
+	var meta workspaceSnapshotMeta
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return fmt.Errorf("legacy workspace snapshot metadata is invalid: %w", err)
+	}
+	if meta.BodyByteLength != len(body) {
+		return fmt.Errorf("legacy workspace snapshot body length mismatch: meta=%d actual=%d", meta.BodyByteLength, len(body))
+	}
+	if !isValidSHA256Hex(meta.SnapshotSHA256) {
+		return fmt.Errorf("legacy workspace snapshot metadata has invalid sha256")
+	}
+	sum := sha256.Sum256(body)
+	if !strings.EqualFold(meta.SnapshotSHA256, hex.EncodeToString(sum[:])) {
+		return fmt.Errorf("legacy workspace snapshot hash mismatch")
+	}
+
+	currentBodyPath := filepath.Join(paths.root, workspaceSnapshotBodyFile)
+	currentMetaPath := filepath.Join(paths.root, workspaceSnapshotMetaFile)
+	if err := atomicWriteWorkspaceSnapshotPair(currentBodyPath, body, currentMetaPath, metaBytes); err != nil {
+		return err
+	}
+	return removeWorkspaceSnapshotPair(legacyRoot)
+}
+
+func legacyPersistentDaemonRoot(paths persistentDaemonPaths) (string, bool) {
+	if strings.TrimSpace(paths.slot) == "" || strings.TrimSpace(paths.root) == "" {
+		return "", false
+	}
+	versionDir := filepath.Dir(paths.root)
+	if filepath.Base(paths.root) != paths.slot || filepath.Base(versionDir) != persistentDaemonVersionComponent() {
+		return "", false
+	}
+	rootBase := filepath.Dir(versionDir)
+	if rootBase == "." || rootBase == string(filepath.Separator) {
+		return "", false
+	}
+	legacyRoot := filepath.Join(rootBase, paths.slot)
+	if legacyRoot == paths.root {
+		return "", false
+	}
+	return legacyRoot, true
+}
+
+func workspaceSnapshotFilePresence(root string) (bool, bool, error) {
+	body, err := regularFileExists(filepath.Join(root, workspaceSnapshotBodyFile))
+	if err != nil {
+		return false, false, err
+	}
+	meta, err := regularFileExists(filepath.Join(root, workspaceSnapshotMetaFile))
+	if err != nil {
+		return false, false, err
+	}
+	return body, meta, nil
+}
+
+func regularFileExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.IsDir() {
+		return false, fmt.Errorf("%s is a directory", path)
+	}
+	return true, nil
+}
+
+func removeWorkspaceSnapshotPair(root string) error {
+	var removedErr error
+	for _, name := range []string{workspaceSnapshotBodyFile, workspaceSnapshotMetaFile} {
+		if err := os.Remove(filepath.Join(root, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removedErr = errors.Join(removedErr, err)
+		}
+	}
+	return removedErr
 }
 
 func ensurePersistentDaemonSocketDirectory(root string, defaultSocketDir string) (string, error) {
