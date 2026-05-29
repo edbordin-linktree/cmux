@@ -96,11 +96,7 @@ func headlessSystemTree(params map[string]any) (map[string]any, error) {
 // snapshot into memory before running fn against it. Use this for reads; for
 // mutations that need to write back, use headlessMutate instead.
 func withHeadlessSnapshot(params map[string]any, fn func(*headlessSnapshot) (map[string]any, error)) (map[string]any, error) {
-	slot, err := resolveHeadlessSnapshotSlot(params)
-	if err != nil {
-		return nil, err
-	}
-	paths, err := persistentDaemonPathsForSlot(slot)
+	paths, err := resolveHeadlessSnapshotPaths(params)
 	if err != nil {
 		return nil, err
 	}

@@ -1676,14 +1676,7 @@ func TestCLIHeadlessSSHSameHostFallbackCreatesDetachedSnapshot(t *testing.T) {
 	if got := stringFromAny(terminal["cwdHint"]); got != cwd {
 		t.Fatalf("cwdHint = %q, want %q", got, cwd)
 	}
-	metaBytes, err := os.ReadFile(filepath.Join(root, slot, workspaceSnapshotMetaFile))
-	if err != nil {
-		t.Fatalf("read meta: %v", err)
-	}
-	var meta workspaceSnapshotMeta
-	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		t.Fatalf("decode meta: %v", err)
-	}
+	meta := readHeadlessCLITestMeta(t, root, slot)
 	if meta.Status != "detached" {
 		t.Fatalf("meta status = %q, want detached", meta.Status)
 	}
@@ -1741,14 +1734,7 @@ func TestCLIHeadlessSSHIgnoresImplicitSocketAddrInRemoteContext(t *testing.T) {
 	if got, _ := result["detached"].(bool); !got {
 		t.Fatalf("detached = %v, want true", result["detached"])
 	}
-	var meta workspaceSnapshotMeta
-	metaBytes, err := os.ReadFile(filepath.Join(root, slot, workspaceSnapshotMetaFile))
-	if err != nil {
-		t.Fatalf("read meta: %v", err)
-	}
-	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		t.Fatalf("decode meta: %v", err)
-	}
+	meta := readHeadlessCLITestMeta(t, root, slot)
 	if meta.Status != "detached" {
 		t.Fatalf("meta status = %q, want detached", meta.Status)
 	}
@@ -1838,7 +1824,7 @@ func TestCLIHeadlessMetadataSetWaitsForSnapshotLock(t *testing.T) {
 	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
 	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
 	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
-	paths, err := persistentDaemonPathsForSlot(slot)
+	paths, err := headlessPathsForSlot(slot)
 	if err != nil {
 		t.Fatalf("persistent daemon paths: %v", err)
 	}
@@ -2270,7 +2256,7 @@ func writeHeadlessCLITestSnapshotAtWithMetadata(t *testing.T, root string, works
 
 func readHeadlessCLITestBody(t *testing.T, root string, slot string) map[string]any {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, slot, workspaceSnapshotBodyFile))
+	data, err := os.ReadFile(filepath.Join(headlessCLITestSlotRoot(root, slot), workspaceSnapshotBodyFile))
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
@@ -2279,4 +2265,29 @@ func readHeadlessCLITestBody(t *testing.T, root string, slot string) map[string]
 		t.Fatalf("decode body: %v", err)
 	}
 	return body
+}
+
+func readHeadlessCLITestMeta(t *testing.T, root string, slot string) workspaceSnapshotMeta {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(headlessCLITestSlotRoot(root, slot), workspaceSnapshotMetaFile))
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var meta workspaceSnapshotMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("decode meta: %v", err)
+	}
+	return meta
+}
+
+func headlessCLITestSlotRoot(root string, slot string) string {
+	legacyRoot := filepath.Join(root, slot)
+	if _, err := os.Stat(filepath.Join(legacyRoot, workspaceSnapshotBodyFile)); err == nil {
+		return legacyRoot
+	}
+	versionedRoot := filepath.Join(root, persistentDaemonVersionComponent(), slot)
+	if _, err := os.Stat(filepath.Join(versionedRoot, workspaceSnapshotBodyFile)); err == nil {
+		return versionedRoot
+	}
+	return legacyRoot
 }

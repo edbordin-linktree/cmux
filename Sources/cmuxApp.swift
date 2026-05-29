@@ -106,24 +106,19 @@ struct cmuxApp: App {
 
     private static func configureGhosttyEnvironment() {
         let fileManager = FileManager.default
-        let ghosttyAppResources = "/Applications/Ghostty.app/Contents/Resources/ghostty"
-        let bundledGhosttyURL = Bundle.main.resourceURL?.appendingPathComponent("ghostty")
-        var resolvedResourcesDir: String?
+        let currentResourcesDir = getenv("GHOSTTY_RESOURCES_DIR").flatMap { String(cString: $0) }
+        if let resolvedResourcesDir = resolvedGhosttyResourcesDirectory(
+            currentValue: currentResourcesDir,
+            bundleResourceURL: Bundle.main.resourceURL,
+            fileManager: fileManager
+        ) {
+            setenv("GHOSTTY_RESOURCES_DIR", resolvedResourcesDir, 1)
+        }
 
-        if getenv("GHOSTTY_RESOURCES_DIR") == nil {
-            if let bundledGhosttyURL,
-               fileManager.fileExists(atPath: bundledGhosttyURL.path),
-               fileManager.fileExists(atPath: bundledGhosttyURL.appendingPathComponent("themes").path) {
-                resolvedResourcesDir = bundledGhosttyURL.path
-            } else if fileManager.fileExists(atPath: ghosttyAppResources) {
-                resolvedResourcesDir = ghosttyAppResources
-            } else if let bundledGhosttyURL, fileManager.fileExists(atPath: bundledGhosttyURL.path) {
-                resolvedResourcesDir = bundledGhosttyURL.path
-            }
-
-            if let resolvedResourcesDir {
-                setenv("GHOSTTY_RESOURCES_DIR", resolvedResourcesDir, 1)
-            }
+        if getenv("TERMINFO") == nil,
+           let terminfoURL = Bundle.main.resourceURL?.appendingPathComponent("terminfo"),
+           fileManager.fileExists(atPath: terminfoURL.path) {
+            setenv("TERMINFO", terminfoURL.path, 1)
         }
 
         if getenv("TERM") == nil {
@@ -151,16 +146,49 @@ struct cmuxApp: App {
             let dataDir = resourcesParent.path
             let manDir = resourcesParent.appendingPathComponent("man").path
 
-            appendEnvPathIfMissing(
+            prependEnvPathIfMissing(
                 "XDG_DATA_DIRS",
                 path: dataDir,
                 defaultValue: "/usr/local/share:/usr/share"
             )
-            appendEnvPathIfMissing("MANPATH", path: manDir)
+            prependEnvPathIfMissing("MANPATH", path: manDir)
         }
     }
 
-    private static func appendEnvPathIfMissing(_ key: String, path: String, defaultValue: String? = nil) {
+    static func resolvedGhosttyResourcesDirectory(
+        currentValue: String?,
+        bundleResourceURL: URL?,
+        ghosttyAppResources: String = "/Applications/Ghostty.app/Contents/Resources/ghostty",
+        fileManager: FileManager = .default
+    ) -> String? {
+        let bundledGhosttyURL = bundleResourceURL?.appendingPathComponent("ghostty")
+        // Tagged cmux builds may inherit GHOSTTY_RESOURCES_DIR from another running
+        // cmux instance. Prefer this app's bundled resources when they are present.
+        if let bundledGhosttyURL,
+           fileManager.fileExists(atPath: bundledGhosttyURL.path),
+           fileManager.fileExists(atPath: bundledGhosttyURL.appendingPathComponent("themes").path) {
+            return bundledGhosttyURL.path
+        }
+
+        if let currentValue = currentValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !currentValue.isEmpty,
+           fileManager.fileExists(atPath: currentValue) {
+            return currentValue
+        }
+
+        if fileManager.fileExists(atPath: ghosttyAppResources) {
+            return ghosttyAppResources
+        }
+
+        if let bundledGhosttyURL,
+           fileManager.fileExists(atPath: bundledGhosttyURL.path) {
+            return bundledGhosttyURL.path
+        }
+
+        return nil
+    }
+
+    private static func prependEnvPathIfMissing(_ key: String, path: String, defaultValue: String? = nil) {
         if path.isEmpty { return }
         var current = getenv(key).flatMap { String(cString: $0) } ?? ""
         if current.isEmpty, let defaultValue {
@@ -169,7 +197,7 @@ struct cmuxApp: App {
         if current.split(separator: ":").contains(Substring(path)) {
             return
         }
-        let updated = current.isEmpty ? path : "\(current):\(path)"
+        let updated = current.isEmpty ? path : "\(path):\(current)"
         setenv(key, updated, 1)
     }
 
@@ -4948,10 +4976,24 @@ enum TelemetrySettings {
 
 enum CmdClickMarkdownRouteSettings {
     static let key = "openMarkdownInCmuxViewer"
-    static let defaultValue = false
+    static let didChangeNotification = Notification.Name("cmux.cmdClickMarkdownRouteDidChange")
+    static let defaultValue = true
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: key) == nil ? defaultValue : defaults.bool(forKey: key)
+    }
+
+    static func setEnabled(
+        _ enabled: Bool,
+        defaults: UserDefaults = .standard,
+        notificationCenter: NotificationCenter = .default
+    ) {
+        defaults.set(enabled, forKey: key)
+        notifyDidChange(notificationCenter: notificationCenter)
+    }
+
+    static func notifyDidChange(notificationCenter: NotificationCenter = .default) {
+        notificationCenter.post(name: didChangeNotification, object: nil)
     }
 
     /// Cheap extension check. Safe to call off the main thread before any
@@ -5251,6 +5293,8 @@ struct SettingsView: View {
     @AppStorage(AutomationSettings.portBaseKey) private var cmuxPortBase = AutomationSettings.defaultPortBase
     @AppStorage(AutomationSettings.portRangeKey) private var cmuxPortRange = AutomationSettings.defaultPortRange
     @AppStorage(BrowserSearchSettings.searchEngineKey) private var browserSearchEngine = BrowserSearchSettings.defaultSearchEngine.rawValue
+    @AppStorage(BrowserSearchSettings.customSearchEngineNameKey) private var browserCustomSearchEngineName = BrowserSearchSettings.defaultCustomSearchEngineName
+    @AppStorage(BrowserSearchSettings.customSearchEngineURLTemplateKey) private var browserCustomSearchEngineURLTemplate = BrowserSearchSettings.defaultCustomSearchEngineURLTemplate
     @AppStorage(BrowserSearchSettings.searchSuggestionsEnabledKey) private var browserSearchSuggestionsEnabled = BrowserSearchSettings.defaultSearchSuggestionsEnabled
     @AppStorage(BrowserThemeSettings.modeKey) private var browserThemeMode = BrowserThemeSettings.defaultMode.rawValue
     @AppStorage(BrowserAvailabilitySettings.disabledKey) private var browserDisabled = BrowserAvailabilitySettings.defaultDisabled
@@ -5319,6 +5363,8 @@ struct SettingsView: View {
     private var sidebarHideAllDetails = SidebarWorkspaceDetailSettings.defaultHideAllDetails
     @AppStorage(SidebarWorkspaceDetailSettings.showWorkspaceDescriptionKey)
     private var sidebarShowWorkspaceDescription = SidebarWorkspaceDetailSettings.defaultShowWorkspaceDescription
+    @AppStorage(SidebarWorkspaceTitleWrapSettings.key)
+    private var sidebarWrapWorkspaceTitles = SidebarWorkspaceTitleWrapSettings.defaultWrap
     @AppStorage(SidebarWorkspaceDetailSettings.showNotificationMessageKey)
     private var sidebarShowNotificationMessage = SidebarWorkspaceDetailSettings.defaultShowNotificationMessage
     @AppStorage(SidebarBranchLayoutSettings.key) private var sidebarBranchVerticalLayout = SidebarBranchLayoutSettings.defaultVerticalLayout
@@ -5675,6 +5721,16 @@ struct SettingsView: View {
             set: { newValue in
                 CmdClickSupportedFileRouteSettings.setEnabled(newValue)
                 openSupportedFilesInCmux = newValue
+            }
+        )
+    }
+
+    private var markdownRoutingBinding: Binding<Bool> {
+        Binding(
+            get: { openMarkdownInCmuxViewer },
+            set: { newValue in
+                CmdClickMarkdownRouteSettings.setEnabled(newValue)
+                openMarkdownInCmuxViewer = newValue
             }
         )
     }
@@ -6411,9 +6467,9 @@ struct SettingsView: View {
                         SettingsCardRow(
                             configurationReview: .json("app.openMarkdownInCmuxViewer"),
                             String(localized: "settings.app.openMarkdownInCmuxViewer", defaultValue: "Open Markdown in cmux Viewer"),
-                            subtitle: String(localized: "settings.app.openMarkdownInCmuxViewer.subtitle", defaultValue: "When supported file routing is on, Cmd-clicking Markdown files opens the rendered cmux markdown viewer instead of the generic file preview.")
+                            subtitle: String(localized: "settings.app.openMarkdownInCmuxViewer.subtitle", defaultValue: "Cmd-clicking Markdown files opens the rendered cmux markdown viewer instead of the generic file preview.")
                         ) {
-                            Toggle("", isOn: $openMarkdownInCmuxViewer)
+                            Toggle("", isOn: markdownRoutingBinding)
                                 .labelsHidden()
                                 .controlSize(.small)
                                 .accessibilityLabel(
@@ -6907,6 +6963,20 @@ struct SettingsView: View {
                         SettingsCardDivider()
 
                         SettingsCardRow(
+                            configurationReview: .json("sidebar.wrapWorkspaceTitles"),
+                            String(localized: "settings.app.wrapWorkspaceTitles", defaultValue: "Wrap Workspace Titles in Sidebar"),
+                            subtitle: sidebarWrapWorkspaceTitles
+                                ? String(localized: "settings.app.wrapWorkspaceTitles.subtitleOn", defaultValue: "Long workspace titles can use as many lines as they need.")
+                                : String(localized: "settings.app.wrapWorkspaceTitles.subtitleOff", defaultValue: "Workspace titles stay on one line and truncate at the end.")
+                        ) {
+                            Toggle("", isOn: $sidebarWrapWorkspaceTitles)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
                             configurationReview: .json("sidebar.showWorkspaceDescription"),
                             String(localized: "settings.app.showWorkspaceDescription", defaultValue: "Show Workspace Description in Sidebar"),
                             subtitle: String(localized: "settings.app.showWorkspaceDescription.subtitle", defaultValue: "Display custom workspace descriptions below the workspace title.")
@@ -7317,6 +7387,32 @@ struct SettingsView: View {
                         }
 
                         SettingsCardDivider()
+
+                        if browserSearchEngine == BrowserSearchEngine.custom.rawValue {
+                            SettingsCardRow(
+                                configurationReview: .json("browser.customSearchEngineName"),
+                                String(localized: "settings.browser.customSearchEngineName", defaultValue: "Custom Search Engine Name"),
+                                subtitle: String(localized: "settings.browser.customSearchEngineName.subtitle", defaultValue: "Shown in browser address bar search suggestions."),
+                                controlWidth: pickerColumnWidth
+                            ) {
+                                TextField("", text: $browserCustomSearchEngineName)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+
+                            SettingsCardDivider()
+
+                            SettingsCardRow(
+                                configurationReview: .json("browser.customSearchEngineURLTemplate"),
+                                String(localized: "settings.browser.customSearchEngineURLTemplate", defaultValue: "Custom Search URL"),
+                                subtitle: String(localized: "settings.browser.customSearchEngineURLTemplate.subtitle", defaultValue: "Use {query} or %s for the search terms. Without a placeholder, cmux appends q=."),
+                                controlWidth: 330
+                            ) {
+                                TextField("", text: $browserCustomSearchEngineURLTemplate)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+
+                            SettingsCardDivider()
+                        }
 
                         SettingsCardRow(configurationReview: .json("browser.showSearchSuggestions"), String(localized: "settings.browser.searchSuggestions", defaultValue: "Show Search Suggestions")) {
                             Toggle("", isOn: $browserSearchSuggestionsEnabled)
@@ -8066,8 +8162,11 @@ struct SettingsView: View {
         preferredEditorCommand = ""
         CmdClickSupportedFileRouteSettings.setEnabled(CmdClickSupportedFileRouteSettings.defaultValue)
         openSupportedFilesInCmux = CmdClickSupportedFileRouteSettings.defaultValue
+        CmdClickMarkdownRouteSettings.setEnabled(CmdClickMarkdownRouteSettings.defaultValue)
         openMarkdownInCmuxViewer = CmdClickMarkdownRouteSettings.defaultValue
         browserSearchEngine = BrowserSearchSettings.defaultSearchEngine.rawValue
+        browserCustomSearchEngineName = BrowserSearchSettings.defaultCustomSearchEngineName
+        browserCustomSearchEngineURLTemplate = BrowserSearchSettings.defaultCustomSearchEngineURLTemplate
         browserSearchSuggestionsEnabled = BrowserSearchSettings.defaultSearchSuggestionsEnabled
         browserThemeMode = BrowserThemeSettings.defaultMode.rawValue
         BrowserAvailabilitySettings.setDisabled(BrowserAvailabilitySettings.defaultDisabled)
@@ -8137,6 +8236,7 @@ struct SettingsView: View {
         workspaceAutoReorder = WorkspaceAutoReorderSettings.defaultValue
         iMessageMode = IMessageModeSettings.defaultValue
         sidebarHideAllDetails = SidebarWorkspaceDetailSettings.defaultHideAllDetails
+        sidebarWrapWorkspaceTitles = SidebarWorkspaceTitleWrapSettings.defaultWrap
         sidebarShowWorkspaceDescription = SidebarWorkspaceDetailSettings.defaultShowWorkspaceDescription
         sidebarShowNotificationMessage = SidebarWorkspaceDetailSettings.defaultShowNotificationMessage
         sidebarBranchVerticalLayout = SidebarBranchLayoutSettings.defaultVerticalLayout

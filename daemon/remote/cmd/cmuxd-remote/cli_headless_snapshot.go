@@ -35,15 +35,35 @@ var (
 )
 
 func loadHeadlessSnapshot(params map[string]any) (*headlessSnapshot, error) {
-	slot, err := resolveHeadlessSnapshotSlot(params)
-	if err != nil {
-		return nil, err
-	}
-	paths, err := persistentDaemonPathsForSlot(slot)
+	paths, err := resolveHeadlessSnapshotPaths(params)
 	if err != nil {
 		return nil, err
 	}
 	return loadHeadlessSnapshotAtSlot(params, paths)
+}
+
+func resolveHeadlessSnapshotPaths(params map[string]any) (persistentDaemonPaths, error) {
+	workspaceID := headlessWorkspaceID(params)
+	if workspaceID != "" {
+		rootBase, err := headlessDaemonRoot()
+		if err != nil {
+			return persistentDaemonPaths{}, err
+		}
+		paths, resolveErr := findHeadlessPathsForWorkspace(rootBase, workspaceID)
+		if resolveErr == nil {
+			return paths, nil
+		}
+		envSlot := firstNonEmptyEnv("CMUX_REMOTE_DAEMON_SLOT", "CMUX_PERSISTENT_DAEMON_SLOT", "CMUX_DAEMON_SLOT")
+		if envSlot == "" {
+			return persistentDaemonPaths{}, resolveErr
+		}
+		return headlessPathsForSlot(envSlot)
+	}
+	slot, err := resolveHeadlessSnapshotSlot(params)
+	if err != nil {
+		return persistentDaemonPaths{}, err
+	}
+	return headlessPathsForSlot(slot)
 }
 
 func resolveHeadlessSnapshotSlot(params map[string]any) (string, error) {
@@ -154,7 +174,7 @@ func loadAllHeadlessSnapshots() ([]*headlessSnapshot, []map[string]any) {
 	if err != nil {
 		return nil, []map[string]any{{"error": err.Error()}}
 	}
-	entries, err := os.ReadDir(rootBase)
+	slotRoots, err := headlessSnapshotSlotRoots(rootBase)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -163,16 +183,9 @@ func loadAllHeadlessSnapshots() ([]*headlessSnapshot, []map[string]any) {
 	}
 	var snapshots []*headlessSnapshot
 	var loadErrors []map[string]any
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		slot := entry.Name()
-		paths, err := persistentDaemonPathsForSlot(slot)
-		if err != nil {
-			loadErrors = append(loadErrors, map[string]any{"slot": slot, "error": err.Error()})
-			continue
-		}
+	for _, slotRoot := range slotRoots {
+		slot := slotRoot.slot
+		paths := pathsForHeadlessSlotRoot(slot, slotRoot.root)
 		unlock, lockErr := lockWorkspaceSnapshot(paths.root)
 		if lockErr != nil {
 			loadErrors = append(loadErrors, map[string]any{"slot": slot, "error": lockErr.Error()})
@@ -218,31 +231,121 @@ func loadAllHeadlessSnapshots() ([]*headlessSnapshot, []map[string]any) {
 }
 
 func findHeadlessSlotForWorkspace(rootBase, workspaceID string) (string, error) {
-	entries, err := os.ReadDir(rootBase)
+	paths, err := findHeadlessPathsForWorkspace(rootBase, workspaceID)
 	if err != nil {
 		return "", err
 	}
-	var matches []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(rootBase, entry.Name(), workspaceSnapshotMetaFile))
+	return paths.slot, nil
+}
+
+func findHeadlessPathsForWorkspace(rootBase, workspaceID string) (persistentDaemonPaths, error) {
+	slotRoots, err := headlessSnapshotSlotRoots(rootBase)
+	if err != nil {
+		return persistentDaemonPaths{}, err
+	}
+	var matches []persistentDaemonPaths
+	for _, slotRoot := range slotRoots {
+		data, err := os.ReadFile(filepath.Join(slotRoot.root, workspaceSnapshotMetaFile))
 		if err != nil {
 			continue
 		}
 		var meta workspaceSnapshotMeta
 		if json.Unmarshal(data, &meta) == nil && strings.EqualFold(meta.WorkspaceID, workspaceID) {
-			matches = append(matches, entry.Name())
+			matches = append(matches, pathsForHeadlessSlotRoot(slotRoot.slot, slotRoot.root))
 		}
 	}
 	if len(matches) == 0 {
-		return "", fmt.Errorf("no detached snapshot found for workspace %s", workspaceID)
+		return persistentDaemonPaths{}, fmt.Errorf("no detached snapshot found for workspace %s", workspaceID)
 	}
 	if len(matches) > 1 {
-		return "", fmt.Errorf("multiple detached snapshots found for workspace %s; set CMUX_REMOTE_DAEMON_SLOT", workspaceID)
+		return persistentDaemonPaths{}, fmt.Errorf("multiple detached snapshots found for workspace %s; set CMUX_REMOTE_DAEMON_SLOT", workspaceID)
 	}
 	return matches[0], nil
+}
+
+type headlessSnapshotSlotRoot struct {
+	slot string
+	root string
+}
+
+func headlessSnapshotSlotRoots(rootBase string) ([]headlessSnapshotSlotRoot, error) {
+	entries, err := os.ReadDir(rootBase)
+	if err != nil {
+		return nil, err
+	}
+	var roots []headlessSnapshotSlotRoot
+	seen := map[string]bool{}
+	add := func(slot, root string) {
+		key := slot + "\x00" + root
+		if seen[key] || !headlessSnapshotFilesPresent(root) {
+			return
+		}
+		seen[key] = true
+		roots = append(roots, headlessSnapshotSlotRoot{slot: slot, root: root})
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		directRoot := filepath.Join(rootBase, entry.Name())
+		add(entry.Name(), directRoot)
+		children, childErr := os.ReadDir(directRoot)
+		if childErr != nil {
+			continue
+		}
+		for _, child := range children {
+			if child.IsDir() {
+				add(child.Name(), filepath.Join(directRoot, child.Name()))
+			}
+		}
+	}
+	sort.Slice(roots, func(i, j int) bool {
+		if roots[i].slot != roots[j].slot {
+			return roots[i].slot < roots[j].slot
+		}
+		return roots[i].root < roots[j].root
+	})
+	return roots, nil
+}
+
+func headlessSnapshotFilesPresent(root string) bool {
+	if _, err := os.Stat(filepath.Join(root, workspaceSnapshotMetaFile)); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(root, workspaceSnapshotBodyFile)); err == nil {
+		return true
+	}
+	return false
+}
+
+func headlessPathsForSlot(slot string) (persistentDaemonPaths, error) {
+	paths, err := persistentDaemonPathsForSlot(slot)
+	if err != nil {
+		return persistentDaemonPaths{}, err
+	}
+	if headlessSnapshotFilesPresent(paths.root) {
+		return paths, nil
+	}
+	rootBase, err := headlessDaemonRoot()
+	if err != nil {
+		return paths, nil
+	}
+	legacyRoot := filepath.Join(rootBase, slot)
+	if legacyRoot != paths.root && headlessSnapshotFilesPresent(legacyRoot) {
+		return pathsForHeadlessSlotRoot(slot, legacyRoot), nil
+	}
+	return paths, nil
+}
+
+func pathsForHeadlessSlotRoot(slot, root string) persistentDaemonPaths {
+	return persistentDaemonPaths{
+		slot:      slot,
+		root:      root,
+		socket:    persistentDaemonSocketPath(root, slot),
+		tokenFile: filepath.Join(root, "auth.token"),
+		logFile:   filepath.Join(root, "daemon.log"),
+		lockFile:  filepath.Join(root, "daemon.lock"),
+	}
 }
 
 func headlessDaemonRoot() (string, error) {
@@ -264,7 +367,8 @@ func headlessStartPTY(slot, sessionID, attachmentID, command string) error {
 	if err != nil {
 		return err
 	}
-	if err := ensurePersistentDaemonDirectory(paths); err != nil {
+	paths, err = ensurePersistentDaemonDirectory(paths)
+	if err != nil {
 		return err
 	}
 	token, err := persistentDaemonToken(paths)

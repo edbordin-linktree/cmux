@@ -17,7 +17,8 @@ func headlessCreateWorkspace(params map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensurePersistentDaemonDirectory(paths); err != nil {
+	paths, err = ensurePersistentDaemonDirectory(paths)
+	if err != nil {
 		return nil, err
 	}
 

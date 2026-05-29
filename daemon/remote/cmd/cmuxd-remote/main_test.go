@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -345,6 +346,174 @@ func TestPersistentDaemonPathsUseShortSocketPath(t *testing.T) {
 	}
 }
 
+func TestPersistentDaemonPathsIncludeDaemonVersion(t *testing.T) {
+	rootBase := filepath.Join(t.TempDir(), "daemon-root")
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", rootBase)
+	t.Setenv("CMUX_REMOTE_DAEMON_SOCKET_DIR", "")
+	oldVersion := version
+	defer func() { version = oldVersion }()
+
+	version = "v1.2.3"
+	first, err := persistentDaemonPathsForSlot("versioned-slot")
+	if err != nil {
+		t.Fatalf("persistentDaemonPathsForSlot returned error: %v", err)
+	}
+	if !strings.Contains(first.root, string(filepath.Separator)+"v1.2.3"+string(filepath.Separator)) {
+		t.Fatalf("root %q should include daemon version", first.root)
+	}
+
+	version = "v1.2.4"
+	second, err := persistentDaemonPathsForSlot("versioned-slot")
+	if err != nil {
+		t.Fatalf("persistentDaemonPathsForSlot returned error: %v", err)
+	}
+	if first.root == second.root {
+		t.Fatalf("root should change across versions: %q", first.root)
+	}
+	if first.socket == second.socket {
+		t.Fatalf("socket should change across versions: %q", first.socket)
+	}
+	if first.lockFile == second.lockFile {
+		t.Fatalf("lock file should change across versions: %q", first.lockFile)
+	}
+}
+
+func TestPersistentDaemonSocketDirOverrideUsesPrivateChild(t *testing.T) {
+	rootBase := filepath.Join(t.TempDir(), "daemon-root")
+	socketParent := filepath.Join(t.TempDir(), "caller-socket-dir")
+	if err := os.MkdirAll(socketParent, 0o755); err != nil {
+		t.Fatalf("create socket parent: %v", err)
+	}
+	if err := os.Chmod(socketParent, 0o755); err != nil {
+		t.Fatalf("chmod socket parent: %v", err)
+	}
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", rootBase)
+	t.Setenv("CMUX_REMOTE_DAEMON_SOCKET_DIR", socketParent)
+
+	paths, err := persistentDaemonPathsForSlot("override-slot")
+	if err != nil {
+		t.Fatalf("persistentDaemonPathsForSlot returned error: %v", err)
+	}
+	socketDir := filepath.Dir(paths.socket)
+	if socketDir == socketParent {
+		t.Fatalf("socket dir should be a private child, got parent %q", socketParent)
+	}
+	if filepath.Dir(socketDir) != socketParent {
+		t.Fatalf("socket dir parent = %q, want %q", filepath.Dir(socketDir), socketParent)
+	}
+
+	paths, err = ensurePersistentDaemonDirectory(paths)
+	if err != nil {
+		t.Fatalf("ensurePersistentDaemonDirectory returned error: %v", err)
+	}
+	parentInfo, err := os.Stat(socketParent)
+	if err != nil {
+		t.Fatalf("stat socket parent: %v", err)
+	}
+	if parentInfo.Mode().Perm() != 0o755 {
+		t.Fatalf("socket parent mode = %o, want 755", parentInfo.Mode().Perm())
+	}
+	childInfo, err := os.Stat(socketDir)
+	if err != nil {
+		t.Fatalf("stat socket child: %v", err)
+	}
+	if childInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("socket child mode = %o, want 700", childInfo.Mode().Perm())
+	}
+}
+
+func TestPersistentDaemonSocketDirFallsBackFromUnsafeSymlink(t *testing.T) {
+	rootBase := filepath.Join(t.TempDir(), "daemon-root")
+	socketParent := filepath.Join(t.TempDir(), "caller-socket-dir")
+	if err := os.MkdirAll(socketParent, 0o755); err != nil {
+		t.Fatalf("create socket parent: %v", err)
+	}
+	unsafeTarget := filepath.Join(t.TempDir(), "attacker-dir")
+	if err := os.MkdirAll(unsafeTarget, 0o755); err != nil {
+		t.Fatalf("create unsafe target: %v", err)
+	}
+	unsafeChild := filepath.Join(socketParent, fmt.Sprintf("cmuxd-remote-%d", os.Getuid()))
+	if err := os.Symlink(unsafeTarget, unsafeChild); err != nil {
+		t.Fatalf("create unsafe socket child symlink: %v", err)
+	}
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", rootBase)
+	t.Setenv("CMUX_REMOTE_DAEMON_SOCKET_DIR", socketParent)
+
+	paths, err := persistentDaemonPathsForSlot("unsafe-socket-slot")
+	if err != nil {
+		t.Fatalf("persistentDaemonPathsForSlot returned error: %v", err)
+	}
+	unsafeSocketDir := filepath.Dir(paths.socket)
+	if unsafeSocketDir != unsafeChild {
+		t.Fatalf("precondition failed: socket dir = %q, want unsafe child %q", unsafeSocketDir, unsafeChild)
+	}
+
+	paths, err = ensurePersistentDaemonDirectory(paths)
+	if err != nil {
+		t.Fatalf("ensurePersistentDaemonDirectory returned error: %v", err)
+	}
+	socketDir := filepath.Dir(paths.socket)
+	if socketDir == unsafeChild {
+		t.Fatalf("socket dir still points at unsafe child %q", socketDir)
+	}
+	if filepath.Clean(filepath.Dir(socketDir)) != filepath.Clean(os.TempDir()) {
+		t.Fatalf("fallback socket dir parent = %q, want %q", filepath.Dir(socketDir), os.TempDir())
+	}
+	info, err := os.Lstat(socketDir)
+	if err != nil {
+		t.Fatalf("stat fallback socket dir: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		t.Fatalf("fallback socket dir should be a real directory, got mode %v", info.Mode())
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("fallback socket dir mode = %o, want 700", info.Mode().Perm())
+	}
+	storedSocketDir, err := readPersistentDaemonSocketDir(paths.root)
+	if err != nil {
+		t.Fatalf("read stored fallback socket dir: %v", err)
+	}
+	if storedSocketDir != socketDir {
+		t.Fatalf("stored socket dir = %q, want %q", storedSocketDir, socketDir)
+	}
+}
+
+func TestPersistentDaemonSocketDirReusesStoredFallback(t *testing.T) {
+	rootBase := filepath.Join(t.TempDir(), "daemon-root")
+	socketParent := filepath.Join(t.TempDir(), "caller-socket-dir")
+	if err := os.MkdirAll(socketParent, 0o755); err != nil {
+		t.Fatalf("create socket parent: %v", err)
+	}
+	unsafeChild := filepath.Join(socketParent, fmt.Sprintf("cmuxd-remote-%d", os.Getuid()))
+	if err := os.WriteFile(unsafeChild, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("create unsafe socket child file: %v", err)
+	}
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", rootBase)
+	t.Setenv("CMUX_REMOTE_DAEMON_SOCKET_DIR", socketParent)
+
+	paths, err := persistentDaemonPathsForSlot("stored-fallback-slot")
+	if err != nil {
+		t.Fatalf("persistentDaemonPathsForSlot returned error: %v", err)
+	}
+	paths, err = ensurePersistentDaemonDirectory(paths)
+	if err != nil {
+		t.Fatalf("ensurePersistentDaemonDirectory returned error: %v", err)
+	}
+	firstSocketDir := filepath.Dir(paths.socket)
+
+	nextPaths, err := persistentDaemonPathsForSlot("stored-fallback-slot")
+	if err != nil {
+		t.Fatalf("persistentDaemonPathsForSlot returned error: %v", err)
+	}
+	nextPaths, err = ensurePersistentDaemonDirectory(nextPaths)
+	if err != nil {
+		t.Fatalf("second ensurePersistentDaemonDirectory returned error: %v", err)
+	}
+	if filepath.Dir(nextPaths.socket) != firstSocketDir {
+		t.Fatalf("second socket dir = %q, want stored fallback %q", filepath.Dir(nextPaths.socket), firstSocketDir)
+	}
+}
+
 func TestPersistentDaemonTokenConcurrentCreate(t *testing.T) {
 	root := t.TempDir()
 	paths := persistentDaemonPaths{
@@ -616,6 +785,128 @@ func TestPersistentDaemonPTYReattachSurvivesClientDisconnect(t *testing.T) {
 	})
 	if ok, _ := closeResp["ok"].(bool); !ok {
 		t.Fatalf("pty.close failed: %v", closeResp)
+	}
+}
+
+func TestWaitForPersistentDaemonDialWaitsForPeerStartup(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "cmuxd-remote-race-*")
+	if err != nil {
+		t.Fatalf("create short socket dir: %v", err)
+	}
+	defer os.RemoveAll(socketDir)
+	socketPath := filepath.Join(socketDir, "rpc.sock")
+
+	type listenerResult struct {
+		listener net.Listener
+		err      error
+	}
+	listenerCh := make(chan listenerResult, 1)
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		listener, listenErr := net.Listen("unix", socketPath)
+		listenerCh <- listenerResult{listener: listener, err: listenErr}
+		if listenErr != nil {
+			done <- listenErr
+			return
+		}
+		done <- servePersistentDaemonWithVerifier(listener, persistentDaemonFixedTokenVerifier("race-token"), io.Discard)
+	}()
+
+	conn, err := waitForPersistentDaemonDial(socketPath, "race-token", time.Second)
+	if err != nil {
+		t.Fatalf("waitForPersistentDaemonDial returned error: %v", err)
+	}
+	_ = conn.Close()
+
+	gotListener := <-listenerCh
+	if gotListener.err != nil {
+		t.Fatalf("listen unix: %v", gotListener.err)
+	}
+	_ = gotListener.listener.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("persistent daemon exited with error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("persistent daemon did not stop")
+	}
+}
+
+func TestPersistentDaemonServerExitsAfterEmptySlotIdleTimeout(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "cmuxd-remote-idle-*")
+	if err != nil {
+		t.Fatalf("create short socket dir: %v", err)
+	}
+	defer os.RemoveAll(socketDir)
+	socketPath := filepath.Join(socketDir, "rpc.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- servePersistentDaemonWithVerifierConfig(
+			listener,
+			persistentDaemonFixedTokenVerifier("idle-token"),
+			io.Discard,
+			persistentDaemonServerConfig{
+				emptyIdleTimeout: 80 * time.Millisecond,
+				acceptPollStep:   10 * time.Millisecond,
+			},
+		)
+	}()
+
+	conn, reader, writer := openPersistentTestClient(t, socketPath, "idle-token")
+	attach := persistentTestRPCCall(t, conn, reader, writer, rpcRequest{
+		ID:     1,
+		Method: "pty.attach",
+		Params: map[string]any{
+			"session_id":              "idle-session",
+			"attachment_id":           "idle-attachment",
+			"client_attachment_token": "idle-attachment-token",
+			"cols":                    80,
+			"rows":                    24,
+			"command":                 "sleep 60",
+		},
+	})
+	if ok, _ := attach["ok"].(bool); !ok {
+		t.Fatalf("pty.attach failed: %v", attach)
+	}
+	readPersistentTestEvent(t, conn, reader, func(frame map[string]any) bool {
+		return frame["event"] == "pty.ready" && frame["attachment_id"] == "idle-attachment"
+	})
+
+	closeResp := persistentTestRPCCall(t, conn, reader, writer, rpcRequest{
+		ID:     2,
+		Method: "pty.close",
+		Params: map[string]any{"session_id": "idle-session"},
+	})
+	if ok, _ := closeResp["ok"].(bool); !ok {
+		t.Fatalf("pty.close failed: %v", closeResp)
+	}
+	_ = conn.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("persistent daemon exited with error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("persistent daemon did not stop after empty idle timeout")
+	}
+}
+
+func TestRunStdioSlotRequiresPersistent(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"serve", "--stdio", "--slot", "slot-without-persistent"}, strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	if code != 2 {
+		t.Fatalf("run serve exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "serve --slot requires --persistent") {
+		t.Fatalf("stderr = %q, want --slot validation error", stderr.String())
 	}
 }
 

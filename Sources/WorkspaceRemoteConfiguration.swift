@@ -10,16 +10,13 @@ private enum WorkspaceRemoteSSHOptionFilter {
         "controlpath",
         "controlpersist",
     ]
-    private static let relayScopedControlSocketKeys: Set<String> = [
-        "controlpath",
-    ]
 
     static func durableOptions(_ options: [String]) -> [String] {
         filteredOptions(options, droppingKeys: transientControlSocketKeys)
     }
 
     static func forkedWorkspaceOptions(_ options: [String]) -> [String] {
-        filteredOptions(options, droppingKeys: relayScopedControlSocketKeys)
+        durableOptions(options)
     }
 
     static func trimmedOptions(_ options: [String]) -> [String] {
@@ -89,9 +86,9 @@ nonisolated struct SessionRemoteWorkspaceSnapshot: Codable, Equatable, Sendable 
     var sshOptions: [String]
     var preserveAfterTerminalExit: Bool?
     var skipDaemonBootstrap: Bool?
-    var relayPort: Int?
-    var persistentDaemonSlot: String?
-    var preferAutoConnectOnRestore: Bool?
+    var relayPort: Int? = nil
+    var persistentDaemonSlot: String? = nil
+    var preferAutoConnectOnRestore: Bool? = nil
 }
 
 struct WorkspaceRemoteWebSocketDaemonEndpoint: Equatable {
@@ -123,8 +120,8 @@ nonisolated enum SSHPTYAttachStartupCommandBuilder {
     static func command(
         sessionID: String? = nil,
         foregroundAuth: ForegroundAuth? = nil,
+        remoteCommand: String? = nil,
         requireExisting: Bool = true,
-        command: String? = nil,
         preferredCLIPath: String? = defaultBundledCLIPath()
     ) -> String {
         let preferredCLIPath = normalized(preferredCLIPath)
@@ -148,15 +145,25 @@ nonisolated enum SSHPTYAttachStartupCommandBuilder {
             lines += foregroundAuthLines(foregroundAuth)
         }
         let requireExistingFlag = requireExisting ? " --require-existing" : ""
-        let commandFlag: String
-        if let command = normalized(command) {
-            commandFlag = " --command-b64 \(shellQuote(Data(command.utf8).base64EncodedString()))"
-        } else {
-            commandFlag = ""
-        }
-        let attachCommand = "\"$cmux_ssh_attach_cli\" --socket \"$CMUX_SOCKET_PATH\" ssh-pty-attach --wait\(requireExistingFlag) --workspace \"$CMUX_WORKSPACE_ID\" --session-id \"$cmux_ssh_attach_session_id\" --attachment-id \"${CMUX_SURFACE_ID:-}\"\(commandFlag)"
+        let commandB64Flag = normalized(remoteCommand).map {
+            " --command-b64 \(shellQuote(Data($0.utf8).base64EncodedString()))"
+        } ?? ""
+        let attachCommand = "\"$cmux_ssh_attach_cli\" --socket \"$CMUX_SOCKET_PATH\" ssh-pty-attach --wait\(requireExistingFlag) --workspace \"$CMUX_WORKSPACE_ID\" --session-id \"$cmux_ssh_attach_session_id\" --attachment-id \"${CMUX_SURFACE_ID:-}\"\(commandB64Flag)"
         lines += retryingAttachLines(command: attachCommand)
-        return lines.joined(separator: "\n")
+        return "/bin/sh -c \(shellQuote(lines.joined(separator: "\n")))"
+    }
+
+    static func restoredRemoteShellCommand(relayPort: Int) -> String {
+        RemoteInteractiveShellBootstrapBuilder.script(
+            remoteRelayPort: relayPort,
+            shellFeatures: RemoteInteractiveShellBootstrapBuilder.shellFeatures(),
+            bundledZshIntegration: RemoteInteractiveShellBootstrapBuilder.bundledShellIntegrationScript(
+                named: "cmux-zsh-integration.zsh"
+            ),
+            bundledBashIntegration: RemoteInteractiveShellBootstrapBuilder.bundledShellIntegrationScript(
+                named: "cmux-bash-integration.bash"
+            )
+        )
     }
 
     private static func retryingAttachLines(command: String) -> [String] {
@@ -447,6 +454,26 @@ struct WorkspaceRemoteConfiguration: Equatable {
     private static func proxyBrokerSSHOptions(_ options: [String]) -> [String] {
         WorkspaceRemoteSSHOptionFilter.durableOptions(options)
     }
+
+    func hasSamePersistentPTYIdentity(as other: WorkspaceRemoteConfiguration) -> Bool {
+        guard preserveAfterTerminalExit,
+              other.preserveAfterTerminalExit,
+              let persistentDaemonSlot,
+              persistentDaemonSlot == other.persistentDaemonSlot else {
+            return false
+        }
+
+        return transport == other.transport
+            && skipDaemonBootstrap == other.skipDaemonBootstrap
+            && destination.trimmingCharacters(in: .whitespacesAndNewlines)
+                == other.destination.trimmingCharacters(in: .whitespacesAndNewlines)
+            && port == other.port
+            && relayPort == other.relayPort
+            && WorkspaceRemoteSSHOptionFilter.normalizedIdentityPath(identityFile)
+                == WorkspaceRemoteSSHOptionFilter.normalizedIdentityPath(other.identityFile)
+            && Self.proxyBrokerSSHOptions(sshOptions) == Self.proxyBrokerSSHOptions(other.sshOptions)
+            && daemonWebSocketEndpoint?.proxyBrokerKeyComponent == other.daemonWebSocketEndpoint?.proxyBrokerKeyComponent
+    }
 }
 
 extension SessionRemoteWorkspaceSnapshot {
@@ -467,13 +494,16 @@ extension SessionRemoteWorkspaceSnapshot {
         let normalizedRelayPort = relayPort.flatMap { port in
             (1...65535).contains(port) ? port : nil
         }
-        let normalizedOptions = preserveSSHOptions
+        let preservedOptions = preserveSSHOptions
             ? WorkspaceRemoteSSHOptionFilter.trimmedOptions(sshOptions)
             : Self.normalizedSSHOptions(sshOptions)
         let optionsWithRestoreControlDefaults = SSHPTYAttachStartupCommandBuilder.sshOptionsWithRestoreControlDefaults(
-            normalizedOptions,
+            preservedOptions,
             relayPort: normalizedRelayPort
         )
+        let fallbackSSHOptions = preserveSSHOptions
+            ? Self.normalizedSSHOptions(preservedOptions)
+            : preservedOptions
         let preservePTYSession =
             allowPersistentPTYRestore &&
             preserveAfterTerminalExit == true &&
@@ -482,7 +512,7 @@ extension SessionRemoteWorkspaceSnapshot {
             normalizedLocalSocketPath != nil &&
             normalizedRelayPort != nil &&
             SSHPTYAttachStartupCommandBuilder.sshOptionsSupportReusableForegroundAuth(optionsWithRestoreControlDefaults)
-        let restoredSSHOptions = preservePTYSession ? optionsWithRestoreControlDefaults : normalizedOptions
+        let restoredSSHOptions = preservePTYSession ? optionsWithRestoreControlDefaults : fallbackSSHOptions
         let foregroundAuthToken = preservePTYSession && preferAutoConnectOnRestore != true
             ? UUID().uuidString.lowercased()
             : nil
@@ -495,11 +525,14 @@ extension SessionRemoteWorkspaceSnapshot {
                 token: $0
             )
         }
-        let restoredRelayID = preservePTYSession && normalizedRelayPort != nil
+        let restoredRelayID = preservePTYSession
             ? UUID().uuidString.lowercased()
             : nil
-        let restoredRelayToken = preservePTYSession && normalizedRelayPort != nil
+        let restoredRelayToken = preservePTYSession
             ? Self.restoreRelayTokenHex()
+            : nil
+        let restoredRemoteShellCommand = preservePTYSession
+            ? normalizedRelayPort.map(SSHPTYAttachStartupCommandBuilder.restoredRemoteShellCommand(relayPort:))
             : nil
         return WorkspaceRemoteConfiguration(
             transport: transport,
@@ -515,11 +548,15 @@ extension SessionRemoteWorkspaceSnapshot {
             terminalStartupCommand: preservePTYSession
                 ? SSHPTYAttachStartupCommandBuilder.command(
                     foregroundAuth: foregroundAuth,
+                    remoteCommand: restoredRemoteShellCommand,
+                    // Restored panels get explicit require-existing attach commands with their
+                    // persisted session IDs; this workspace default is for new panes.
                     requireExisting: false
                 )
                 : sshReconnectCommand(
                     destination: normalizedDestination,
-                    port: normalizedPort
+                    port: normalizedPort,
+                    sshOptions: restoredSSHOptions
                 ),
             foregroundAuthToken: foregroundAuthToken,
             daemonWebSocketEndpoint: nil,
@@ -543,7 +580,8 @@ extension SessionRemoteWorkspaceSnapshot {
 
     private func sshReconnectCommand(
         destination normalizedDestination: String,
-        port normalizedPort: Int?
+        port normalizedPort: Int?,
+        sshOptions reconnectSSHOptions: [String]? = nil
     ) -> String? {
         var arguments = ["ssh"]
         if let normalizedPort {
@@ -552,7 +590,7 @@ extension SessionRemoteWorkspaceSnapshot {
         if let identityFile = Self.normalizedIdentityPath(identityFile) {
             arguments += ["-i", identityFile]
         }
-        let normalizedOptions = Self.normalizedSSHOptions(sshOptions)
+        let normalizedOptions = reconnectSSHOptions ?? Self.normalizedSSHOptions(sshOptions)
         for option in normalizedOptions {
             arguments += ["-o", option]
         }

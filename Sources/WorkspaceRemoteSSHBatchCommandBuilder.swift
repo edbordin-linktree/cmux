@@ -72,6 +72,18 @@ enum WorkspaceRemoteSSHBatchCommandBuilder {
         return args
     }
 
+    static func reverseRelayControlMasterCancelArguments(
+        configuration: WorkspaceRemoteConfiguration,
+        relayPort: Int
+    ) -> [String]? {
+        guard relayPort > 0 else { return nil }
+        return reverseRelayControlMasterArguments(
+            configuration: configuration,
+            controlCommand: "cancel",
+            forwardSpec: "127.0.0.1:\(relayPort)"
+        )
+    }
+
     private static func batchArguments(configuration: WorkspaceRemoteConfiguration) -> [String] {
         let effectiveSSHOptions = backgroundSSHOptions(configuration.sshOptions)
         var args: [String] = [

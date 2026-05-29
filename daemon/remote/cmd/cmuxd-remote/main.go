@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -218,6 +219,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "serve --persistent requires --stdio")
 			return 2
 		}
+		if strings.TrimSpace(*persistentSlot) != "" && !*persistent {
+			_, _ = fmt.Fprintln(stderr, "serve --slot requires --persistent")
+			return 2
+		}
 		if *ws {
 			if strings.TrimSpace(*authLeaseFile) == "" {
 				_, _ = fmt.Fprintln(stderr, "serve --ws requires --auth-lease-file")
@@ -329,19 +334,16 @@ func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotL
 		ScannedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Snapshots: []workspaceSnapshotListEntry{},
 	}
-	entries, err := os.ReadDir(root)
+	slotRoots, err := headlessSnapshotSlotRoots(root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return result, nil
 		}
 		return result, err
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		slot := entry.Name()
-		slotRoot := filepath.Join(root, slot)
+	for _, snapshotRoot := range slotRoots {
+		slot := snapshotRoot.slot
+		slotRoot := snapshotRoot.root
 		unlock, lockErr := lockWorkspaceSnapshot(slotRoot)
 		if lockErr != nil {
 			if includeErrors {
@@ -508,12 +510,26 @@ type persistentDaemonPaths struct {
 }
 
 const (
-	persistentDaemonAuthMethod  = "daemon.auth"
-	persistentDaemonReadyFDEnv  = "CMUX_REMOTE_DAEMON_READY_FD"
-	persistentDaemonAuthTimeout = 5 * time.Second
+	persistentDaemonAuthMethod    = "daemon.auth"
+	persistentDaemonReadyFDEnv    = "CMUX_REMOTE_DAEMON_READY_FD"
+	persistentDaemonAuthTimeout   = 5 * time.Second
+	persistentDaemonSocketDirFile = "socket-dir"
 )
 
 var errPersistentDaemonAuthFailed = errors.New("persistent daemon authentication failed")
+
+const (
+	persistentDaemonStartupTimeout    = 5 * time.Second
+	persistentDaemonDialPollInterval  = 25 * time.Millisecond
+	persistentDaemonEmptyIdleTimeout  = 5 * time.Minute
+	persistentDaemonEmptyIdlePollStep = time.Second
+)
+
+type persistentDaemonServerConfig struct {
+	emptyIdleTimeout time.Duration
+	acceptPollStep   time.Duration
+	snapshotRoot     string
+}
 
 func persistentDaemonPathsForSlot(rawSlot string) (persistentDaemonPaths, error) {
 	slot, err := validatePersistentDaemonSlot(rawSlot)
@@ -528,7 +544,7 @@ func persistentDaemonPathsForSlot(rawSlot string) (persistentDaemonPaths, error)
 		}
 		rootBase = filepath.Join(home, ".cmux", "daemon")
 	}
-	root := filepath.Join(rootBase, slot)
+	root := filepath.Join(rootBase, persistentDaemonVersionComponent(), slot)
 	socketPath := persistentDaemonSocketPath(root, slot)
 	return persistentDaemonPaths{
 		slot:      slot,
@@ -540,13 +556,50 @@ func persistentDaemonPathsForSlot(rawSlot string) (persistentDaemonPaths, error)
 	}, nil
 }
 
+func persistentDaemonVersionComponent() string {
+	trimmed := strings.TrimSpace(version)
+	if trimmed == "" {
+		trimmed = "dev"
+	}
+	var builder strings.Builder
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '-' ||
+			r == '_' ||
+			r == '.' {
+			builder.WriteRune(r)
+		} else {
+			builder.WriteByte('_')
+		}
+	}
+	component := builder.String()
+	if component == "" || component == "." || component == ".." {
+		return "dev"
+	}
+	if len(component) <= 64 {
+		return component
+	}
+	digest := sha256.Sum256([]byte(trimmed))
+	return component[:48] + "-" + hex.EncodeToString(digest[:4])
+}
+
 func persistentDaemonSocketPath(root string, slot string) string {
-	socketBase := strings.TrimSpace(os.Getenv("CMUX_REMOTE_DAEMON_SOCKET_DIR"))
-	if socketBase == "" {
+	socketBase, overrideSet := persistentDaemonSocketBase()
+	if !overrideSet {
 		socketBase = filepath.Join("/tmp", fmt.Sprintf("cmuxd-remote-%d", os.Getuid()))
 	}
 	digest := sha256.Sum256([]byte(root + "\x00" + slot))
 	return filepath.Join(socketBase, "cmuxd-"+hex.EncodeToString(digest[:8])+".sock")
+}
+
+func persistentDaemonSocketBase() (string, bool) {
+	socketBase := strings.TrimSpace(os.Getenv("CMUX_REMOTE_DAEMON_SOCKET_DIR"))
+	if socketBase == "" {
+		return "", false
+	}
+	return filepath.Join(socketBase, fmt.Sprintf("cmuxd-remote-%d", os.Getuid())), true
 }
 
 func validatePersistentDaemonSlot(rawSlot string) (string, error) {
@@ -571,18 +624,153 @@ func validatePersistentDaemonSlot(rawSlot string) (string, error) {
 	return slot, nil
 }
 
-func ensurePersistentDaemonDirectory(paths persistentDaemonPaths) error {
+func ensurePersistentDaemonDirectory(paths persistentDaemonPaths) (persistentDaemonPaths, error) {
 	if err := os.MkdirAll(paths.root, 0o700); err != nil {
-		return err
+		return paths, err
 	}
-	if err := os.Chmod(paths.root, 0o700); err != nil {
-		return err
+	if err := verifyPrivateDaemonDirectory(paths.root); err != nil {
+		return paths, err
 	}
 	socketDir := filepath.Dir(paths.socket)
-	if err := os.MkdirAll(socketDir, 0o700); err != nil {
+	secureSocketDir, err := ensurePersistentDaemonSocketDirectory(paths.root, socketDir)
+	if err != nil {
+		return paths, err
+	}
+	paths.socket = filepath.Join(secureSocketDir, filepath.Base(paths.socket))
+	return paths, nil
+}
+
+func ensurePersistentDaemonSocketDirectory(root string, defaultSocketDir string) (string, error) {
+	if storedSocketDir, err := readPersistentDaemonSocketDir(root); err == nil {
+		if verifyErr := ensurePrivateDaemonLeafDirectory(storedSocketDir); verifyErr == nil {
+			return storedSocketDir, nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+
+	if err := ensurePrivateDaemonLeafDirectory(defaultSocketDir); err == nil {
+		return defaultSocketDir, nil
+	}
+	return createPersistentDaemonFallbackSocketDir(root)
+}
+
+func ensurePrivateDaemonLeafDirectory(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.Chmod(socketDir, 0o700)
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return verifyPrivateDaemonDirectory(path)
+}
+
+func verifyPrivateDaemonDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("persistent daemon directory %q is a symlink", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("persistent daemon directory %q is not a directory", path)
+	}
+	if !daemonDirectoryOwnedByCurrentUser(info) {
+		return fmt.Errorf("persistent daemon directory %q is not owned by uid %d", path, os.Getuid())
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(path, 0o700); err != nil {
+			return err
+		}
+		info, err = os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 ||
+			!info.IsDir() ||
+			!daemonDirectoryOwnedByCurrentUser(info) ||
+			info.Mode().Perm() != 0o700 {
+			return fmt.Errorf("persistent daemon directory %q is not private", path)
+		}
+	}
+	return nil
+}
+
+func daemonDirectoryOwnedByCurrentUser(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return !ok || int(stat.Uid) == os.Getuid()
+}
+
+func readPersistentDaemonSocketDir(root string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(root, persistentDaemonSocketDirFile))
+	if err != nil {
+		return "", err
+	}
+	socketDir := strings.TrimSpace(string(data))
+	if socketDir == "" {
+		return "", errors.New("persistent daemon socket directory file is empty")
+	}
+	return socketDir, nil
+}
+
+func createPersistentDaemonFallbackSocketDir(root string) (string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		raw := make([]byte, 8)
+		if _, err := rand.Read(raw); err != nil {
+			return "", err
+		}
+		socketDir := filepath.Join(
+			os.TempDir(),
+			fmt.Sprintf("cmuxd-remote-%d-%s", os.Getuid(), hex.EncodeToString(raw)),
+		)
+		if err := os.Mkdir(socketDir, 0o700); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return "", err
+		}
+		if err := writePersistentDaemonSocketDir(root, socketDir); err != nil {
+			_ = os.Remove(socketDir)
+			if errors.Is(err, os.ErrExist) {
+				if storedSocketDir, readErr := readPersistentDaemonSocketDir(root); readErr == nil {
+					if verifyErr := ensurePrivateDaemonLeafDirectory(storedSocketDir); verifyErr == nil {
+						return storedSocketDir, nil
+					}
+				}
+				continue
+			}
+			return "", err
+		}
+		return socketDir, nil
+	}
+	return "", errors.New("failed to create private persistent daemon socket directory")
+}
+
+func writePersistentDaemonSocketDir(root string, socketDir string) error {
+	file, err := os.CreateTemp(root, ".socket-dir.*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := file.Name()
+	closeOK := false
+	defer func() {
+		if !closeOK {
+			_ = file.Close()
+		}
+		_ = os.Remove(tmpPath)
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := file.WriteString(socketDir + "\n"); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	closeOK = true
+	return os.Link(tmpPath, filepath.Join(root, persistentDaemonSocketDirFile))
 }
 
 func persistentDaemonToken(paths persistentDaemonPaths) (string, error) {
@@ -598,11 +786,11 @@ func persistentDaemonToken(paths persistentDaemonPaths) (string, error) {
 	}
 	token := hex.EncodeToString(raw)
 
-	tmpPath := filepath.Join(filepath.Dir(paths.tokenFile), fmt.Sprintf(".auth.token.%d.%d.tmp", os.Getpid(), time.Now().UnixNano()))
-	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.CreateTemp(filepath.Dir(paths.tokenFile), ".auth.token.*.tmp")
 	if err != nil {
 		return "", err
 	}
+	tmpPath := file.Name()
 	closeOK := false
 	defer func() {
 		if !closeOK {
@@ -643,7 +831,8 @@ func runPersistentStdioProxy(stdin io.Reader, stdout, stderr io.Writer, slot str
 	if err != nil {
 		return err
 	}
-	if err := ensurePersistentDaemonDirectory(paths); err != nil {
+	paths, err = ensurePersistentDaemonDirectory(paths)
+	if err != nil {
 		return err
 	}
 	token, err := persistentDaemonToken(paths)
@@ -743,7 +932,11 @@ func ensurePersistentDaemonRunning(paths persistentDaemonPaths, token string, st
 	_ = cmd.Process.Release()
 
 	if err := waitPersistentDaemonReady(readyReader, paths.logFile); err != nil {
-		if conn, dialErr := dialPersistentDaemon(paths.socket, token); dialErr == nil {
+		if conn, dialErr := waitForPersistentDaemonDial(
+			paths.socket,
+			token,
+			persistentDaemonStartupTimeout,
+		); dialErr == nil {
 			_ = conn.Close()
 			return nil
 		}
@@ -753,7 +946,7 @@ func ensurePersistentDaemonRunning(paths persistentDaemonPaths, token string, st
 		return err
 	}
 
-	conn, err := dialPersistentDaemon(paths.socket, token)
+	conn, err := waitForPersistentDaemonDial(paths.socket, token, persistentDaemonStartupTimeout)
 	if err == nil {
 		_ = conn.Close()
 		return nil
@@ -762,6 +955,23 @@ func ensurePersistentDaemonRunning(paths persistentDaemonPaths, token string, st
 		_, _ = fmt.Fprintf(stderr, "persistent daemon log: %s\n", paths.logFile)
 	}
 	return err
+}
+
+func waitForPersistentDaemonDial(socketPath string, token string, timeout time.Duration) (net.Conn, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		conn, err := dialPersistentDaemon(socketPath, token)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, lastErr
+		}
+		time.Sleep(minDuration(remaining, persistentDaemonDialPollInterval))
+	}
 }
 
 func shouldRemovePersistentSocketAfterDialError(err error) bool {
@@ -800,7 +1010,8 @@ func runPersistentDaemonServer(slot string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := ensurePersistentDaemonDirectory(paths); err != nil {
+	paths, err = ensurePersistentDaemonDirectory(paths)
+	if err != nil {
 		return err
 	}
 	token, err := persistentDaemonToken(paths)
@@ -827,7 +1038,15 @@ func runPersistentDaemonServer(slot string, stderr io.Writer) error {
 	_ = os.Chmod(paths.socket, 0o600)
 
 	signalPersistentDaemonReady()
-	return servePersistentDaemonWithVerifierAndSnapshotRoot(listener, persistentDaemonFileTokenVerifier(token, paths.tokenFile), stderr, paths.root)
+	return servePersistentDaemonWithVerifierConfig(
+		listener,
+		persistentDaemonFileTokenVerifier(token, paths.tokenFile),
+		stderr,
+		persistentDaemonServerConfig{
+			emptyIdleTimeout: persistentDaemonEmptyIdleTimeout,
+			snapshotRoot:     paths.root,
+		},
+	)
 }
 
 func signalPersistentDaemonReady() {
@@ -878,22 +1097,94 @@ func persistentDaemonTokensEqual(provided string, token string) bool {
 }
 
 func servePersistentDaemonWithVerifier(listener net.Listener, verifier persistentDaemonTokenVerifier, stderr io.Writer) error {
-	return servePersistentDaemonWithVerifierAndSnapshotRoot(listener, verifier, stderr, "")
+	return servePersistentDaemonWithVerifierConfig(listener, verifier, stderr, persistentDaemonServerConfig{})
 }
 
 func servePersistentDaemonWithVerifierAndSnapshotRoot(listener net.Listener, verifier persistentDaemonTokenVerifier, stderr io.Writer, snapshotRoot string) error {
+	return servePersistentDaemonWithVerifierConfig(
+		listener,
+		verifier,
+		stderr,
+		persistentDaemonServerConfig{snapshotRoot: snapshotRoot},
+	)
+}
+
+func servePersistentDaemonWithVerifierConfig(
+	listener net.Listener,
+	verifier persistentDaemonTokenVerifier,
+	stderr io.Writer,
+	config persistentDaemonServerConfig,
+) error {
 	hub := newWebSocketPTYHub(wsPTYServerConfig{}, stderr)
 	defer hub.closeAll()
+	var activeConnections int64
+	var idleSince time.Time
 	for {
+		if config.emptyIdleTimeout > 0 {
+			now := time.Now()
+			isEmpty := atomic.LoadInt64(&activeConnections) == 0 && hub.activeSessionCount() == 0
+			if isEmpty {
+				if idleSince.IsZero() {
+					idleSince = now
+				}
+				remaining := config.emptyIdleTimeout - now.Sub(idleSince)
+				if remaining <= 0 {
+					return nil
+				}
+				setPersistentDaemonAcceptDeadline(listener, now.Add(minDuration(
+					remaining,
+					persistentDaemonAcceptPollStep(config),
+				)))
+			} else {
+				idleSince = time.Time{}
+				setPersistentDaemonAcceptDeadline(listener, now.Add(persistentDaemonAcceptPollStep(config)))
+			}
+		}
 		conn, err := listener.Accept()
 		if err != nil {
+			if isTimeoutError(err) {
+				continue
+			}
 			if isClosedListenerError(err) {
 				return nil
 			}
 			return err
 		}
-		go handlePersistentDaemonConnWithSnapshotRoot(conn, verifier, hub, snapshotRoot)
+		atomic.AddInt64(&activeConnections, 1)
+		go func() {
+			defer atomic.AddInt64(&activeConnections, -1)
+			handlePersistentDaemonConnWithSnapshotRoot(conn, verifier, hub, config.snapshotRoot)
+		}()
 	}
+}
+
+func persistentDaemonAcceptPollStep(config persistentDaemonServerConfig) time.Duration {
+	if config.acceptPollStep > 0 {
+		return config.acceptPollStep
+	}
+	return persistentDaemonEmptyIdlePollStep
+}
+
+type deadlineListener interface {
+	SetDeadline(time.Time) error
+}
+
+func setPersistentDaemonAcceptDeadline(listener net.Listener, deadline time.Time) {
+	if deadlineListener, ok := listener.(deadlineListener); ok {
+		_ = deadlineListener.SetDeadline(deadline)
+	}
+}
+
+func minDuration(a time.Duration, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func isClosedListenerError(err error) bool {

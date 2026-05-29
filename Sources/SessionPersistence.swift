@@ -265,6 +265,20 @@ enum SurfaceResumeApprovalPolicy: String, Codable, CaseIterable, Sendable {
 }
 
 nonisolated struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case kind
+        case command
+        case cwd
+        case checkpointId
+        case source
+        case environment
+        case autoResume
+        case approvalPolicy
+        case approvalRecordId
+        case updatedAt
+    }
+
     var name: String?
     var kind: String?
     var command: String
@@ -290,17 +304,41 @@ nonisolated struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
         approvalRecordId: String? = nil,
         updatedAt: TimeInterval = Date().timeIntervalSince1970
     ) {
+        let normalizedCwd = Self.normalized(cwd)
+        let normalizedSource = Self.normalized(source)
         self.name = Self.normalized(name)
         self.kind = Self.normalized(kind)
-        self.command = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.cwd = Self.normalized(cwd)
+        self.command = Self.sanitizedStartupCommand(
+            command,
+            cwd: normalizedCwd,
+            source: normalizedSource
+        )
+        self.cwd = normalizedCwd
         self.checkpointId = Self.normalized(checkpointId)
-        self.source = Self.normalized(source)
+        self.source = normalizedSource
         self.environment = Self.normalizedEnvironment(environment)
         self.autoResume = autoResume
         self.approvalPolicy = approvalPolicy
         self.approvalRecordId = Self.normalized(approvalRecordId)
         self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            name: try container.decodeIfPresent(String.self, forKey: .name),
+            kind: try container.decodeIfPresent(String.self, forKey: .kind),
+            command: try container.decode(String.self, forKey: .command),
+            cwd: try container.decodeIfPresent(String.self, forKey: .cwd),
+            checkpointId: try container.decodeIfPresent(String.self, forKey: .checkpointId),
+            source: try container.decodeIfPresent(String.self, forKey: .source),
+            environment: try container.decodeIfPresent([String: String].self, forKey: .environment),
+            autoResume: try container.decodeIfPresent(Bool.self, forKey: .autoResume),
+            approvalPolicy: try container.decodeIfPresent(SurfaceResumeApprovalPolicy.self, forKey: .approvalPolicy),
+            approvalRecordId: try container.decodeIfPresent(String.self, forKey: .approvalRecordId),
+            updatedAt: try container.decodeIfPresent(TimeInterval.self, forKey: .updatedAt)
+                ?? Date().timeIntervalSince1970
+        )
     }
 
     var isProcessDetected: Bool {
@@ -330,7 +368,7 @@ nonisolated struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
     }
 
     var inlineStartupInput: String? {
-        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = startupCommand.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         guard let environment, !environment.isEmpty else {
             return trimmed + "\n"
@@ -341,6 +379,23 @@ nonisolated struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
         }
         let argv = ["/usr/bin/env"] + assignments + ["/bin/zsh", "-lc", trimmed]
         return argv.map(Self.shellSingleQuoted).joined(separator: " ") + "\n"
+    }
+
+    private var startupCommand: String {
+        Self.sanitizedStartupCommand(command, cwd: cwd, source: source)
+    }
+
+    private static func sanitizedStartupCommand(
+        _ command: String,
+        cwd: String?,
+        source: String?
+    ) -> String {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard source == "agent-hook" else { return trimmed }
+        return TerminalStartupWorkingDirectoryPrefix.replacingRequiredChangeDirectoryPrefix(
+            in: trimmed,
+            workingDirectory: cwd
+        )
     }
 
     func startupInputWithLauncherScript(
@@ -364,6 +419,23 @@ nonisolated struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
 
         let scriptInput = "/bin/zsh \(Self.shellSingleQuoted(scriptURL.path))\n"
         return scriptInput.utf8.count <= Self.maxInlineStartupInputBytes ? scriptInput : nil
+    }
+
+    func startupCommandWithLauncherScript(
+        fileManager: FileManager = .default,
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory
+    ) -> String? {
+        guard let inlineInput = inlineStartupInput,
+              let scriptURL = SurfaceResumeBindingScriptStore.writeLauncherScript(
+                  inlineInput: inlineInput,
+                  binding: self,
+                  fileManager: fileManager,
+                  temporaryDirectory: temporaryDirectory,
+                  returnToLoginShell: true
+              ) else {
+            return nil
+        }
+        return "/bin/zsh \(Self.shellSingleQuoted(scriptURL.path))"
     }
 
     private static func normalized(_ rawValue: String?) -> String? {
@@ -1200,6 +1272,34 @@ enum SurfaceResumeApprovalStore {
 #endif
 }
 
+nonisolated enum TerminalStartupReturnShellScript {
+    private static let shellLine = #"_cmux_resume_shell="${SHELL:-/bin/zsh}""#
+    private static let zshIntegrationReentryLines = [
+        #"if [[ "${_cmux_resume_shell:t}" == "zsh" && -n "${CMUX_SHELL_INTEGRATION_DIR:-}" && -r "${CMUX_SHELL_INTEGRATION_DIR}/.zshenv" ]]; then"#,
+        #"  if [[ -n "${ZDOTDIR+X}" ]]; then"#,
+        #"    export CMUX_ZSH_ZDOTDIR="$ZDOTDIR""#,
+        #"  else"#,
+        #"    unset CMUX_ZSH_ZDOTDIR"#,
+        #"  fi"#,
+        #"  export ZDOTDIR="$CMUX_SHELL_INTEGRATION_DIR""#,
+        #"fi"#,
+    ]
+
+    static func commandThenReturnLines(command: String) -> [String] {
+        let quotedCommand = TerminalStartupShellQuoting.singleQuoted(command)
+        return [
+            shellLine,
+            #"case "${_cmux_resume_shell:t}" in"#,
+            #"  zsh|bash) "$_cmux_resume_shell" -lic \#(quotedCommand) ;;"#,
+            #"  csh|tcsh) "$_cmux_resume_shell" -c \#(quotedCommand) ;;"#,
+            #"  *) "$_cmux_resume_shell" -c \#(quotedCommand) ;;"#,
+            #"esac"#,
+        ] + zshIntegrationReentryLines + [
+            #"exec -l "$_cmux_resume_shell""#
+        ]
+    }
+}
+
 private enum SurfaceResumeBindingScriptStore {
     private static let directoryName = "cmux-surface-resume"
     private static let scriptTTL: TimeInterval = 24 * 60 * 60
@@ -1208,7 +1308,8 @@ private enum SurfaceResumeBindingScriptStore {
         inlineInput: String,
         binding: SurfaceResumeBindingSnapshot,
         fileManager: FileManager,
-        temporaryDirectory: URL
+        temporaryDirectory: URL,
+        returnToLoginShell: Bool = false
     ) -> URL? {
         let directoryURL = temporaryDirectory.appendingPathComponent(directoryName, isDirectory: true)
         do {
@@ -1221,7 +1322,16 @@ private enum SurfaceResumeBindingScriptStore {
                 "\(prefix)-\(UUID().uuidString).zsh",
                 isDirectory: false
             )
-            let contents = "#!/bin/zsh\nrm -f -- \"$0\" 2>/dev/null || true\n\(inlineInput)"
+            var lines = [
+                "#!/bin/zsh",
+                "rm -f -- \"$0\" 2>/dev/null || true"
+            ]
+            if returnToLoginShell {
+                lines.append(contentsOf: TerminalStartupReturnShellScript.commandThenReturnLines(command: inlineInput))
+            } else {
+                lines.append(inlineInput)
+            }
+            let contents = lines.joined(separator: "\n") + "\n"
             try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
             try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
             return scriptURL
@@ -1268,6 +1378,7 @@ struct SessionTerminalPanelSnapshot: Codable, Sendable {
     var hibernation: SessionAgentHibernationSnapshot?
     var resumeBinding: SurfaceResumeBindingSnapshot?
     var textBoxDraft: SessionTextBoxInputDraftSnapshot?
+    var isRemoteTerminal: Bool?
     var remotePTYSessionID: String?
     /// Whether the agent process was actively running when this snapshot was captured.
     /// Nil means unknown (legacy snapshots); treated as true for backwards compatibility.
@@ -1281,6 +1392,7 @@ struct SessionTerminalPanelSnapshot: Codable, Sendable {
         hibernation: SessionAgentHibernationSnapshot? = nil,
         resumeBinding: SurfaceResumeBindingSnapshot? = nil,
         textBoxDraft: SessionTextBoxInputDraftSnapshot? = nil,
+        isRemoteTerminal: Bool? = nil,
         remotePTYSessionID: String? = nil,
         wasAgentRunning: Bool? = nil
     ) {
@@ -1291,6 +1403,7 @@ struct SessionTerminalPanelSnapshot: Codable, Sendable {
         self.hibernation = hibernation
         self.resumeBinding = resumeBinding
         self.textBoxDraft = textBoxDraft
+        self.isRemoteTerminal = isRemoteTerminal
         self.remotePTYSessionID = remotePTYSessionID
         self.wasAgentRunning = wasAgentRunning
     }
@@ -1403,7 +1516,21 @@ struct SessionFilePreviewPanelSnapshot: Codable, Sendable {
 }
 
 struct SessionRightSidebarToolPanelSnapshot: Codable, Sendable {
-    var mode: RightSidebarMode
+    var mode: RightSidebarMode?
+
+    init(mode: RightSidebarMode?) {
+        self.mode = mode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mode
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try container.decodeIfPresent(String.self, forKey: .mode)
+        self.mode = raw.flatMap { RightSidebarMode(rawValue: $0) }
+    }
 }
 
 struct SessionNotificationSnapshot: Codable, Sendable {
@@ -1559,6 +1686,7 @@ indirect enum SessionWorkspaceLayoutSnapshot: Codable, Sendable, Equatable {
 }
 
 struct SessionWorkspaceSnapshot: Codable, Sendable {
+    var id: UUID? = nil
     var processTitle: String
     var customTitle: String?
     var customDescription: String?

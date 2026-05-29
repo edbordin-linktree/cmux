@@ -102,7 +102,7 @@ func headlessWorkspaceCreateCWD(params map[string]any) string {
 }
 
 func headlessRelaySocketForSlot(slot string) string {
-	paths, err := persistentDaemonPathsForSlot(slot)
+	paths, err := headlessPathsForSlot(slot)
 	if err != nil {
 		return ""
 	}
