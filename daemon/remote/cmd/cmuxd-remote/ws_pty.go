@@ -838,9 +838,7 @@ func (h *wsPTYHub) closeSessionForAttachment(attachment *wsPTYAttachment) {
 	attachment.cancel()
 	h.mu.Unlock()
 
-	if session.cmd != nil && session.cmd.Process != nil {
-		_ = session.cmd.Process.Kill()
-	}
+	killPTYSessionProcessGroup(session)
 	session.closePTYFiles()
 }
 
@@ -855,9 +853,7 @@ func (h *wsPTYHub) closeAll() {
 	h.mu.Unlock()
 
 	for _, session := range sessions {
-		if session.cmd != nil && session.cmd.Process != nil {
-			_ = session.cmd.Process.Kill()
-		}
+		killPTYSessionProcessGroup(session)
 		session.closePTYFiles()
 	}
 }
@@ -917,9 +913,7 @@ func (h *wsPTYHub) closeSessionByID(sessionID string) bool {
 	session.closed = true
 	h.mu.Unlock()
 
-	if session.cmd != nil && session.cmd.Process != nil {
-		_ = session.cmd.Process.Kill()
-	}
+	killPTYSessionProcessGroup(session)
 	session.closePTYFiles()
 	return true
 }
@@ -1191,10 +1185,22 @@ func (h *wsPTYHub) reapIdleSession(session *wsPTYSession) {
 	session.idleTimer = nil
 	h.mu.Unlock()
 
-	if session.cmd != nil && session.cmd.Process != nil {
+	killPTYSessionProcessGroup(session)
+	session.closePTYFiles()
+}
+
+func killPTYSessionProcessGroup(session *wsPTYSession) {
+	if session == nil || session.cmd == nil || session.cmd.Process == nil {
+		return
+	}
+	pid := session.cmd.Process.Pid
+	if pid <= 0 {
+		_ = session.cmd.Process.Kill()
+		return
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		_ = session.cmd.Process.Kill()
 	}
-	session.closePTYFiles()
 }
 
 func (h *wsPTYHub) confirmPTYSizeAfterOutput(session *wsPTYSession) {

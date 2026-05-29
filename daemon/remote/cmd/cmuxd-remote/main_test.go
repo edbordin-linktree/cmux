@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1400,6 +1401,75 @@ func TestPTYRPCSessionReattachListAndClose(t *testing.T) {
 	}
 }
 
+func TestPTYCloseKillsSessionProcessGroupChildren(t *testing.T) {
+	tmpDir := t.TempDir()
+	childPIDPath := filepath.Join(tmpDir, "child.pid")
+	eventOutput := newNotifyingBuffer()
+	server := &rpcServer{
+		nextStreamID:  1,
+		nextSessionID: 1,
+		streams:       map[string]*streamState{},
+		sessions:      map[string]*sessionState{},
+		ptyHub: newWebSocketPTYHub(wsPTYServerConfig{
+			ScrollbackLimit: 4096,
+			SessionIdleTTL:  time.Hour,
+		}, io.Discard),
+		ownsPTYHub: true,
+		frameWriter: &stdioFrameWriter{
+			writer: bufio.NewWriter(eventOutput),
+		},
+	}
+	defer server.closeAll()
+
+	command := fmt.Sprintf(
+		"trap '' HUP TERM; sleep 60 & echo $! > %s; printf 'child-ready\\n'; sleep 60",
+		strconv.Quote(childPIDPath),
+	)
+	attachResp := server.handleRequest(rpcRequest{
+		ID:     1,
+		Method: "pty.attach",
+		Params: map[string]any{
+			"session_id":              "pty-close-process-group",
+			"attachment_id":           "a1",
+			"client_attachment_token": "token-a1",
+			"cols":                    80,
+			"rows":                    24,
+			"command":                 command,
+		},
+	})
+	if !attachResp.OK {
+		t.Fatalf("pty.attach failed: %+v", attachResp)
+	}
+	waitForRPCEvent(t, eventOutput, 0, func(event map[string]any) bool {
+		if event["event"] != "pty.data" || event["attachment_id"] != "a1" {
+			return false
+		}
+		payload, err := base64.StdEncoding.DecodeString(event["data_base64"].(string))
+		return err == nil && strings.Contains(string(payload), "child-ready")
+	})
+
+	childPID := waitForPIDFile(t, childPIDPath)
+	if !processExists(childPID) {
+		t.Fatalf("child process %d is not running before pty.close", childPID)
+	}
+
+	lineCountBeforeClose := rpcEventLineCount(eventOutput)
+	closeResp := server.handleRequest(rpcRequest{
+		ID:     2,
+		Method: "pty.close",
+		Params: map[string]any{
+			"session_id": "pty-close-process-group",
+		},
+	})
+	if !closeResp.OK {
+		t.Fatalf("pty.close failed: %+v", closeResp)
+	}
+	waitForRPCEvent(t, eventOutput, lineCountBeforeClose, func(event map[string]any) bool {
+		return event["event"] == "pty.exit" && event["attachment_id"] == "a1"
+	})
+	waitForProcessExit(t, childPID)
+}
+
 func TestPTYRPCDirectSessionSendWhileDetached(t *testing.T) {
 	eventOutput := newNotifyingBuffer()
 	server := &rpcServer{
@@ -2043,6 +2113,42 @@ func waitForRPCEvent(t *testing.T, buffer *notifyingBuffer, startLine int, match
 
 func rpcEventLineCount(buffer *notifyingBuffer) int {
 	return len(rpcEventLines(buffer))
+}
+
+func waitForPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for pid file %s", path)
+	return 0
+}
+
+func processExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
+func waitForProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processExists(pid) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("process %d still exists after pty.close", pid)
 }
 
 func rpcEventLines(buffer *notifyingBuffer) []string {
