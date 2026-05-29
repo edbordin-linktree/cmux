@@ -625,6 +625,9 @@ extension Workspace {
             gitBranch: branchSnapshot,
             listeningPorts: listeningPorts,
             ttyName: ttyName,
+            metadataEntries: surfaceMetadataEntries[panelId]?.map {
+                SessionMetadataEntrySnapshot(key: $0.key, value: $0.value)
+            },
             terminal: terminalSnapshot,
             browser: browserSnapshot,
             markdown: markdownSnapshot,
@@ -1494,6 +1497,14 @@ extension Workspace {
             surfaceTTYNames[panelId] = ttyName
         } else {
             surfaceTTYNames.removeValue(forKey: panelId)
+        }
+
+        if let metadataEntries = snapshot.metadataEntries {
+            surfaceMetadataEntries[panelId] = metadataEntries.reduce(into: [String: String]()) { result, entry in
+                result[entry.key] = entry.value
+            }
+        } else {
+            surfaceMetadataEntries.removeValue(forKey: panelId)
         }
         syncRemotePortScanTTYs()
 
@@ -10031,6 +10042,7 @@ final class Workspace: Identifiable, ObservableObject {
     var manualUnreadMarkedAt: [UUID: Date] = [:]
     @Published var statusEntries: [String: SidebarStatusEntry] = [:]
     @Published var metadataEntries: [String: String] = [:]
+    @Published var surfaceMetadataEntries: [UUID: [String: String]] = [:]
     @Published var metadataBlocks: [String: SidebarMetadataBlock] = [:]
     @Published private(set) var latestConversationMessage: String?
     @Published private(set) var latestSubmittedMessage: String?
@@ -12188,6 +12200,7 @@ final class Workspace: Identifiable, ObservableObject {
         manualUnreadMarkedAt = manualUnreadMarkedAt.filter { validSurfaceIds.contains($0.key) }
         surfaceListeningPorts = surfaceListeningPorts.filter { validSurfaceIds.contains($0.key) }
         surfaceTTYNames = surfaceTTYNames.filter { validSurfaceIds.contains($0.key) }
+        surfaceMetadataEntries = surfaceMetadataEntries.filter { validSurfaceIds.contains($0.key) }
         remotePTYSessionIDsByPanelId = remotePTYSessionIDsByPanelId.filter { validSurfaceIds.contains($0.key) }
         pruneRemoteRelaySurfaceAliases(validSurfaceIds: validSurfaceIds)
         remoteDetectedSurfaceIds = remoteDetectedSurfaceIds.filter { validSurfaceIds.contains($0) }

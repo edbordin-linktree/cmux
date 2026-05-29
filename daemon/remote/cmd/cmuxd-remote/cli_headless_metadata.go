@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -93,6 +95,196 @@ func headlessMetadataClear(params map[string]any) (map[string]any, error) {
 			"cleared":      existed,
 		}, nil
 	})
+}
+
+func headlessSurfaceMetadataSet(params map[string]any) (map[string]any, error) {
+	key := strings.TrimSpace(stringFromAny(params["key"]))
+	value := stringFromAny(params["value"])
+	if value == "" {
+		value = stringFromAny(params["json_value"])
+	}
+	if key == "" || value == "" {
+		return nil, errors.New("surface.metadata.set requires surface_id, key and value")
+	}
+	surfaceID := headlessNormalizeID(stringFromAny(params["surface_id"]))
+	if surfaceID == "" {
+		surfaceID = headlessNormalizeID(os.Getenv("CMUX_SURFACE_ID"))
+	}
+	if surfaceID == "" {
+		return nil, errors.New("surface.metadata.set requires surface_id")
+	}
+	return headlessMutate(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		panes := headlessPaneSnapshots(snap.body)
+		for i := range panes {
+			if !strings.EqualFold(headlessPaneSnapshotID(panes[i]), surfaceID) {
+				continue
+			}
+			metadata := headlessPaneMetadataMap(panes[i])
+			metadata[key] = value
+			headlessSetPaneMetadataMap(panes[i], metadata)
+			snap.body["panes"] = panes
+			return headlessSurfaceMetadataEntryPayload(snap, surfaceID, key, value, true), nil
+		}
+		return nil, fmt.Errorf("surface %s not found in detached snapshot", surfaceID)
+	})
+}
+
+func headlessSurfaceMetadataGet(params map[string]any) (map[string]any, error) {
+	key := strings.TrimSpace(stringFromAny(params["key"]))
+	if key == "" {
+		return nil, errors.New("surface.metadata.get requires key")
+	}
+	snap, surfaceID, pane, err := headlessSurfaceMetadataTarget(params)
+	if err != nil {
+		return nil, err
+	}
+	metadata := headlessPaneMetadataMap(pane)
+	value, exists := metadata[key]
+	return headlessSurfaceMetadataEntryPayload(snap, surfaceID, key, value, exists), nil
+}
+
+func headlessSurfaceMetadataList(params map[string]any) (map[string]any, error) {
+	snap, surfaceID, pane, err := headlessSurfaceMetadataTarget(params)
+	if err != nil {
+		return nil, err
+	}
+	prefix := stringFromAny(params["prefix"])
+	metadata := headlessPaneMetadataMap(pane)
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		if prefix == "" || strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	entries := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		entries = append(entries, map[string]any{"key": key, "value": metadata[key]})
+	}
+	return map[string]any{
+		"workspace_id": canonicalHeadlessID(snap.meta.WorkspaceID),
+		"surface_id":   canonicalHeadlessID(surfaceID),
+		"surface_ref":  "surface:" + canonicalHeadlessID(surfaceID),
+		"entries":      entries,
+		"count":        len(entries),
+		"detached":     true,
+	}, nil
+}
+
+func headlessSurfaceMetadataClear(params map[string]any) (map[string]any, error) {
+	key := strings.TrimSpace(stringFromAny(params["key"]))
+	if key == "" {
+		return nil, errors.New("surface.metadata.clear requires key")
+	}
+	surfaceID := headlessNormalizeID(stringFromAny(params["surface_id"]))
+	if surfaceID == "" {
+		surfaceID = headlessNormalizeID(os.Getenv("CMUX_SURFACE_ID"))
+	}
+	if surfaceID == "" {
+		return nil, errors.New("surface.metadata.clear requires surface_id")
+	}
+	return headlessMutate(params, func(snap *headlessSnapshot) (map[string]any, error) {
+		panes := headlessPaneSnapshots(snap.body)
+		for i := range panes {
+			if !strings.EqualFold(headlessPaneSnapshotID(panes[i]), surfaceID) {
+				continue
+			}
+			metadata := headlessPaneMetadataMap(panes[i])
+			_, existed := metadata[key]
+			delete(metadata, key)
+			headlessSetPaneMetadataMap(panes[i], metadata)
+			snap.body["panes"] = panes
+			payload := headlessSurfaceMetadataEntryPayload(snap, surfaceID, key, "", existed)
+			payload["cleared"] = existed
+			delete(payload, "value")
+			delete(payload, "exists")
+			return payload, nil
+		}
+		return nil, fmt.Errorf("surface %s not found in detached snapshot", surfaceID)
+	})
+}
+
+func headlessSurfaceLookup(params map[string]any) (map[string]any, error) {
+	criteria, ok := params["metadata"].(map[string]string)
+	if !ok {
+		raw, _ := params["metadata"].(map[string]any)
+		criteria = map[string]string{}
+		for key, value := range raw {
+			criteria[key] = stringFromAny(value)
+		}
+	}
+	if len(criteria) == 0 {
+		return nil, errors.New("surface.lookup requires metadata criteria")
+	}
+	snap, err := loadHeadlessSnapshot(params)
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]map[string]any, 0)
+	for _, pane := range headlessPaneSnapshots(snap.body) {
+		metadata := headlessPaneMetadataMap(pane)
+		if !headlessMetadataMatches(metadata, criteria) {
+			continue
+		}
+		surfaceID := canonicalHeadlessID(headlessPaneSnapshotID(pane))
+		matches = append(matches, map[string]any{
+			"workspace_id": canonicalHeadlessID(snap.meta.WorkspaceID),
+			"surface_id":   surfaceID,
+			"surface_ref":  "surface:" + surfaceID,
+			"type":         stringFromAny(pane["type"]),
+			"metadata":     metadata,
+			"detached":     true,
+		})
+	}
+	result := map[string]any{
+		"workspace_id": canonicalHeadlessID(snap.meta.WorkspaceID),
+		"criteria":     criteria,
+		"matches":      matches,
+		"count":        len(matches),
+		"detached":     true,
+	}
+	if len(matches) == 1 {
+		result["surface"] = matches[0]
+	}
+	return result, nil
+}
+
+func headlessSurfaceMetadataTarget(params map[string]any) (*headlessSnapshot, string, map[string]any, error) {
+	snap, err := loadHeadlessSnapshot(params)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	surfaceID := headlessNormalizeID(stringFromAny(params["surface_id"]))
+	if surfaceID == "" {
+		surfaceID = headlessNormalizeID(os.Getenv("CMUX_SURFACE_ID"))
+	}
+	if surfaceID == "" {
+		surfaceID = headlessNormalizeID(stringFromAny(snap.body["activePaneId"]))
+	}
+	if surfaceID == "" {
+		return nil, "", nil, errors.New("surface metadata requires surface_id or active surface")
+	}
+	for _, pane := range headlessPaneSnapshots(snap.body) {
+		if strings.EqualFold(headlessPaneSnapshotID(pane), surfaceID) {
+			return snap, surfaceID, pane, nil
+		}
+	}
+	return nil, "", nil, fmt.Errorf("surface %s not found in detached snapshot", surfaceID)
+}
+
+func headlessSurfaceMetadataEntryPayload(snap *headlessSnapshot, surfaceID, key, value string, exists bool) map[string]any {
+	payload := map[string]any{
+		"workspace_id": canonicalHeadlessID(snap.meta.WorkspaceID),
+		"surface_id":   canonicalHeadlessID(surfaceID),
+		"surface_ref":  "surface:" + canonicalHeadlessID(surfaceID),
+		"key":          key,
+		"exists":       exists,
+		"detached":     true,
+	}
+	if exists {
+		payload["value"] = value
+	}
+	return payload
 }
 
 func headlessWorkspaceLookup(params map[string]any) (map[string]any, error) {

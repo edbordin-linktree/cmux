@@ -117,6 +117,7 @@ func headlessSurfaceNode(surfaceID string, snapshot map[string]any, paneID strin
 		"pane_ref":         "pane:" + paneID,
 		"index_in_pane":    index,
 		"detached":         true,
+		"metadata":         headlessPaneMetadataMap(snapshot),
 	}
 	switch stringFromAny(snapshot["type"]) {
 	case "browser":
@@ -322,4 +323,49 @@ func headlessPaneSnapshotID(pane map[string]any) string {
 	default:
 		return ""
 	}
+}
+
+func headlessPaneSnapshotPayload(pane map[string]any) map[string]any {
+	switch stringFromAny(pane["type"]) {
+	case "terminal":
+		payload, _ := pane["terminal"].(map[string]any)
+		return payload
+	case "browser":
+		payload, _ := pane["browser"].(map[string]any)
+		return payload
+	case "markdownViewer":
+		payload, _ := pane["markdownViewer"].(map[string]any)
+		return payload
+	default:
+		return nil
+	}
+}
+
+func headlessPaneMetadataMap(pane map[string]any) map[string]string {
+	result := map[string]string{}
+	payload := headlessPaneSnapshotPayload(pane)
+	if payload == nil {
+		return result
+	}
+	raw, _ := payload["metadataEntries"].(map[string]any)
+	for key, value := range raw {
+		result[key] = stringFromAny(value)
+	}
+	rawString, _ := payload["metadataEntries"].(map[string]string)
+	for key, value := range rawString {
+		result[key] = value
+	}
+	return result
+}
+
+func headlessSetPaneMetadataMap(pane map[string]any, metadata map[string]string) {
+	payload := headlessPaneSnapshotPayload(pane)
+	if payload == nil {
+		return
+	}
+	if len(metadata) == 0 {
+		delete(payload, "metadataEntries")
+		return
+	}
+	payload["metadataEntries"] = metadata
 }

@@ -3434,6 +3434,16 @@ class TerminalController {
             return v2Result(id: id, self.v2MetadataList(params: params))
         case "metadata.clear":
             return v2Result(id: id, self.v2MetadataClear(params: params))
+        case "surface.metadata.set":
+            return v2Result(id: id, self.v2SurfaceMetadataSet(params: params))
+        case "surface.metadata.get":
+            return v2Result(id: id, self.v2SurfaceMetadataGet(params: params))
+        case "surface.metadata.list":
+            return v2Result(id: id, self.v2SurfaceMetadataList(params: params))
+        case "surface.metadata.clear":
+            return v2Result(id: id, self.v2SurfaceMetadataClear(params: params))
+        case "surface.lookup":
+            return v2Result(id: id, self.v2SurfaceLookup(params: params))
         case "status.set":
             return v2Result(id: id, self.v2StatusSet(params: params))
         case "status.clear":
@@ -4756,6 +4766,7 @@ class TerminalController {
                 "pane_ref": v2Ref(kind: .pane, uuid: paneUUID),
                 "index_in_pane": v2OrNull(indexInPaneByPanelId[panel.id]),
                 "tty": v2OrNull(workspace.surfaceTTYNames[panel.id]),
+                "metadata": workspace.surfaceMetadataEntries[panel.id] ?? [:],
                 "webviews": []
             ]
 
@@ -5109,6 +5120,7 @@ class TerminalController {
             "index_in_pane": surfaceIndex,
             "tty": NSNull(),
             "detached": true,
+            "metadata": v2DetachedPaneSnapshotMetadata(paneSnapshot),
         ]
         switch paneSnapshot {
         case .terminal(let terminal):
@@ -5142,6 +5154,19 @@ class TerminalController {
             return browser.paneId
         case .markdownViewer(let markdown):
             return markdown.paneId
+        }
+    }
+
+    private func v2DetachedPaneSnapshotMetadata(_ pane: PaneSnapshot?) -> [String: String] {
+        switch pane {
+        case .terminal(let terminal):
+            return terminal.metadataEntries ?? [:]
+        case .browser(let browser):
+            return browser.metadataEntries ?? [:]
+        case .markdownViewer(let markdown):
+            return markdown.metadataEntries ?? [:]
+        case .none:
+            return [:]
         }
     }
 
@@ -6299,6 +6324,393 @@ class TerminalController {
             return .ok(payload)
         } catch {
             return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2SurfaceMetadataSet(params: [String: Any]) -> V2CallResult {
+        guard let key = v2MetadataKey(params), !key.isEmpty else {
+            return .err(code: "invalid_params", message: "surface.metadata.set requires key", data: nil)
+        }
+        let value = v2RawString(params, "value")
+            ?? v2RawString(params, "json_value")
+            ?? v2RawString(params, "json")
+        guard let value else {
+            return .err(code: "invalid_params", message: "surface.metadata.set requires value", data: nil)
+        }
+        guard key.utf8.count <= 512 else {
+            return .err(code: "invalid_params", message: "metadata key is too large", data: ["limit": 512])
+        }
+        guard value.utf8.count <= 16 * 1024 else {
+            return .err(code: "invalid_params", message: "metadata value is too large", data: ["limit": 16 * 1024])
+        }
+
+        if let live = v2SurfaceMetadataLiveTarget(params: params) {
+            let workspace = live.workspace
+            var metadata = workspace.surfaceMetadataEntries[live.surfaceId] ?? [:]
+            metadata[key] = value
+            workspace.surfaceMetadataEntries[live.surfaceId] = metadata
+            if workspace.isRemoteWorkspace {
+                _ = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
+                    workspace: workspace,
+                    status: .live,
+                    force: true,
+                    requireCapability: false
+                )
+            }
+            return .ok(v2SurfaceMetadataEntryPayload(
+                workspace: workspace,
+                surfaceId: live.surfaceId,
+                key: key,
+                value: value,
+                exists: true
+            ))
+        }
+
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            var snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            let surfaceId = try v2DetachedSurfaceMetadataSurfaceID(params: params, snapshot: snapshot)
+            var updated = false
+            snapshot.panes = snapshot.panes.map { pane in
+                guard v2DetachedPaneSnapshotSurfaceID(pane) == surfaceId else { return pane }
+                var copy = pane
+                var metadata = v2DetachedPaneSnapshotMetadata(copy)
+                metadata[key] = value
+                v2SetDetachedPaneSnapshotMetadata(metadata, pane: &copy)
+                updated = true
+                return copy
+            }
+            guard updated else {
+                return .err(code: "not_found", message: "Surface not found", data: ["surface_id": surfaceId.uuidString])
+            }
+            let stored = try v2StoreDetachedWorkspaceSnapshot(snapshot, target: target)
+            var payload = v2DetachedSurfaceMetadataEntryPayload(
+                target: target,
+                snapshot: snapshot,
+                surfaceId: surfaceId,
+                key: key,
+                value: value,
+                exists: true
+            )
+            payload["snapshot_sha256"] = stored.sha256
+            return .ok(payload)
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2SurfaceMetadataGet(params: [String: Any]) -> V2CallResult {
+        guard let key = v2MetadataKey(params), !key.isEmpty else {
+            return .err(code: "invalid_params", message: "surface.metadata.get requires key", data: nil)
+        }
+        if let live = v2SurfaceMetadataLiveTarget(params: params) {
+            let value = live.workspace.surfaceMetadataEntries[live.surfaceId]?[key]
+            return .ok(v2SurfaceMetadataEntryPayload(
+                workspace: live.workspace,
+                surfaceId: live.surfaceId,
+                key: key,
+                value: value ?? NSNull(),
+                exists: value != nil
+            ))
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            let snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            let surfaceId = try v2DetachedSurfaceMetadataSurfaceID(params: params, snapshot: snapshot)
+            guard let pane = snapshot.panes.first(where: { v2DetachedPaneSnapshotSurfaceID($0) == surfaceId }) else {
+                return .err(code: "not_found", message: "Surface not found", data: ["surface_id": surfaceId.uuidString])
+            }
+            let value = v2DetachedPaneSnapshotMetadata(pane)[key]
+            return .ok(v2DetachedSurfaceMetadataEntryPayload(
+                target: target,
+                snapshot: snapshot,
+                surfaceId: surfaceId,
+                key: key,
+                value: value ?? NSNull(),
+                exists: value != nil
+            ))
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2SurfaceMetadataList(params: [String: Any]) -> V2CallResult {
+        let prefix = v2RawString(params, "prefix") ?? ""
+        if let live = v2SurfaceMetadataLiveTarget(params: params) {
+            let entries = (live.workspace.surfaceMetadataEntries[live.surfaceId] ?? [:])
+                .filter { prefix.isEmpty || $0.key.hasPrefix(prefix) }
+                .sorted { $0.key < $1.key }
+                .map { key, value in ["key": key, "value": value] }
+            return .ok([
+                "workspace_id": live.workspace.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: live.workspace.id),
+                "surface_id": live.surfaceId.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: live.surfaceId),
+                "prefix": prefix.isEmpty ? NSNull() as Any : prefix,
+                "entries": entries,
+                "count": entries.count,
+            ])
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            let snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            let surfaceId = try v2DetachedSurfaceMetadataSurfaceID(params: params, snapshot: snapshot)
+            guard let pane = snapshot.panes.first(where: { v2DetachedPaneSnapshotSurfaceID($0) == surfaceId }) else {
+                return .err(code: "not_found", message: "Surface not found", data: ["surface_id": surfaceId.uuidString])
+            }
+            let entries = v2DetachedPaneSnapshotMetadata(pane)
+                .filter { prefix.isEmpty || $0.key.hasPrefix(prefix) }
+                .sorted { $0.key < $1.key }
+                .map { key, value in ["key": key, "value": value] }
+            return .ok([
+                "workspace_id": v2StableID(snapshot.workspaceId),
+                "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+                "surface_id": v2StableID(surfaceId),
+                "surface_ref": v2Ref(kind: .surface, uuid: surfaceId),
+                "host": target.host.host,
+                "persistent_daemon_slot": target.slot,
+                "attached": false,
+                "detached": true,
+                "prefix": prefix.isEmpty ? NSNull() as Any : prefix,
+                "entries": entries,
+                "count": entries.count,
+            ])
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2SurfaceMetadataClear(params: [String: Any]) -> V2CallResult {
+        guard let key = v2MetadataKey(params), !key.isEmpty else {
+            return .err(code: "invalid_params", message: "surface.metadata.clear requires key", data: nil)
+        }
+        if let live = v2SurfaceMetadataLiveTarget(params: params) {
+            var metadata = live.workspace.surfaceMetadataEntries[live.surfaceId] ?? [:]
+            let removed = metadata.removeValue(forKey: key) != nil
+            live.workspace.surfaceMetadataEntries[live.surfaceId] = metadata.isEmpty ? nil : metadata
+            if removed && live.workspace.isRemoteWorkspace {
+                _ = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
+                    workspace: live.workspace,
+                    status: .live,
+                    force: true,
+                    requireCapability: false
+                )
+            }
+            return .ok([
+                "workspace_id": live.workspace.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: live.workspace.id),
+                "surface_id": live.surfaceId.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: live.surfaceId),
+                "key": key,
+                "cleared": removed,
+            ])
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            var snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            let surfaceId = try v2DetachedSurfaceMetadataSurfaceID(params: params, snapshot: snapshot)
+            var removed = false
+            var found = false
+            snapshot.panes = snapshot.panes.map { pane in
+                guard v2DetachedPaneSnapshotSurfaceID(pane) == surfaceId else { return pane }
+                found = true
+                var copy = pane
+                var metadata = v2DetachedPaneSnapshotMetadata(copy)
+                removed = metadata.removeValue(forKey: key) != nil
+                v2SetDetachedPaneSnapshotMetadata(metadata, pane: &copy)
+                return copy
+            }
+            guard found else {
+                return .err(code: "not_found", message: "Surface not found", data: ["surface_id": surfaceId.uuidString])
+            }
+            var payload: [String: Any] = [
+                "workspace_id": v2StableID(snapshot.workspaceId),
+                "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+                "surface_id": v2StableID(surfaceId),
+                "surface_ref": v2Ref(kind: .surface, uuid: surfaceId),
+                "host": target.host.host,
+                "persistent_daemon_slot": target.slot,
+                "attached": false,
+                "detached": true,
+                "key": key,
+                "cleared": removed,
+            ]
+            if removed {
+                let stored = try v2StoreDetachedWorkspaceSnapshot(snapshot, target: target)
+                payload["snapshot_sha256"] = stored.sha256
+            }
+            return .ok(payload)
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2SurfaceLookup(params: [String: Any]) -> V2CallResult {
+        let parsed = v2WorkspaceLookupMetadataCriteria(params: params)
+        if let error = parsed.error { return error }
+        let criteria = parsed.criteria
+        if let workspace = v2MetadataWorkspace(params: params) {
+            let matches = workspace.panels.values
+                .filter { panel in
+                    let metadata = workspace.surfaceMetadataEntries[panel.id] ?? [:]
+                    return criteria.allSatisfy { key, value in metadata[key] == value }
+                }
+                .map { panel in
+                    [
+                        "workspace_id": workspace.id.uuidString,
+                        "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                        "surface_id": panel.id.uuidString,
+                        "surface_ref": v2Ref(kind: .surface, uuid: panel.id),
+                        "type": panel.panelType.rawValue,
+                        "title": workspace.panelTitle(panelId: panel.id) ?? panel.displayTitle,
+                        "metadata": workspace.surfaceMetadataEntries[panel.id] ?? [:],
+                        "attached": true,
+                        "detached": false,
+                    ] as [String: Any]
+                }
+            return .ok([
+                "workspace_id": workspace.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                "criteria": criteria,
+                "matches": matches,
+                "surface": matches.count == 1 ? matches[0] as Any : NSNull(),
+                "count": matches.count,
+            ])
+        }
+        guard let target = v2FindDetachedMetadataTarget(params: params) else {
+            return .err(code: "not_found", message: "Workspace not found", data: nil)
+        }
+        do {
+            let snapshot = try v2FetchDetachedWorkspaceSnapshot(target: target).snapshot
+            let matches = snapshot.panes.compactMap { pane -> [String: Any]? in
+                let metadata = v2DetachedPaneSnapshotMetadata(pane)
+                guard criteria.allSatisfy({ key, value in metadata[key] == value }) else { return nil }
+                let surfaceId = v2DetachedPaneSnapshotSurfaceID(pane)
+                return [
+                    "workspace_id": v2StableID(snapshot.workspaceId),
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+                    "surface_id": v2StableID(surfaceId),
+                    "surface_ref": v2Ref(kind: .surface, uuid: surfaceId),
+                    "type": v2DetachedPaneSnapshotType(pane),
+                    "metadata": metadata,
+                    "attached": false,
+                    "detached": true,
+                ]
+            }
+            return .ok([
+                "workspace_id": v2StableID(snapshot.workspaceId),
+                "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+                "host": target.host.host,
+                "persistent_daemon_slot": target.slot,
+                "criteria": criteria,
+                "matches": matches,
+                "surface": matches.count == 1 ? matches[0] as Any : NSNull(),
+                "count": matches.count,
+                "attached": false,
+                "detached": true,
+            ])
+        } catch {
+            return .err(code: "detached_snapshot_failed", message: error.localizedDescription, data: nil)
+        }
+    }
+
+    private func v2SurfaceMetadataLiveTarget(params: [String: Any]) -> (workspace: Workspace, surfaceId: UUID)? {
+        guard let tabManager = v2ResolveTabManager(params: params) else { return nil }
+        return v2MainSync {
+            guard let workspace = v2ResolveWorkspace(params: params, tabManager: tabManager) else { return nil }
+            let surfaceId = v2UUID(params, "surface_id") ?? workspace.focusedPanelId
+            guard let surfaceId, workspace.panels[surfaceId] != nil else { return nil }
+            return (workspace, surfaceId)
+        }
+    }
+
+    private func v2SurfaceMetadataEntryPayload(
+        workspace: Workspace,
+        surfaceId: UUID,
+        key: String,
+        value: Any,
+        exists: Bool
+    ) -> [String: Any] {
+        [
+            "workspace_id": workspace.id.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+            "surface_id": surfaceId.uuidString,
+            "surface_ref": v2Ref(kind: .surface, uuid: surfaceId),
+            "key": key,
+            "value": value,
+            "exists": exists,
+        ]
+    }
+
+    private func v2DetachedSurfaceMetadataEntryPayload(
+        target: V2DetachedWorkspaceSnapshotTarget,
+        snapshot: RemoteWorkspaceSnapshotV1,
+        surfaceId: UUID,
+        key: String,
+        value: Any,
+        exists: Bool
+    ) -> [String: Any] {
+        [
+            "workspace_id": v2StableID(snapshot.workspaceId),
+            "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
+            "surface_id": v2StableID(surfaceId),
+            "surface_ref": v2Ref(kind: .surface, uuid: surfaceId),
+            "host": target.host.host,
+            "persistent_daemon_slot": target.slot,
+            "attached": false,
+            "detached": true,
+            "key": key,
+            "value": value,
+            "exists": exists,
+        ]
+    }
+
+    private func v2DetachedSurfaceMetadataSurfaceID(
+        params: [String: Any],
+        snapshot: RemoteWorkspaceSnapshotV1
+    ) throws -> UUID {
+        if let surfaceId = v2UUID(params, "surface_id") {
+            return surfaceId
+        }
+        if let activePaneId = snapshot.activePaneId {
+            return activePaneId
+        }
+        throw NSError(domain: "cmux.surface.metadata", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "surface metadata requires surface_id",
+        ])
+    }
+
+    private func v2SetDetachedPaneSnapshotMetadata(_ metadata: [String: String], pane: inout PaneSnapshot) {
+        let stored = metadata.isEmpty ? nil : metadata
+        switch pane {
+        case .terminal(var terminal):
+            terminal.metadataEntries = stored
+            pane = .terminal(terminal)
+        case .browser(var browser):
+            browser.metadataEntries = stored
+            pane = .browser(browser)
+        case .markdownViewer(var markdown):
+            markdown.metadataEntries = stored
+            pane = .markdownViewer(markdown)
+        }
+    }
+
+    private func v2DetachedPaneSnapshotType(_ pane: PaneSnapshot) -> String {
+        switch pane {
+        case .terminal:
+            return PanelType.terminal.rawValue
+        case .browser:
+            return PanelType.browser.rawValue
+        case .markdownViewer:
+            return PanelType.markdown.rawValue
         }
     }
 

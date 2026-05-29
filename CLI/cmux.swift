@@ -5825,8 +5825,164 @@ struct CMUXCLI {
                 idFormat: idFormat,
                 windowOverride: windowOverride
             )
+        case "metadata":
+            try runSurfaceMetadataCommand(
+                commandArgs: Array(commandArgs.dropFirst()),
+                client: client,
+                jsonOutput: jsonOutput,
+                idFormat: idFormat,
+                windowOverride: windowOverride
+            )
+        case "lookup":
+            try runSurfaceLookupCommand(
+                commandArgs: Array(commandArgs.dropFirst()),
+                client: client,
+                jsonOutput: jsonOutput,
+                idFormat: idFormat,
+                windowOverride: windowOverride
+            )
         default:
             throw CLIError(message: "Unsupported surface subcommand: \(subcommand)")
+        }
+    }
+
+    private func surfaceMetadataParams(
+        commandArgs: [String],
+        client: SocketClient,
+        windowOverride: String?
+    ) throws -> (params: [String: Any], remaining: [String]) {
+        let (workspaceOpt, rem0) = parseOption(commandArgs, name: "--workspace")
+        let (surfaceOpt, rem1) = parseOption(rem0, name: "--surface")
+        let (windowOpt, rem2) = parseOption(rem1, name: "--window")
+        let windowRaw = windowOpt ?? windowOverride
+        let windowHandle = try normalizeWindowHandle(windowRaw, client: client)
+        let workspaceArg = workspaceOpt ?? (windowRaw == nil ? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"] : nil)
+        let workspaceId = try normalizeWorkspaceHandle(workspaceArg, client: client, windowHandle: windowHandle, allowCurrent: true)
+        let surfaceArg = surfaceOpt ?? ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"]
+        let surfaceId = try normalizeSurfaceHandle(surfaceArg, client: client, workspaceHandle: workspaceId, windowHandle: windowHandle)
+        var params: [String: Any] = [:]
+        if let windowHandle { params["window_id"] = windowHandle }
+        if let workspaceId { params["workspace_id"] = workspaceId }
+        if let surfaceId { params["surface_id"] = surfaceId }
+        return (params, rem2)
+    }
+
+    private func runSurfaceMetadataCommand(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat,
+        windowOverride: String?
+    ) throws {
+        guard let subcommand = commandArgs.first else {
+            throw CLIError(message: "Usage: cmux surface metadata <set|get|list|clear>")
+        }
+        var parsed = try surfaceMetadataParams(
+            commandArgs: Array(commandArgs.dropFirst()),
+            client: client,
+            windowOverride: windowOverride
+        )
+        switch subcommand {
+        case "set":
+            let (valueOpt, rem0) = parseOption(parsed.remaining, name: "--value")
+            let (jsonValueOpt, rem1) = parseOption(rem0, name: "--value-json")
+            guard let key = rem1.first else {
+                throw CLIError(message: "surface metadata set requires <key> <value>")
+            }
+            let trailing = Array(rem1.dropFirst())
+            let value = jsonValueOpt ?? valueOpt ?? trailing.joined(separator: " ")
+            guard !value.isEmpty else {
+                throw CLIError(message: "surface metadata set requires a value")
+            }
+            parsed.params["key"] = key
+            parsed.params[jsonValueOpt == nil ? "value" : "json_value"] = value
+            let payload = try client.sendV2(method: "surface.metadata.set", params: parsed.params, responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds)
+            printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
+        case "get":
+            guard let key = parsed.remaining.first else {
+                throw CLIError(message: "surface metadata get requires <key>")
+            }
+            parsed.params["key"] = key
+            let payload = try client.sendV2(method: "surface.metadata.get", params: parsed.params, responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds)
+            if jsonOutput {
+                print(jsonString(formatIDs(payload, mode: idFormat)))
+            } else if (payload["exists"] as? Bool) == true {
+                print((payload["value"] as? String) ?? "")
+            }
+        case "list":
+            let (prefixOpt, rem0) = parseOption(parsed.remaining, name: "--prefix")
+            if let unknown = rem0.first(where: { $0.hasPrefix("--") }) {
+                throw CLIError(message: "surface metadata list: unknown flag '\(unknown)'")
+            }
+            if let prefixOpt {
+                parsed.params["prefix"] = prefixOpt
+            }
+            let payload = try client.sendV2(method: "surface.metadata.list", params: parsed.params, responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds)
+            if jsonOutput {
+                print(jsonString(formatIDs(payload, mode: idFormat)))
+            } else {
+                let entries = payload["entries"] as? [[String: Any]] ?? []
+                for entry in entries {
+                    let key = (entry["key"] as? String) ?? ""
+                    let value = (entry["value"] as? String) ?? ""
+                    print("\(key)=\(value)")
+                }
+            }
+        case "clear":
+            guard let key = parsed.remaining.first else {
+                throw CLIError(message: "surface metadata clear requires <key>")
+            }
+            parsed.params["key"] = key
+            let payload = try client.sendV2(method: "surface.metadata.clear", params: parsed.params, responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds)
+            printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
+        default:
+            throw CLIError(message: "Unknown surface metadata subcommand '\(subcommand)'")
+        }
+    }
+
+    private func runSurfaceLookupCommand(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat,
+        windowOverride: String?
+    ) throws {
+        let (workspaceOpt, rem0) = parseOption(commandArgs, name: "--workspace")
+        let (windowOpt, rem1) = parseOption(rem0, name: "--window")
+        let windowRaw = windowOpt ?? windowOverride
+        let windowHandle = try normalizeWindowHandle(windowRaw, client: client)
+        let workspaceArg = workspaceOpt ?? (windowRaw == nil ? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"] : nil)
+        let workspaceId = try normalizeWorkspaceHandle(workspaceArg, client: client, windowHandle: windowHandle, allowCurrent: true)
+        var params: [String: Any] = [:]
+        if let windowHandle { params["window_id"] = windowHandle }
+        if let workspaceId { params["workspace_id"] = workspaceId }
+        var remaining = rem1
+        var criteria: [String: String] = [:]
+        while let index = remaining.firstIndex(of: "--metadata") {
+            let valueIndex = remaining.index(after: index)
+            guard valueIndex < remaining.endIndex else {
+                throw CLIError(message: "surface lookup: --metadata requires key=value")
+            }
+            let raw = remaining[valueIndex]
+            let parts = raw.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, !parts[0].isEmpty else {
+                throw CLIError(message: "surface lookup: --metadata requires key=value")
+            }
+            criteria[String(parts[0])] = String(parts[1])
+            remaining.removeSubrange(index...valueIndex)
+        }
+        if let unknown = remaining.first(where: { $0.hasPrefix("--") }) {
+            throw CLIError(message: "surface lookup: unknown flag '\(unknown)'")
+        }
+        guard criteria.isEmpty == false else {
+            throw CLIError(message: "surface lookup requires --metadata <key=value>")
+        }
+        params["metadata"] = criteria
+        let payload = try client.sendV2(method: "surface.lookup", params: params, responseTimeout: Self.detachedSnapshotMutationResponseTimeoutSeconds)
+        if jsonOutput {
+            print(jsonString(formatIDs(payload, mode: idFormat)))
+        } else {
+            printV2Payload(payload, jsonOutput: false, idFormat: idFormat, fallbackText: v2OKSummary(payload, idFormat: idFormat, kinds: ["surface"]))
         }
     }
 
@@ -13398,9 +13554,16 @@ struct CMUXCLI {
                    cmux surface resume show [--json] [flags]
                    cmux surface resume get [--json] [flags]
                    cmux surface resume clear [flags]
+                   cmux surface metadata set --workspace <ws> --surface <surface> <key> <value>
+                   cmux surface metadata get --workspace <ws> --surface <surface> <key> [--json]
+                   cmux surface metadata list --workspace <ws> --surface <surface> [--prefix <prefix>] [--json]
+                   cmux surface metadata clear --workspace <ws> --surface <surface> <key> [--json]
+                   cmux surface lookup --workspace <ws> --metadata <key=value> [--metadata <key=value> ...] [--json]
 
             Attach restart command metadata to a terminal surface.
             Public CLI bindings are stored for inspection and manual restore.
+            Surface metadata is hidden machine-readable metadata attached to a specific surface.
+            For detached remote workspaces, supported operations mutate the remote snapshot.
 
             Flags:
               --workspace <id|ref|index>   Workspace context (default: $CMUX_WORKSPACE_ID)
@@ -13417,6 +13580,8 @@ struct CMUXCLI {
               cmux surface resume set --kind tmux --shell "tmux attach -t work"
               cmux surface resume set --kind opencode --checkpoint ses_123 -- opencode --session ses_123
               cmux surface resume show --json
+              cmux surface metadata set --workspace workspace:2 --surface surface:4 craft:semantic agent
+              cmux surface lookup --workspace workspace:2 --metadata craft:semantic=agent --json
             """
         case "debug-terminals":
             return """
@@ -30680,6 +30845,8 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           reorder-surface --surface <id|ref|index> (--index <n> | --before <id|ref|index> | --after <id|ref|index>) [--workspace <id|ref|index>] [--window <id|ref|index>] [--focus <true|false>]
           tab-action --action <name> [--tab <id|ref|index>] [--surface <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--title <text>] [--url <url>] [--focus <true|false>]
           surface resume <set|show|get|clear> [--workspace <id|ref|index>] [--surface <id|ref|index>] [--window <id|ref|index>]
+          surface metadata <set|get|list|clear> [--workspace <id|ref|index>] [--surface <id|ref|index>] ...
+          surface lookup --workspace <id|ref|index> --metadata <key=value> [--metadata <key=value> ...]
           rename-tab [--workspace <id|ref|index>] [--tab <id|ref|index>] [--surface <id|ref|index>] [--window <id|ref|index>] <title>
           drag-surface-to-split --surface <id|ref|index> <left|right|up|down> [--workspace <id|ref|index>] [--window <id|ref|index>] [--focus <true|false>]
           refresh-surfaces

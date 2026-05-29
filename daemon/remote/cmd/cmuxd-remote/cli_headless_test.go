@@ -444,6 +444,66 @@ func TestHeadlessCreateSurfaceBrowser(t *testing.T) {
 	}
 }
 
+func TestHeadlessSurfaceMetadataLifecycleAndLookup(t *testing.T) {
+	env := setupHeadlessSnapshot(t)
+	if _, err := headlessSurfaceMetadataSet(map[string]any{
+		"workspace_id": env.workspaceID,
+		"surface_id":   env.surfaceID,
+		"key":          "craft:semantic",
+		"value":        "agent",
+	}); err != nil {
+		t.Fatalf("surface.metadata.set: %v", err)
+	}
+
+	getResult, err := headlessSurfaceMetadataGet(map[string]any{
+		"workspace_id": env.workspaceID,
+		"surface_id":   env.surfaceID,
+		"key":          "craft:semantic",
+	})
+	if err != nil {
+		t.Fatalf("surface.metadata.get: %v", err)
+	}
+	if getResult["value"] != "agent" || getResult["exists"] != true {
+		t.Fatalf("unexpected get result: %+v", getResult)
+	}
+
+	lookupResult, err := headlessSurfaceLookup(map[string]any{
+		"workspace_id": env.workspaceID,
+		"metadata":     map[string]any{"craft:semantic": "agent"},
+	})
+	if err != nil {
+		t.Fatalf("surface.lookup: %v", err)
+	}
+	if lookupResult["count"] != 1 {
+		t.Fatalf("surface.lookup count = %v, want 1: %+v", lookupResult["count"], lookupResult)
+	}
+	surface, _ := lookupResult["surface"].(map[string]any)
+	if got := headlessNormalizeID(stringFromAny(surface["surface_id"])); got != env.surfaceID {
+		t.Fatalf("surface.lookup surface_id = %q, want %q", got, env.surfaceID)
+	}
+
+	body := env.loadBody(t)
+	panes := headlessPaneSnapshots(body)
+	if len(panes) != 1 {
+		t.Fatalf("pane count = %d, want 1", len(panes))
+	}
+	if got := headlessPaneMetadataMap(panes[0])["craft:semantic"]; got != "agent" {
+		t.Fatalf("snapshot surface metadata = %q, want agent", got)
+	}
+
+	clearResult, err := headlessSurfaceMetadataClear(map[string]any{
+		"workspace_id": env.workspaceID,
+		"surface_id":   env.surfaceID,
+		"key":          "craft:semantic",
+	})
+	if err != nil {
+		t.Fatalf("surface.metadata.clear: %v", err)
+	}
+	if clearResult["cleared"] != true {
+		t.Fatalf("clear result = %+v, want cleared=true", clearResult)
+	}
+}
+
 func TestHeadlessSurfaceSplitInsertsPane(t *testing.T) {
 	env := setupHeadlessSnapshot(t)
 	stubHeadlessPTY(t)

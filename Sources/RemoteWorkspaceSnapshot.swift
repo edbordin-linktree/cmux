@@ -79,17 +79,20 @@ struct TerminalPaneSnapshot: Codable, Sendable, Equatable {
     var title: String?
     var cwdHint: String?
     var agentKind: String?
+    var metadataEntries: [String: String]? = nil
 }
 
 struct BrowserPaneSnapshot: Codable, Sendable, Equatable {
     var paneId: UUID
     var currentURL: String
     var title: String?
+    var metadataEntries: [String: String]? = nil
 }
 
 struct MarkdownViewerPaneSnapshot: Codable, Sendable, Equatable {
     var paneId: UUID
     var path: String
+    var metadataEntries: [String: String]? = nil
 }
 
 struct RemoteWorkspaceStatusEntrySnapshot: Codable, Sendable, Equatable {
@@ -747,7 +750,10 @@ extension Workspace {
                     remotePTYSessionId: sessionID,
                     title: panel.title,
                     cwdHint: panel.directory ?? panel.terminal?.workingDirectory,
-                    agentKind: panel.terminal?.agent?.kind.rawValue ?? panel.terminal?.resumeBinding?.kind
+                    agentKind: panel.terminal?.agent?.kind.rawValue ?? panel.terminal?.resumeBinding?.kind,
+                    metadataEntries: panel.metadataEntries?.reduce(into: [String: String]()) { result, entry in
+                        result[entry.key] = entry.value
+                    }
                 )
             )
         case .browser:
@@ -759,7 +765,10 @@ extension Workspace {
                 BrowserPaneSnapshot(
                     paneId: panel.id,
                     currentURL: urlString,
-                    title: panel.title
+                    title: panel.title,
+                    metadataEntries: panel.metadataEntries?.reduce(into: [String: String]()) { result, entry in
+                        result[entry.key] = entry.value
+                    }
                 )
             )
         case .markdown:
@@ -770,7 +779,10 @@ extension Workspace {
             return .markdownViewer(
                 MarkdownViewerPaneSnapshot(
                     paneId: panel.id,
-                    path: path
+                    path: path,
+                    metadataEntries: panel.metadataEntries?.reduce(into: [String: String]()) { result, entry in
+                        result[entry.key] = entry.value
+                    }
                 )
             )
         case .filePreview, .rightSidebarTool:
@@ -820,6 +832,9 @@ extension Workspace {
                 gitBranch: nil,
                 listeningPorts: [],
                 ttyName: nil,
+                metadataEntries: terminal.metadataEntries?.map {
+                    SessionMetadataEntrySnapshot(key: $0.key, value: $0.value)
+                },
                 terminal: SessionTerminalPanelSnapshot(
                     workingDirectory: terminal.cwdHint,
                     remotePTYSessionID: terminal.remotePTYSessionId
@@ -841,6 +856,9 @@ extension Workspace {
                 gitBranch: nil,
                 listeningPorts: [],
                 ttyName: nil,
+                metadataEntries: browser.metadataEntries?.map {
+                    SessionMetadataEntrySnapshot(key: $0.key, value: $0.value)
+                },
                 terminal: nil,
                 browser: SessionBrowserPanelSnapshot(
                     urlString: browser.currentURL,
@@ -867,6 +885,9 @@ extension Workspace {
                 gitBranch: nil,
                 listeningPorts: [],
                 ttyName: nil,
+                metadataEntries: markdown.metadataEntries?.map {
+                    SessionMetadataEntrySnapshot(key: $0.key, value: $0.value)
+                },
                 terminal: nil,
                 browser: nil,
                 markdown: SessionMarkdownPanelSnapshot(filePath: markdown.path),

@@ -163,7 +163,7 @@ func hasHeadlessRemoteContext() bool {
 
 func commandMayUseHeadlessNoSocket(cmdName string) bool {
 	switch cmdName {
-	case "metadata", "workspace", "tree", "set-status", "clear-status", "list-status":
+	case "metadata", "workspace", "surface", "tree", "set-status", "clear-status", "list-status":
 		return true
 	}
 	if spec := commandIndex[cmdName]; spec != nil && spec.proto == protoV2 {
@@ -276,6 +276,9 @@ doneFlags:
 	}
 	if cmdName == "workspace" {
 		return runWorkspaceRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
+	}
+	if cmdName == "surface" {
+		return runSurfaceRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
 	}
 	if cmdName == "set-status" || cmdName == "clear-status" || cmdName == "list-status" {
 		return runStatusRelay(socketPath, cmdName, cmdArgs, jsonOutput, refreshAddr)
@@ -1118,6 +1121,185 @@ func runWorkspaceRelay(socketPath string, args []string, jsonOutput bool, refres
 	return 0
 }
 
+func runSurfaceRelay(socketPath string, args []string, jsonOutput bool, refreshAddr func() string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "cmux surface: supported subcommands: metadata, lookup")
+		return 2
+	}
+	args, trailingJSON := stripStandaloneFlag(args, "--json")
+	jsonOutput = jsonOutput || trailingJSON
+	sub := args[0]
+	switch sub {
+	case "metadata":
+		return runSurfaceMetadataRelay(socketPath, args[1:], jsonOutput, refreshAddr)
+	case "lookup":
+		return runSurfaceLookupRelay(socketPath, args[1:], jsonOutput, refreshAddr)
+	default:
+		fmt.Fprintf(os.Stderr, "cmux surface: unsupported subcommand %q\n", sub)
+		return 2
+	}
+}
+
+func runSurfaceMetadataRelay(socketPath string, args []string, jsonOutput bool, refreshAddr func() string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "cmux surface metadata: requires a subcommand (set, get, list, clear)")
+		return 2
+	}
+	sub := args[0]
+	parsed, err := parseFlags(args[1:], []string{"workspace", "surface", "prefix", "value", "value-json"})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmux surface metadata: %v\n", err)
+		return 2
+	}
+	params := map[string]any{}
+	forceHeadless := false
+	workspaceArg := ""
+	if workspace, ok := parsed.flags["workspace"]; ok {
+		workspaceArg = workspace
+		params["workspace_id"] = workspace
+		route := routeForExplicitWorkspaceArg(workspace, socketPath)
+		socketPath = route.socketPath
+		forceHeadless = route.forceHeadless
+	}
+	if surface, ok := parsed.flags["surface"]; ok {
+		params["surface_id"] = surface
+	}
+	applyWorkspaceEnvFallback(params)
+	applySurfaceEnvFallback(params, workspaceArg)
+
+	var method string
+	switch sub {
+	case "set":
+		method = "surface.metadata.set"
+		if len(parsed.positional) == 0 {
+			fmt.Fprintln(os.Stderr, "cmux surface metadata set: requires <key> <value>")
+			return 2
+		}
+		params["key"] = parsed.positional[0]
+		if value, ok := parsed.flags["value-json"]; ok {
+			params["json_value"] = value
+		} else if value, ok := parsed.flags["value"]; ok {
+			params["value"] = value
+		} else if len(parsed.positional) > 1 {
+			params["value"] = strings.Join(parsed.positional[1:], " ")
+		} else {
+			fmt.Fprintln(os.Stderr, "cmux surface metadata set: requires a value")
+			return 2
+		}
+	case "get":
+		method = "surface.metadata.get"
+		if len(parsed.positional) != 1 {
+			fmt.Fprintln(os.Stderr, "cmux surface metadata get: requires <key>")
+			return 2
+		}
+		params["key"] = parsed.positional[0]
+	case "list":
+		method = "surface.metadata.list"
+		if prefix, ok := parsed.flags["prefix"]; ok {
+			params["prefix"] = prefix
+		}
+	case "clear":
+		method = "surface.metadata.clear"
+		if len(parsed.positional) != 1 {
+			fmt.Fprintln(os.Stderr, "cmux surface metadata clear: requires <key>")
+			return 2
+		}
+		params["key"] = parsed.positional[0]
+	default:
+		fmt.Fprintf(os.Stderr, "cmux surface metadata: unknown subcommand %q\n", sub)
+		return 2
+	}
+
+	if forceHeadless {
+		if code, handled := runHeadlessCLICommand("surface metadata "+sub, method, params, jsonOutput, errors.New("target workspace is detached")); handled {
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "cmux: surface metadata %s cannot operate on detached workspace\n", sub)
+		return 1
+	}
+	resp, err := socketRoundTripV2WithTimeout(socketPath, method, params, refreshAddr, detachedSnapshotRelayTimeout)
+	if err != nil {
+		if shouldTryHeadlessFallback(err) {
+			if code, handled := runHeadlessCLICommand("surface metadata "+sub, method, params, jsonOutput, err); handled {
+				return code
+			}
+		}
+		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
+		return 1
+	}
+	if jsonOutput {
+		fmt.Println(resp)
+	} else {
+		fmt.Println(defaultRelayOutput(resp))
+	}
+	return 0
+}
+
+func runSurfaceLookupRelay(socketPath string, args []string, jsonOutput bool, refreshAddr func() string) int {
+	params := map[string]any{}
+	forceHeadless := false
+	criteria := map[string]string{}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--workspace":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "cmux surface lookup: --workspace requires a value")
+				return 2
+			}
+			workspace := args[i+1]
+			params["workspace_id"] = workspace
+			route := routeForExplicitWorkspaceArg(workspace, socketPath)
+			socketPath = route.socketPath
+			forceHeadless = route.forceHeadless
+			i++
+		case "--metadata":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "cmux surface lookup: --metadata requires key=value")
+				return 2
+			}
+			parts := strings.SplitN(args[i+1], "=", 2)
+			if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+				fmt.Fprintln(os.Stderr, "cmux surface lookup: --metadata requires key=value")
+				return 2
+			}
+			criteria[strings.TrimSpace(parts[0])] = parts[1]
+			i++
+		default:
+			fmt.Fprintf(os.Stderr, "cmux surface lookup: unknown argument %q\n", args[i])
+			return 2
+		}
+	}
+	applyWorkspaceEnvFallback(params)
+	if len(criteria) == 0 {
+		fmt.Fprintln(os.Stderr, "cmux surface lookup: requires --metadata key=value")
+		return 2
+	}
+	params["metadata"] = criteria
+	if forceHeadless {
+		if code, handled := runHeadlessCLICommand("surface lookup", "surface.lookup", params, jsonOutput, errors.New("target workspace is detached")); handled {
+			return code
+		}
+		fmt.Fprintln(os.Stderr, "cmux: surface lookup cannot operate on detached workspace")
+		return 1
+	}
+	resp, err := socketRoundTripV2WithTimeout(socketPath, "surface.lookup", params, refreshAddr, detachedSnapshotRelayTimeout)
+	if err != nil {
+		if shouldTryHeadlessFallback(err) {
+			if code, handled := runHeadlessCLICommand("surface lookup", "surface.lookup", params, jsonOutput, err); handled {
+				return code
+			}
+		}
+		fmt.Fprintf(os.Stderr, "cmux: %v\n", err)
+		return 1
+	}
+	if jsonOutput {
+		fmt.Println(resp)
+	} else {
+		fmt.Println(defaultRelayOutput(resp))
+	}
+	return 0
+}
+
 func stripStandaloneFlag(args []string, flag string) ([]string, bool) {
 	var stripped []string
 	found := false
@@ -1829,6 +2011,7 @@ func cliUsage() {
 	fmt.Fprintln(os.Stderr, "  close-workspace           Close a workspace")
 	fmt.Fprintln(os.Stderr, "  select-workspace          Select a workspace")
 	fmt.Fprintln(os.Stderr, "  focus-surface             Focus a surface")
+	fmt.Fprintln(os.Stderr, "  surface metadata/lookup   Manage or query hidden surface metadata")
 	fmt.Fprintln(os.Stderr, "  send                      Send text to a surface")
 	fmt.Fprintln(os.Stderr, "  send-key                  Send a key to a surface")
 	fmt.Fprintln(os.Stderr, "  set-status/list-status    Manage workspace status entries; list-status supports --json")
