@@ -89,7 +89,7 @@ func headlessPTYCommand(slot, workspaceID, surfaceID, command string, cwd string
 	if strings.TrimSpace(command) == "" {
 		return prefix + `; exec "${SHELL:-/bin/sh}" -l`
 	}
-	return prefix + "; exec /bin/sh -lc " + shellSingleQuote(command)
+	return prefix + "; exec /bin/sh -c " + shellSingleQuote(command)
 }
 
 func headlessWorkspaceCreateCWD(params map[string]any) string {

@@ -8029,7 +8029,7 @@ struct CMUXCLI {
         outerLines.append(contentsOf: relayWarmupLines)
         if let initialCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
            !initialCommand.isEmpty {
-            outerLines.append("exec /bin/sh -lc \(shellQuote(initialCommand))")
+            outerLines.append("exec /bin/sh -c \(shellQuote(initialCommand))")
             return outerLines.joined(separator: "\n")
         }
         outerLines += [
@@ -9739,13 +9739,17 @@ struct CMUXCLI {
                   var decoded = String(data: data, encoding: .utf8) else {
                 throw CLIError(message: "ssh-pty-attach: --command-b64 must be valid UTF-8 base64")
             }
+            let resolvedSurfaceID = surfaceID ?? attachmentID
             decoded = decoded
                 .replacingOccurrences(of: "__CMUX_WORKSPACE_ID__", with: workspaceId)
                 .replacingOccurrences(
                     of: "__CMUX_SURFACE_ID__",
-                    with: ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] ?? ""
+                    with: resolvedSurfaceID
                 )
-            return decoded
+            return remoteCmuxContextExportPrefix(
+                workspaceId: workspaceId,
+                surfaceId: resolvedSurfaceID
+            ) + "\n" + decoded
         }
         var bridgeReachedReady = false
         var attachFinished = false
@@ -10497,6 +10501,15 @@ struct CMUXCLI {
             return value
         }
         return "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    private func remoteCmuxContextExportPrefix(workspaceId: String, surfaceId: String) -> String {
+        [
+            "export CMUX_WORKSPACE_ID=\(shellQuote(workspaceId))",
+            "export CMUX_TAB_ID=\(shellQuote(workspaceId))",
+            "export CMUX_SURFACE_ID=\(shellQuote(surfaceId))",
+            "export CMUX_PANEL_ID=\(shellQuote(surfaceId))",
+        ].joined(separator: "\n")
     }
 
     private func execInteractiveProgram(

@@ -5301,7 +5301,7 @@ class TerminalController {
         }
         if let initialCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
            !initialCommand.isEmpty {
-            statements.append("exec /bin/sh -lc \(v2ShellSingleQuoted(initialCommand))")
+            statements.append("exec /bin/sh -c \(v2ShellSingleQuoted(initialCommand))")
         } else {
             statements.append(#"exec "${SHELL:-/bin/sh}" -l"#)
         }

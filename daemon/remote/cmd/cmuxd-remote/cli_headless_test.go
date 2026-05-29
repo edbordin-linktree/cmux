@@ -176,6 +176,25 @@ func TestHeadlessSupportsMethodFromRegistry(t *testing.T) {
 	}
 }
 
+func TestHeadlessPTYCommandUsesNonLoginShellForExplicitCommand(t *testing.T) {
+	command := headlessPTYCommand(
+		"ssh-slot",
+		"3f4a8d21-6a8f-4ef9-a979-7d712f2a8d9e",
+		"11111111-2222-3333-4444-555555555555",
+		"env | grep '^CMUX_'",
+		"/tmp",
+	)
+	if !strings.Contains(command, "exec /bin/sh -c ") {
+		t.Fatalf("headlessPTYCommand() = %q, want explicit commands to use non-login shell", command)
+	}
+	if strings.Contains(command, "exec /bin/sh -lc ") {
+		t.Fatalf("headlessPTYCommand() = %q, should not run explicit command through login shell", command)
+	}
+	if !strings.Contains(command, "export CMUX_WORKSPACE_ID=") || !strings.Contains(command, "export CMUX_SURFACE_ID=") {
+		t.Fatalf("headlessPTYCommand() = %q, missing cmux context exports", command)
+	}
+}
+
 func TestHeadlessMetadataLifecycle(t *testing.T) {
 	env := setupHeadlessSnapshot(t)
 
