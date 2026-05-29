@@ -938,6 +938,7 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.cmuxterm.remoteWorkspaceSnapshotSync", qos: .utility)
     private var lastUploadedByKey: [String: UploadState] = [:]
     private var inFlightKeys: Set<String> = []
+    private var closedKeys: Set<String> = []
     private let minimumBackgroundUploadInterval: TimeInterval
 
     init(minimumBackgroundUploadInterval: TimeInterval = 15.0) {
@@ -959,6 +960,7 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
             requireCapability: requireCapability
         )
         let key = Self.key(workspaceID: workspace.id, configuration: upload.configuration)
+        clearClosed(key: key)
         if !force, shouldSkipUpload(key: key, sha256: upload.sha256, now: upload.capturedAt) {
             return RemoteWorkspaceSnapshotSyncResult(uploaded: false, sha256: upload.sha256, paneCount: upload.paneCount)
         }
@@ -987,6 +989,7 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
             guard shouldEnqueueUpload(key: key, sha256: upload.sha256, now: now, force: force) else {
                 continue
             }
+            clearClosed(key: key)
             let pending = PendingUpload(
                 key: key,
                 upload: upload,
@@ -1000,6 +1003,7 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
 
     private func performBackgroundUpload(_ pending: PendingUpload) {
         defer { clearInFlight(key: pending.key) }
+        guard !isClosed(key: pending.key) else { return }
         do {
             _ = try store(upload: pending.upload, status: pending.status)
             NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: nil)
@@ -1018,6 +1022,14 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
             cmuxDebugLog("remote.workspace.snapshot.sync.failed key=\(pending.key) error=\(error.localizedDescription)")
 #endif
         }
+    }
+
+    func markClosed(workspaceID: UUID, configuration: WorkspaceRemoteConfiguration) {
+        let key = Self.key(workspaceID: workspaceID, configuration: configuration)
+        lock.lock()
+        closedKeys.insert(key)
+        lastUploadedByKey.removeValue(forKey: key)
+        lock.unlock()
     }
 
     private func store(
@@ -1061,6 +1073,18 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
         lock.lock()
         inFlightKeys.remove(key)
         lock.unlock()
+    }
+
+    private func clearClosed(key: String) {
+        lock.lock()
+        closedKeys.remove(key)
+        lock.unlock()
+    }
+
+    private func isClosed(key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closedKeys.contains(key)
     }
 
     private func recordUploadSuccess(key: String, sha256: String, uploadedAt: Date) {

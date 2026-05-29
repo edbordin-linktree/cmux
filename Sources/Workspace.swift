@@ -13474,6 +13474,84 @@ final class Workspace: Identifiable, ObservableObject {
         disconnectRemoteConnection(clearConfiguration: true)
     }
 
+    func destroyRemotePersistentStateForWorkspaceClose() {
+        guard !isDetachingCloseTransaction,
+              let configuration = remoteConfiguration else {
+            return
+        }
+
+        RemoteWorkspaceSnapshotSyncCoordinator.shared.markClosed(
+            workspaceID: id,
+            configuration: configuration
+        )
+
+        let daemonPath = remoteDaemonStatus.remotePath ?? "~/.cmux/bin/cmuxd-remote"
+        let sessionIDs = remotePTYSessionIDsForDestructiveWorkspaceClose()
+        var errors: [String] = []
+
+        if let controller = remoteSessionController {
+            for sessionID in sessionIDs {
+                do {
+                    try controller.closePTYSession(sessionID: sessionID)
+                } catch {
+                    errors.append("pty.close \(sessionID): \(error.localizedDescription)")
+                }
+            }
+            do {
+                _ = try controller.clearWorkspaceSnapshot()
+            } catch {
+                errors.append("workspace.snapshot.clear: \(error.localizedDescription)")
+            }
+        } else if configuration.persistentDaemonSlot != nil {
+            do {
+                _ = try Self.withTemporaryRemoteWorkspaceSnapshotTunnel(
+                    configuration: configuration,
+                    daemonPath: daemonPath,
+                    timeout: 6.0
+                ) {
+                    for sessionID in sessionIDs {
+                        try WorkspaceRemoteProxyBroker.shared.closePTY(
+                            configuration: configuration,
+                            sessionID: sessionID
+                        )
+                    }
+                    return try WorkspaceRemoteProxyBroker.shared.clearWorkspaceSnapshot(configuration: configuration)
+                }
+            } catch {
+                errors.append(error.localizedDescription)
+            }
+        }
+
+        NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: self)
+#if DEBUG
+        if !errors.isEmpty {
+            cmuxDebugLog(
+                "remote.workspace.close.cleanup.failed workspace=\(id.uuidString.prefix(5)) " +
+                "errors=\(errors.joined(separator: " | "))"
+            )
+        }
+#endif
+    }
+
+    private func remotePTYSessionIDsForDestructiveWorkspaceClose() -> [String] {
+        guard remoteConfiguration?.preserveAfterTerminalExit == true else {
+            return []
+        }
+
+        var sessionIDs = Set<String>()
+        for storedSessionID in remotePTYSessionIDsByPanelId.values {
+            if let normalized = normalizedRemotePTYSessionID(storedSessionID) {
+                sessionIDs.insert(normalized)
+            }
+        }
+        for (panelId, panel) in panels where panel is TerminalPanel {
+            if let sessionID = remotePTYSessionIDForSnapshot(panelId: panelId) {
+                sessionIDs.insert(sessionID)
+            }
+        }
+        return sessionIDs.sorted()
+    }
+
     static func requestSSHControlMasterCleanupIfNeeded(configuration: WorkspaceRemoteConfiguration) {
         guard let arguments = sshControlMasterCleanupArguments(configuration: configuration) else { return }
         if let override = runSSHControlMasterCommandOverrideForTesting {

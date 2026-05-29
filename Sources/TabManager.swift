@@ -5948,6 +5948,7 @@ class TabManager: ObservableObject {
         invalidateFocusHistoryTarget(workspaceId: workspace.id, panelId: nil)
 
         AppDelegate.shared?.notificationStore?.clearNotifications(forTabId: workspace.id)
+        workspace.destroyRemotePersistentStateForWorkspaceClose()
         workspace.withClosedPanelHistorySuppressed {
             workspace.teardownAllPanels()
         }
