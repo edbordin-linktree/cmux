@@ -8487,7 +8487,7 @@ class TerminalController {
             completion.signal()
         }
 
-        guard completion.wait(timeout: .now() + 90) == .success else {
+        guard completion.wait(timeout: .now() + 180) == .success else {
             return .err(code: "timeout", message: "Timed out attaching detached workspace \(requestedWorkspaceID.uuidString)", data: [
                 "workspace_id": requestedWorkspaceID.uuidString,
                 "workspace_ref": v2Ref(kind: .workspace, uuid: requestedWorkspaceID),

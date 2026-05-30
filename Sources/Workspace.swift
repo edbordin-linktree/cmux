@@ -4995,7 +4995,7 @@ private final class WorkspaceRemoteCLIRelayServer {
             }
             switch method {
             case "workspace.remote.snapshot_attach":
-                return 120
+                return 180
             default:
                 return 15
             }

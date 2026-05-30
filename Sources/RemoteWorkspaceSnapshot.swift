@@ -425,10 +425,20 @@ enum RemoteWorkspaceSnapshotAttachController {
             throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace("No cmux window is available for attaching the workspace.")
         }
 
+        let workspaceID = preferredWorkspaceID ?? UUID()
+        let suspensionKey = RemoteWorkspaceSnapshotSyncCoordinator.shared.suspend(
+            workspaceID: workspaceID,
+            host: normalizedHost,
+            slot: normalizedSlot
+        )
+        defer {
+            RemoteWorkspaceSnapshotSyncCoordinator.shared.resume(key: suspensionKey)
+        }
+
         let initialTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlankForRemoteSnapshotAttach
             ?? "Detached \(String(normalizedSlot.prefix(8)))"
         let workspace = owner.addWorkspace(
-            id: preferredWorkspaceID ?? UUID(),
+            id: workspaceID,
             title: initialTitle,
             select: true,
             autoWelcomeIfNeeded: false,
@@ -441,13 +451,19 @@ enum RemoteWorkspaceSnapshotAttachController {
             let remoteSnapshot = try configuration.sessionSnapshot()
                 .requiredForRemoteSnapshotAttach("Configured remote workspace cannot be snapshotted.")
             let (snapshot, restoreResult, snapshotSHA256) = try restoreSnapshot(into: workspace, remote: remoteSnapshot)
+            if !snapshot.panes.isEmpty, restoreResult.panesRestored == 0 {
+                throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
+                    "Remote workspace snapshot restore produced no panes; preserving detached snapshot for retry."
+                )
+            }
             workspace.setCustomTitle(snapshot.title)
             owner.selectWorkspace(workspace)
             _ = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
                 workspace: workspace,
                 status: .live,
                 force: true,
-                requireCapability: false
+                requireCapability: false,
+                respectSuspension: false
             )
             NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: workspace)
             try? DetachedWorkspaceHostRegistry.upsert(DetachedWorkspaceHostRegistryRecord(
@@ -471,7 +487,9 @@ enum RemoteWorkspaceSnapshotAttachController {
             )
         } catch {
             if owner.tabs.contains(where: { $0.id == workspace.id }) {
-                owner.closeWorkspace(workspace, recordHistory: false)
+                workspace.performRemoteWorkspaceDetachCloseTransaction {
+                    owner.closeWorkspace(workspace, recordHistory: false)
+                }
             }
             throw error
         }
@@ -940,6 +958,7 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
     private var lastUploadedByKey: [String: UploadState] = [:]
     private var inFlightKeys: Set<String> = []
     private var closedKeys: Set<String> = []
+    private var suspendedKeys: Set<String> = []
     private let minimumBackgroundUploadInterval: TimeInterval
 
     init(minimumBackgroundUploadInterval: TimeInterval = 15.0) {
@@ -953,7 +972,8 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
         status: RemoteWorkspaceSnapshotStatus,
         force: Bool = true,
         restorableAgentIndex: RestorableAgentSessionIndex? = RestorableAgentSessionIndex.load(),
-        requireCapability: Bool = true
+        requireCapability: Bool = true,
+        respectSuspension: Bool = true
     ) throws -> RemoteWorkspaceSnapshotSyncResult {
         if status == .live, !workspace.canStoreLiveRemoteWorkspaceSnapshot() {
             throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
@@ -966,6 +986,11 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
             requireCapability: requireCapability
         )
         let key = Self.key(workspaceID: workspace.id, configuration: upload.configuration)
+        if respectSuspension, isSuspended(key: key) {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
+                "Live remote workspace snapshot sync suppressed while snapshot attach is in progress."
+            )
+        }
         clearClosed(key: key)
         if !force, shouldSkipUpload(key: key, sha256: upload.sha256, now: upload.capturedAt) {
             return RemoteWorkspaceSnapshotSyncResult(uploaded: false, sha256: upload.sha256, paneCount: upload.paneCount)
@@ -998,6 +1023,12 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
                 continue
             }
             let key = Self.key(workspaceID: workspace.id, configuration: upload.configuration)
+            guard !isSuspended(key: key) else {
+#if DEBUG
+                cmuxDebugLog("remote.workspace.snapshot.sync.skipped_suspended workspace=\(workspace.id.uuidString)")
+#endif
+                continue
+            }
             guard shouldEnqueueUpload(key: key, sha256: upload.sha256, now: now, force: force) else {
                 continue
             }
@@ -1041,6 +1072,20 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
         lock.lock()
         closedKeys.insert(key)
         lastUploadedByKey.removeValue(forKey: key)
+        lock.unlock()
+    }
+
+    func suspend(workspaceID: UUID, host: String, slot: String) -> String {
+        let key = Self.key(workspaceID: workspaceID, host: host, slot: slot)
+        lock.lock()
+        suspendedKeys.insert(key)
+        lock.unlock()
+        return key
+    }
+
+    func resume(key: String) {
+        lock.lock()
+        suspendedKeys.remove(key)
         lock.unlock()
     }
 
@@ -1099,6 +1144,12 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
         return closedKeys.contains(key)
     }
 
+    private func isSuspended(key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return suspendedKeys.contains(key)
+    }
+
     private func recordUploadSuccess(key: String, sha256: String, uploadedAt: Date) {
         lock.lock()
         lastUploadedByKey[key] = UploadState(sha256: sha256, uploadedAt: uploadedAt)
@@ -1122,9 +1173,17 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
     }
 
     private static func key(workspaceID: UUID, configuration: WorkspaceRemoteConfiguration) -> String {
+        key(
+            workspaceID: workspaceID,
+            host: configuration.destination,
+            slot: configuration.persistentDaemonSlot ?? ""
+        )
+    }
+
+    private static func key(workspaceID: UUID, host: String, slot: String) -> String {
         [
-            configuration.destination,
-            configuration.persistentDaemonSlot ?? "",
+            host,
+            slot,
             workspaceID.uuidString,
         ].joined(separator: "|")
     }
