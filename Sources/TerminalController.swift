@@ -5005,6 +5005,7 @@ class TerminalController {
             "selected": selected,
             "pinned": workspace.isPinned,
             "metadata": workspace.metadataEntries,
+            "remote": workspace.remoteStatusPayload(),
             "panes": panes
         ]
     }

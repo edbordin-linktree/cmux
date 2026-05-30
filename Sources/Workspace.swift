@@ -309,6 +309,7 @@ extension Workspace {
                 snapshot: entry.snapshot,
                 panelSnapshotsById: panelSnapshotsById,
                 snapshotWorkspaceId: snapshot.id,
+                useExistingRemotePTYBridge: !restoreRemoteConfiguration,
                 oldToNewPanelIds: &oldToNewPanelIds
             )
         }
@@ -748,7 +749,8 @@ extension Workspace {
         guard let panelId = createPanel(
             from: entry.snapshot,
             inPane: pane,
-            snapshotWorkspaceId: nil
+            snapshotWorkspaceId: nil,
+            useExistingRemotePTYBridge: false
         ) else { return nil }
 
         let maxIndex = max(0, bonsplitController.tabs(inPane: pane).count - 1)
@@ -786,7 +788,8 @@ extension Workspace {
         guard let panelId = createPanel(
             from: entry.snapshot,
             inPane: pane,
-            snapshotWorkspaceId: nil
+            snapshotWorkspaceId: nil,
+            useExistingRemotePTYBridge: false
         ) else {
             _ = closePanel(placeholderPanel.id, force: true)
             return nil
@@ -1106,6 +1109,7 @@ extension Workspace {
         snapshot: SessionPaneLayoutSnapshot,
         panelSnapshotsById: [UUID: SessionPanelSnapshot],
         snapshotWorkspaceId: UUID?,
+        useExistingRemotePTYBridge: Bool,
         oldToNewPanelIds: inout [UUID: UUID]
     ) {
         let existingPanelIds = bonsplitController
@@ -1119,7 +1123,8 @@ extension Workspace {
             guard let createdPanelId = createPanel(
                 from: panelSnapshot,
                 inPane: paneId,
-                snapshotWorkspaceId: snapshotWorkspaceId
+                snapshotWorkspaceId: snapshotWorkspaceId,
+                useExistingRemotePTYBridge: useExistingRemotePTYBridge
             ) else { continue }
             createdPanelIds.append(createdPanelId)
             oldToNewPanelIds[oldPanelId] = createdPanelId
@@ -1194,7 +1199,8 @@ extension Workspace {
     private func createPanel(
         from snapshot: SessionPanelSnapshot,
         inPane paneId: PaneID,
-        snapshotWorkspaceId: UUID?
+        snapshotWorkspaceId: UUID?,
+        useExistingRemotePTYBridge: Bool
     ) -> UUID? {
         switch snapshot.type {
         case .terminal:
@@ -1275,8 +1281,10 @@ extension Workspace {
                 }
                 return Self.defaultSSHPTYSessionID(workspaceId: snapshotWorkspaceId ?? id, panelId: snapshot.id)
             }()
-            let restoredRemotePTYAttachCommand = restoredRemotePTYSessionID.map {
-                remotePTYAttachStartupCommand(sessionID: $0)
+            let restoredRemotePTYAttachCommand = restoredRemotePTYSessionID.map { sessionID in
+                useExistingRemotePTYBridge
+                    ? Self.sshPTYAttachStartupCommand(sessionID: sessionID)
+                    : remotePTYAttachStartupCommand(sessionID: sessionID)
             }
             let restoredRemotePTYAttachScript = restoredRemotePTYAttachCommand.flatMap {
                 SessionRestoredTerminalCommandStore.writeLauncherScript(

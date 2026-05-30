@@ -2003,7 +2003,8 @@ final class TabManagerSessionSnapshotTests: XCTestCase {
         XCTAssertTrue(startupCommand.contains("ssh-pty-attach"), startupCommand)
         XCTAssertTrue(startupCommand.contains("--require-existing"), startupCommand)
         XCTAssertTrue(startupCommand.contains(sessionID), startupCommand)
-        XCTAssertTrue(startupCommand.contains("live-foreground-auth"), startupCommand)
+        XCTAssertFalse(startupCommand.contains("live-foreground-auth"), startupCommand)
+        XCTAssertFalse(startupCommand.contains("workspace.remote.foreground_auth_ready"), startupCommand)
     }
 
     func testPersistentSSHPTYRestoreRewritesStaleRemoteRelayContextIDs() throws {
