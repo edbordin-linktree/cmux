@@ -7485,7 +7485,7 @@ struct CMUXCLI {
             "cli.ssh.timing target=\(sshOptions.displayDestination) relayPort=\(sshOptions.remoteRelayPort) " +
             "workspace=\(String(workspaceId.prefix(8))) stage=workspace.create elapsedMs=\(Int(Date().timeIntervalSince(workspaceCreateStartedAt) * 1000))"
         )
-        let configuredPayload: [String: Any]
+        var configuredPayload: [String: Any]
         do {
             if let workspaceName = sshOptions.workspaceName?.trimmingCharacters(in: .whitespacesAndNewlines),
                !workspaceName.isEmpty {
@@ -7536,6 +7536,29 @@ struct CMUXCLI {
             )
             let configureStartedAt = Date()
             configuredPayload = try client.sendV2(method: "workspace.remote.configure", params: configureParams)
+            if usesPersistentSSHPTY, let configuredForegroundAuthToken {
+                let authStartedAt = Date()
+                do {
+                    let authPayload = try client.sendV2(method: "workspace.remote.foreground_auth_ready", params: [
+                        "workspace_id": workspaceId,
+                        "foreground_auth_token": configuredForegroundAuthToken,
+                    ])
+                    if let remotePayload = (authPayload["remote"] as? [String: Any]) {
+                        configuredPayload["remote"] = remotePayload
+                    }
+                    cliDebugLog(
+                        "cli.ssh.remote.foreground_auth_ready.ok workspace=\(String(workspaceId.prefix(8))) " +
+                        "elapsedMs=\(Int(Date().timeIntervalSince(authStartedAt) * 1000))"
+                    )
+                } catch {
+                    // The terminal startup command also sends this notification via SSH LocalCommand.
+                    // Keep that fallback path alive if this eager notification races workspace setup.
+                    cliDebugLog(
+                        "cli.ssh.remote.foreground_auth_ready.error workspace=\(String(workspaceId.prefix(8))) " +
+                        "error=\(String(describing: error)) elapsedMs=\(Int(Date().timeIntervalSince(authStartedAt) * 1000))"
+                    )
+                }
+            }
             var selectParams: [String: Any] = ["workspace_id": workspaceId]
             if let workspaceWindowId, !workspaceWindowId.isEmpty {
                 selectParams["window_id"] = workspaceWindowId

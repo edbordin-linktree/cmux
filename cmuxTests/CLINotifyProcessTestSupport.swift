@@ -411,39 +411,41 @@ extension CLINotifyProcessIntegrationRegressionTests {
         handler: @escaping @Sendable (String) -> String
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
-            var clientAddr = sockaddr_un()
-            var clientAddrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
-            let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    Darwin.accept(listenerFD, sockaddrPtr, &clientAddrLen)
-                }
-            }
-            guard clientFD >= 0 else {
-                return
-            }
-            defer {
-                Darwin.close(clientFD)
-            }
-
-            var pending = Data()
-            var buffer = [UInt8](repeating: 0, count: 4096)
             while true {
-                let count = Darwin.read(clientFD, &buffer, buffer.count)
-                if count < 0 {
-                    if errno == EINTR { continue }
+                var clientAddr = sockaddr_un()
+                var clientAddrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+                let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                        Darwin.accept(listenerFD, sockaddrPtr, &clientAddrLen)
+                    }
+                }
+                guard clientFD >= 0 else {
                     return
                 }
-                if count == 0 { return }
-                pending.append(buffer, count: count)
+                defer {
+                    Darwin.close(clientFD)
+                }
 
-                while let newlineRange = pending.firstRange(of: Data([0x0A])) {
-                    let lineData = pending.subdata(in: 0..<newlineRange.lowerBound)
-                    pending.removeSubrange(0...newlineRange.lowerBound)
-                    guard let line = String(data: lineData, encoding: .utf8) else { continue }
-                    state.append(line)
-                    let response = handler(line) + "\n"
-                    _ = response.withCString { ptr in
-                        Darwin.write(clientFD, ptr, strlen(ptr))
+                var pending = Data()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while true {
+                    let count = Darwin.read(clientFD, &buffer, buffer.count)
+                    if count < 0 {
+                        if errno == EINTR { continue }
+                        break
+                    }
+                    if count == 0 { break }
+                    pending.append(buffer, count: count)
+
+                    while let newlineRange = pending.firstRange(of: Data([0x0A])) {
+                        let lineData = pending.subdata(in: 0..<newlineRange.lowerBound)
+                        pending.removeSubrange(0...newlineRange.lowerBound)
+                        guard let line = String(data: lineData, encoding: .utf8) else { continue }
+                        state.append(line)
+                        let response = handler(line) + "\n"
+                        _ = response.withCString { ptr in
+                            Darwin.write(clientFD, ptr, strlen(ptr))
+                        }
                     }
                 }
             }
@@ -516,6 +518,18 @@ extension CLINotifyProcessIntegrationRegressionTests {
         } catch {
             return ProcessRunResult(status: -1, stdout: "", stderr: String(describing: error), timedOut: false)
         }
+        let stdoutData = LockedData()
+        let stderrData = LockedData()
+        let stdoutDone = DispatchSemaphore(value: 0)
+        let stderrDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            stdoutData.set(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
+            stdoutDone.signal()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            stderrData.set(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+            stderrDone.signal()
+        }
         if let standardInput, let stdinPipe {
             stdinPipe.fileHandleForWriting.write(Data(standardInput.utf8))
             try? stdinPipe.fileHandleForWriting.close()
@@ -536,13 +550,33 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        _ = stdoutDone.wait(timeout: .now() + 1)
+        _ = stderrDone.wait(timeout: .now() + 1)
+        let stdout = String(data: stdoutData.snapshot(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData.snapshot(), encoding: .utf8) ?? ""
         return ProcessRunResult(
             status: process.isRunning ? SIGKILL : process.terminationStatus,
             stdout: stdout,
             stderr: stderr,
             timedOut: timedOut
         )
+    }
+
+    private final class LockedData: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = Data()
+
+        func set(_ newValue: Data) {
+            lock.lock()
+            value = newValue
+            lock.unlock()
+        }
+
+        func snapshot() -> Data {
+            lock.lock()
+            let current = value
+            lock.unlock()
+            return current
+        }
     }
 }

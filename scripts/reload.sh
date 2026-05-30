@@ -993,6 +993,9 @@ if [[ "$LAUNCH" -eq 1 ]]; then
     GHOSTTY_RESOURCES_DIR="$APP_PATH/Contents/Resources/ghostty"
     TERMINFO="$APP_PATH/Contents/Resources/terminfo"
   )
+  if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+    TAG_LAUNCH_ENV+=(SSH_AUTH_SOCK="$SSH_AUTH_SOCK")
+  fi
 
   LAUNCH_CMD=()
   LAUNCH_RETRY_CMD=()

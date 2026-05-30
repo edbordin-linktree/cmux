@@ -2271,7 +2271,8 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             initialScript
         )
         XCTAssertTrue(initialScript.contains("254|255"), initialScript)
-        XCTAssertFalse(initialScript.contains("-surface"), initialScript)
+        XCTAssertFalse(initialScript.contains("ssh-pty-attach --wait --surface"), initialScript)
+        XCTAssertFalse(initialScript.contains("ssh-pty-attach --surface"), initialScript)
         XCTAssertTrue(
             initialScript.contains("--workspace \"$cmux_ssh_pty_workspace_id\""),
             initialScript
@@ -2298,7 +2299,8 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             terminalStartupScript
         )
         XCTAssertTrue(terminalStartupScript.contains("254|255"), terminalStartupScript)
-        XCTAssertFalse(terminalStartupScript.contains("-surface"), terminalStartupScript)
+        XCTAssertFalse(terminalStartupScript.contains("ssh-pty-attach --wait --surface"), terminalStartupScript)
+        XCTAssertFalse(terminalStartupScript.contains("ssh-pty-attach --surface"), terminalStartupScript)
         XCTAssertTrue(
             terminalStartupScript.contains("--workspace \"$cmux_ssh_pty_workspace_id\""),
             terminalStartupScript
@@ -7871,6 +7873,12 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                     id: id,
                     ok: true,
                     result: ["remote": ["state": "connected"]]
+                )
+            case "workspace.remote.foreground_auth_ready":
+                return self.v2Response(
+                    id: id,
+                    ok: true,
+                    result: ["remote": ["state": "connecting"]]
                 )
             default:
                 return self.v2Response(

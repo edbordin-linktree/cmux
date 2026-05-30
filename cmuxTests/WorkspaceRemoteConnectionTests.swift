@@ -5588,6 +5588,7 @@ final class CLINotifyProcessIntegrationTests: XCTestCase {
         let workspaceID = "11111111-1111-1111-1111-111111111111"
         let workspaceRef = "workspace:7"
         let windowID = "22222222-2222-2222-2222-222222222222"
+        let surfaceID = "33333333-3333-3333-3333-333333333333"
 
         defer {
             Darwin.close(listenerFD)
@@ -5614,6 +5615,7 @@ final class CLINotifyProcessIntegrationTests: XCTestCase {
                     result: [
                         "workspace_id": workspaceID,
                         "window_id": windowID,
+                        "surface_id": surfaceID,
                     ]
                 )
             case "workspace.rename":
@@ -5630,6 +5632,19 @@ final class CLINotifyProcessIntegrationTests: XCTestCase {
                         "remote": [
                             "enabled": true,
                             "state": autoConnect ? "connecting" : "disconnected",
+                        ],
+                    ]
+                )
+            case "workspace.remote.foreground_auth_ready":
+                return self.v2Response(
+                    id: id,
+                    ok: true,
+                    result: [
+                        "workspace_id": workspaceID,
+                        "workspace_ref": workspaceRef,
+                        "remote": [
+                            "enabled": true,
+                            "state": "connecting",
                         ],
                     ]
                 )
@@ -5669,7 +5684,7 @@ final class CLINotifyProcessIntegrationTests: XCTestCase {
 
         XCTAssertFalse(result.timedOut, result.stderr)
         XCTAssertEqual(result.status, 0, result.stderr)
-        XCTAssertEqual(result.stdout, "OK workspace=\(workspaceRef) target=cmux-macmini state=disconnected\n")
+        XCTAssertEqual(result.stdout, "OK workspace=\(workspaceRef) target=cmux-macmini state=connecting\n")
         XCTAssertTrue(result.stderr.isEmpty, result.stderr)
 
         let requests = try state.commands.map { line -> [String: Any] in
@@ -5678,7 +5693,13 @@ final class CLINotifyProcessIntegrationTests: XCTestCase {
         }
         XCTAssertEqual(
             requests.compactMap { $0["method"] as? String },
-            ["workspace.create", "workspace.rename", "workspace.remote.configure", "workspace.select"]
+            [
+                "workspace.create",
+                "workspace.rename",
+                "workspace.remote.configure",
+                "workspace.remote.foreground_auth_ready",
+                "workspace.select",
+            ]
         )
 
         let createParams = try XCTUnwrap(requests[0]["params"] as? [String: Any])
@@ -5714,7 +5735,11 @@ final class CLINotifyProcessIntegrationTests: XCTestCase {
         XCTAssertTrue(sshOptions.contains("StrictHostKeyChecking=accept-new"))
 
         // `cmux ssh` should land the user in the new SSH workspace immediately.
-        let selectParams = try XCTUnwrap(requests[3]["params"] as? [String: Any])
+        let authParams = try XCTUnwrap(requests[3]["params"] as? [String: Any])
+        XCTAssertEqual(authParams["workspace_id"] as? String, workspaceID)
+        XCTAssertEqual(authParams["foreground_auth_token"] as? String, foregroundAuthToken)
+
+        let selectParams = try XCTUnwrap(requests[4]["params"] as? [String: Any])
         XCTAssertEqual(selectParams["workspace_id"] as? String, workspaceID)
         XCTAssertEqual(selectParams["window_id"] as? String, windowID)
     }
