@@ -102,6 +102,56 @@ final class RemoteWorkspaceSnapshotTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testRemoteWorkspaceRestoreReattachesTerminalPTY() throws {
+        let workspace = TabManager().addWorkspace(
+            title: "Attach Target",
+            select: true,
+            autoWelcomeIfNeeded: false,
+            createInitialTerminal: false
+        )
+        let configuration = WorkspaceRemoteConfiguration(
+            destination: "dev@example.com",
+            port: 2222,
+            identityFile: nil,
+            sshOptions: ["StrictHostKeyChecking=accept-new"],
+            localProxyPort: nil,
+            relayPort: 64113,
+            relayID: "live-relay",
+            relayToken: String(repeating: "c", count: 64),
+            localSocketPath: "/tmp/cmux-remote-snapshot-restore.sock",
+            terminalStartupCommand: SSHPTYAttachStartupCommandBuilder.command(),
+            foregroundAuthToken: "live-foreground-auth",
+            preserveAfterTerminalExit: true,
+            persistentDaemonSlot: "ssh-live-attach"
+        )
+        workspace.configureRemoteConnection(configuration, autoConnect: false)
+
+        let snapshot = makeSnapshot()
+        let remote = try XCTUnwrap(configuration.sessionSnapshot())
+        let result = workspace.restoreRemoteWorkspaceSnapshotV1(
+            snapshot,
+            remote: remote,
+            preserveExistingRemoteConfiguration: true
+        )
+
+        let terminalPane = try XCTUnwrap(snapshot.panes.compactMap { pane -> TerminalPaneSnapshot? in
+            guard case .terminal(let terminal) = pane else { return nil }
+            return terminal
+        }.first)
+        let restoredPanelId = try XCTUnwrap(result.panelIdMap[terminalPane.paneId])
+        XCTAssertTrue(
+            workspace.remotePTYSessionIDMatches(panelId: restoredPanelId, sessionID: terminalPane.remotePTYSessionId)
+        )
+        let startupCommand = try XCTUnwrap(
+            workspace.terminalPanel(for: restoredPanelId)?.surface.debugInitialCommand()
+        )
+        XCTAssertTrue(startupCommand.contains("ssh-pty-attach"), startupCommand)
+        XCTAssertTrue(startupCommand.contains("--require-existing"), startupCommand)
+        XCTAssertTrue(startupCommand.contains(terminalPane.remotePTYSessionId), startupCommand)
+        XCTAssertFalse(startupCommand.contains("live-foreground-auth"), startupCommand)
+    }
+
     private func makeSnapshot(browserURL: String = "https://example.com/work") -> RemoteWorkspaceSnapshotV1 {
         let terminalPaneId = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
         let browserPaneId = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!

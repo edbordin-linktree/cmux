@@ -910,6 +910,7 @@ extension Workspace {
                 },
                 terminal: SessionTerminalPanelSnapshot(
                     workingDirectory: terminal.cwdHint,
+                    isRemoteTerminal: true,
                     remotePTYSessionID: terminal.remotePTYSessionId
                 ),
                 browser: nil,
