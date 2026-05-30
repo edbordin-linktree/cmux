@@ -130,6 +130,7 @@ type workspaceSnapshotMeta struct {
 
 type workspaceSnapshotListEntry struct {
 	Slot           string `json:"slot"`
+	DaemonPath     string `json:"daemon_path,omitempty"`
 	WorkspaceID    string `json:"workspace_id,omitempty"`
 	Title          string `json:"title,omitempty"`
 	Status         string `json:"status,omitempty"`
@@ -402,6 +403,7 @@ func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotL
 		unlock()
 		result.Snapshots = append(result.Snapshots, workspaceSnapshotListEntry{
 			Slot:           slot,
+			DaemonPath:     inferDaemonPathForSnapshotRoot(root, slotRoot),
 			WorkspaceID:    meta.WorkspaceID,
 			Title:          meta.Title,
 			Status:         workspaceSnapshotStatusOrDetached(meta.Status),
@@ -417,6 +419,37 @@ func listWorkspaceSnapshots(root string, includeErrors bool) (workspaceSnapshotL
 		return result.Snapshots[i].Slot < result.Snapshots[j].Slot
 	})
 	return result, nil
+}
+
+func inferDaemonPathForSnapshotRoot(rootBase, slotRoot string) string {
+	executable, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		return ""
+	}
+	platformDir := filepath.Base(filepath.Dir(executable))
+	installRoot := filepath.Dir(filepath.Dir(filepath.Dir(executable)))
+	if platformDir == "." || platformDir == string(filepath.Separator) ||
+		installRoot == "." || installRoot == string(filepath.Separator) {
+		return ""
+	}
+
+	versionComponent := persistentDaemonVersionComponent()
+	if rel, err := filepath.Rel(rootBase, slotRoot); err == nil {
+		parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+		if len(parts) == 2 && parts[0] != "." && parts[0] != ".." && parts[0] != "" {
+			versionComponent = parts[0]
+		}
+	}
+	candidate := filepath.Join(installRoot, versionComponent, platformDir, filepath.Base(executable))
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return candidate
 }
 
 func defaultPersistentDaemonRoot() (string, error) {

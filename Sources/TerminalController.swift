@@ -2280,6 +2280,7 @@ class TerminalController {
         "workspace.remote.pty_detach",
         "workspace.remote.pty_bridge",
         "workspace.remote.pty_resize",
+        "workspace.remote.snapshot_attach",
         // debug.sidebar.simulate_drag intentionally runs on the socket worker
         // so its Thread.sleep between drag-state ticks doesn't block the main
         // actor (which still owns the SidebarDragState mutations via
@@ -2416,6 +2417,8 @@ class TerminalController {
             return v2Result(id: request.id, v2WorkspaceRemotePTYBridge(params: request.params))
         case "workspace.remote.pty_resize":
             return v2Result(id: request.id, v2WorkspaceRemotePTYResize(params: request.params))
+        case "workspace.remote.snapshot_attach":
+            return v2Result(id: request.id, v2WorkspaceRemoteSnapshotAttach(params: request.params))
 #if DEBUG
         case "debug.sidebar.simulate_drag":
             return v2Result(id: request.id, v2DebugSidebarSimulateDrag(params: request.params))
@@ -5313,7 +5316,7 @@ class TerminalController {
         return statements.joined(separator: "; ")
     }
 
-    private static func v2ShellSingleQuoted(_ value: String) -> String {
+    private nonisolated static func v2ShellSingleQuoted(_ value: String) -> String {
         if value.isEmpty {
             return "''"
         }
@@ -5734,6 +5737,7 @@ class TerminalController {
     private struct V2DetachedWorkspaceSnapshotTarget {
         var host: DetachedWorkspaceHostRegistryRecord
         var slot: String
+        var daemonPath: String?
         var workspaceID: UUID?
         var title: String?
         var detachedAt: Date?
@@ -5748,6 +5752,7 @@ class TerminalController {
 
     private struct V2DetachedWorkspaceSnapshotEntry: Decodable {
         var slot: String
+        var daemonPath: String?
         var workspaceID: UUID?
         var title: String?
         var detachedAt: Date?
@@ -5757,6 +5762,7 @@ class TerminalController {
 
         enum CodingKeys: String, CodingKey {
             case slot
+            case daemonPath = "daemon_path"
             case workspaceID = "workspace_id"
             case title
             case detachedAt = "detached_at"
@@ -5898,12 +5904,12 @@ class TerminalController {
         ]
     }
 
-    private func v2DetachedWorkspaceLookupTimeout(params: [String: Any]) -> TimeInterval {
+    private nonisolated func v2DetachedWorkspaceLookupTimeout(params: [String: Any]) -> TimeInterval {
         guard let seconds = v2StrictInt(params, "timeout") else { return 5.0 }
         return TimeInterval(max(1, min(seconds, 60)))
     }
 
-    private func v2DetachedWorkspaceSnapshotTargets(timeout: TimeInterval) -> [V2DetachedWorkspaceSnapshotTarget] {
+    private nonisolated func v2DetachedWorkspaceSnapshotTargets(timeout: TimeInterval) -> [V2DetachedWorkspaceSnapshotTarget] {
         guard let registry = try? DetachedWorkspaceHostRegistry.load(), !registry.hosts.isEmpty else {
             return []
         }
@@ -5918,13 +5924,13 @@ class TerminalController {
         }
     }
 
-    private func v2DetachedWorkspaceSnapshotTarget(workspaceID: UUID, timeout: TimeInterval) -> V2DetachedWorkspaceSnapshotTarget? {
+    private nonisolated func v2DetachedWorkspaceSnapshotTarget(workspaceID: UUID, timeout: TimeInterval) -> V2DetachedWorkspaceSnapshotTarget? {
         v2DetachedWorkspaceSnapshotTargets(timeout: timeout).first {
             $0.workspaceID == workspaceID
         }
     }
 
-    private func v2ListDetachedWorkspaceSnapshotTargets(
+    private nonisolated func v2ListDetachedWorkspaceSnapshotTargets(
         on host: DetachedWorkspaceHostRegistryRecord,
         timeout: TimeInterval
     ) throws -> [V2DetachedWorkspaceSnapshotTarget] {
@@ -5932,7 +5938,7 @@ class TerminalController {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = v2DetachedWorkspaceSSHArguments(for: host, timeout: timeout) + [
             host.host,
-            "\(host.daemonBinPath) workspace-snapshot-list-all --json",
+            v2DetachedWorkspaceListAllCommand(for: host),
         ]
         let stdout = Pipe()
         let stderr = Pipe()
@@ -5964,6 +5970,7 @@ class TerminalController {
                 V2DetachedWorkspaceSnapshotTarget(
                     host: host,
                     slot: $0.slot,
+                    daemonPath: $0.daemonPath,
                     workspaceID: $0.workspaceID,
                     title: $0.title,
                     detachedAt: $0.detachedAt,
@@ -5974,7 +5981,7 @@ class TerminalController {
             }
     }
 
-    private func v2DetachedWorkspaceSSHArguments(
+    private nonisolated func v2DetachedWorkspaceSSHArguments(
         for host: DetachedWorkspaceHostRegistryRecord,
         timeout: TimeInterval
     ) -> [String] {
@@ -5994,7 +6001,30 @@ class TerminalController {
         return args
     }
 
-    private func v2WaitForProcess(_ process: Process, timeout: TimeInterval) -> Bool {
+    private nonisolated func v2DetachedWorkspaceListAllCommand(for host: DetachedWorkspaceHostRegistryRecord) -> String {
+        let current = "$HOME/.cmux/bin/cmuxd-remote-current"
+        let fallback = v2RemoteDaemonPathShellExpression(host.daemonBinPath)
+        return """
+        if [ -x "\(current)" ]; then exec "\(current)" workspace-snapshot-list-all --json; fi; exec \(fallback) workspace-snapshot-list-all --json
+        """
+    }
+
+    private nonisolated func v2RemoteDaemonPathShellExpression(_ rawPath: String) -> String {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "\"$HOME/.cmux/bin/cmuxd-remote-current\""
+        }
+        if trimmed == "~" {
+            return "$HOME"
+        }
+        if trimmed.hasPrefix("~/") {
+            let suffix = String(trimmed.dropFirst(2))
+            return "$HOME/" + Self.v2ShellSingleQuoted(suffix)
+        }
+        return Self.v2ShellSingleQuoted(trimmed)
+    }
+
+    private nonisolated func v2WaitForProcess(_ process: Process, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(max(0.1, timeout))
         while process.isRunning {
             if Date() >= deadline {
@@ -6005,7 +6035,7 @@ class TerminalController {
         return true
     }
 
-    private func v2DetachedWorkspaceConfiguration(target: V2DetachedWorkspaceSnapshotTarget) -> WorkspaceRemoteConfiguration {
+    private nonisolated func v2DetachedWorkspaceConfiguration(target: V2DetachedWorkspaceSnapshotTarget) -> WorkspaceRemoteConfiguration {
         WorkspaceRemoteConfiguration(
             transport: .ssh,
             destination: target.host.host,
@@ -6026,7 +6056,16 @@ class TerminalController {
         )
     }
 
-    private func v2FetchDetachedWorkspaceSnapshot(
+    private nonisolated func v2DaemonPath(for target: V2DetachedWorkspaceSnapshotTarget) -> String {
+        let snapshotPath = target.daemonPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let snapshotPath, !snapshotPath.isEmpty {
+            return snapshotPath
+        }
+        let hostPath = target.host.daemonBinPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return hostPath.isEmpty ? "~/.cmux/bin/cmuxd-remote-current" : hostPath
+    }
+
+    private nonisolated func v2FetchDetachedWorkspaceSnapshot(
         target: V2DetachedWorkspaceSnapshotTarget
     ) throws -> (snapshot: RemoteWorkspaceSnapshotV1, sha256: String) {
         guard target.bodyPresent else {
@@ -6037,7 +6076,7 @@ class TerminalController {
         let configuration = v2DetachedWorkspaceConfiguration(target: target)
         let fetch = try Workspace.fetchPreparedRemoteWorkspaceSnapshot(
             configuration: configuration,
-            daemonPath: target.host.daemonBinPath
+            daemonPath: v2DaemonPath(for: target)
         )
         guard (fetch["exists"] as? Bool) == true,
               let body = fetch["body"] as? String else {
@@ -6058,7 +6097,7 @@ class TerminalController {
     }
 
     @discardableResult
-    private func v2StoreDetachedWorkspaceSnapshot(
+    private nonisolated func v2StoreDetachedWorkspaceSnapshot(
         _ snapshot: RemoteWorkspaceSnapshotV1,
         target: V2DetachedWorkspaceSnapshotTarget
     ) throws -> (stored: [String: Any], sha256: String) {
@@ -6068,7 +6107,7 @@ class TerminalController {
         let now = RemoteWorkspaceSnapshotCodec.iso8601String(Date())
         let stored = try Workspace.storePreparedRemoteWorkspaceSnapshot(
             configuration: configuration,
-            daemonPath: target.host.daemonBinPath,
+            daemonPath: v2DaemonPath(for: target),
             workspaceID: snapshot.workspaceId.uuidString,
             title: snapshot.title,
             detachedAt: RemoteWorkspaceSnapshotCodec.iso8601String(snapshot.detachedAt),
@@ -8417,10 +8456,11 @@ class TerminalController {
         ])
     }
 
-    private func v2WorkspaceRemoteSnapshotAttach(params: [String: Any]) -> V2CallResult {
-        guard let requestedWorkspaceID = v2UUID(params, "workspace_id") else {
+    private nonisolated func v2WorkspaceRemoteSnapshotAttach(params: [String: Any]) -> V2CallResult {
+        guard let requestedWorkspaceID = v2UUIDLiteral(params, "workspace_id") else {
             return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
         }
+        let requestedWorkspaceRef = v2MainSync { v2Ref(kind: .workspace, uuid: requestedWorkspaceID) }
 
         let timeout = v2DetachedWorkspaceLookupTimeout(params: params)
         let hostRaw = v2RawString(params, "host")?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -8433,13 +8473,14 @@ class TerminalController {
                 port: nil,
                 identityFile: nil,
                 sshOptions: [],
-                daemonBinPath: "~/.cmux/bin/cmuxd-remote",
+                daemonBinPath: "~/.cmux/bin/cmuxd-remote-current",
                 addedAt: Date(),
                 lastSeenAt: Date()
             )
             target = V2DetachedWorkspaceSnapshotTarget(
                 host: record,
                 slot: slot,
+                daemonPath: nil,
                 workspaceID: requestedWorkspaceID,
                 title: nil,
                 detachedAt: nil,
@@ -8451,7 +8492,7 @@ class TerminalController {
             guard let resolved = v2DetachedWorkspaceSnapshotTarget(workspaceID: requestedWorkspaceID, timeout: timeout) else {
                 return .err(code: "not_found", message: "Detached workspace not found: \(requestedWorkspaceID.uuidString)", data: [
                     "workspace_id": requestedWorkspaceID.uuidString,
-                    "workspace_ref": v2Ref(kind: .workspace, uuid: requestedWorkspaceID),
+                    "workspace_ref": requestedWorkspaceRef,
                 ])
             }
             if let host = hostRaw, !host.isEmpty, resolved.host.host != host {
@@ -8463,7 +8504,7 @@ class TerminalController {
             target = resolved
         }
 
-        let requestedWindowID = v2UUID(params, "window_id")
+        let requestedWindowID = v2MainSync { v2UUID(params, "window_id") }
         let completion = DispatchSemaphore(value: 0)
         final class AttachBox: @unchecked Sendable {
             var result: Result<RemoteWorkspaceSnapshotAttachResult, Error>?
@@ -8477,7 +8518,8 @@ class TerminalController {
                     slot: target.slot,
                     title: target.title,
                     preferredWorkspaceID: requestedWorkspaceID,
-                    preferredWindow: preferredWindow
+                    preferredWindow: preferredWindow,
+                    daemonPathOverride: v2DaemonPath(for: target)
                 )
                 box.result = .success(result)
             } catch {
@@ -8489,7 +8531,7 @@ class TerminalController {
         guard completion.wait(timeout: .now() + 180) == .success else {
             return .err(code: "timeout", message: "Timed out attaching detached workspace \(requestedWorkspaceID.uuidString)", data: [
                 "workspace_id": requestedWorkspaceID.uuidString,
-                "workspace_ref": v2Ref(kind: .workspace, uuid: requestedWorkspaceID),
+                "workspace_ref": requestedWorkspaceRef,
                 "host": target.host.host,
                 "persistent_daemon_slot": target.slot,
             ])
@@ -8497,11 +8539,12 @@ class TerminalController {
 
         switch box.result {
         case .success(let attach):
+            let localWorkspaceRef = v2MainSync { v2Ref(kind: .workspace, uuid: attach.localWorkspaceID) }
             return .ok([
                 "workspace_id": requestedWorkspaceID.uuidString,
-                "workspace_ref": v2Ref(kind: .workspace, uuid: requestedWorkspaceID),
+                "workspace_ref": requestedWorkspaceRef,
                 "local_workspace_id": attach.localWorkspaceID.uuidString,
-                "local_workspace_ref": v2Ref(kind: .workspace, uuid: attach.localWorkspaceID),
+                "local_workspace_ref": localWorkspaceRef,
                 "title": attach.title,
                 "host": attach.host,
                 "persistent_daemon_slot": attach.persistentDaemonSlot,
@@ -8513,13 +8556,18 @@ class TerminalController {
         case .failure(let error):
             return .err(code: "attach_failed", message: error.localizedDescription, data: [
                 "workspace_id": requestedWorkspaceID.uuidString,
-                "workspace_ref": v2Ref(kind: .workspace, uuid: requestedWorkspaceID),
+                "workspace_ref": requestedWorkspaceRef,
                 "host": target.host.host,
                 "persistent_daemon_slot": target.slot,
             ])
         case .none:
             return .err(code: "attach_failed", message: "Detached workspace attach did not return a result", data: nil)
         }
+    }
+
+    private nonisolated func v2UUIDLiteral(_ params: [String: Any], _ key: String) -> UUID? {
+        guard let raw = params[key] as? String else { return nil }
+        return UUID(uuidString: raw.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private func v2WorkspaceRemoteSnapshotRestore(params: [String: Any]) -> V2CallResult {

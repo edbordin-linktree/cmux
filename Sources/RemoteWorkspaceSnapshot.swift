@@ -400,7 +400,8 @@ enum RemoteWorkspaceSnapshotAttachController {
         slot: String,
         title: String?,
         preferredWorkspaceID: UUID? = nil,
-        preferredWindow: NSWindow? = nil
+        preferredWindow: NSWindow? = nil,
+        daemonPathOverride: String? = nil
     ) async throws -> RemoteWorkspaceSnapshotAttachResult {
         let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedSlot = slot.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -449,9 +450,14 @@ enum RemoteWorkspaceSnapshotAttachController {
         let configuration = try workspaceConfiguration(for: record, slot: normalizedSlot)
         let remoteSnapshot = try configuration.sessionSnapshot()
             .requiredForRemoteSnapshotAttach("Configured remote workspace cannot be snapshotted.")
-        let daemonPath = record.daemonBinPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "~/.cmux/bin/cmuxd-remote"
-            : record.daemonBinPath
+        let overridePath = daemonPathOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let recordPath = record.daemonBinPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let daemonPath: String
+        if let overridePath, !overridePath.isEmpty {
+            daemonPath = overridePath
+        } else {
+            daemonPath = recordPath.isEmpty ? "~/.cmux/bin/cmuxd-remote-current" : recordPath
+        }
         let preparedSnapshot = try await Task.detached(priority: .utility) {
             try fetchSnapshot(configuration: configuration, daemonPath: daemonPath)
         }.value
