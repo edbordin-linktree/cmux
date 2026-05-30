@@ -7408,7 +7408,7 @@ struct CMUXCLI {
         if usesPersistentSSHPTY,
            let initialRemoteTerminalBootstrapScript,
            let remoteTerminalBootstrapScript {
-            let initialPTYStartupCommand = buildReusableForegroundAuthThenSSHPTYAttachStartupCommand(
+            let initialPTYStartupCommand = try buildForegroundAuthThenSSHPTYAttachStartupCommand(
                 options: sshOptions,
                 remoteShellCommand: initialRemoteTerminalBootstrapScript,
                 localCommandScript: combinedLocalCommandScript,
@@ -8390,13 +8390,54 @@ struct CMUXCLI {
         localCommandScript: String?,
         controlPathPreflightShellFunction: String?
     ) -> String {
+        let scriptBody = foregroundAuthThenSSHPTYAttachScriptBody(
+            options: options,
+            remoteShellCommand: remoteShellCommand,
+            localCommandScript: localCommandScript
+        )
+        return buildReusableSSHStartupCommand(
+            sshCommand: scriptBody,
+            shellFeatures: "",
+            remoteRelayPort: options.remoteRelayPort,
+            isShellSnippet: true,
+            controlPathPreflightShellFunction: controlPathPreflightShellFunction,
+            retryPTYAttachStatus: true
+        )
+    }
+
+    private func buildForegroundAuthThenSSHPTYAttachStartupCommand(
+        options: SSHCommandOptions,
+        remoteShellCommand: String,
+        localCommandScript: String?,
+        controlPathPreflightShellFunction: String?
+    ) throws -> String {
+        let scriptBody = foregroundAuthThenSSHPTYAttachScriptBody(
+            options: options,
+            remoteShellCommand: remoteShellCommand,
+            localCommandScript: localCommandScript
+        )
+        return try buildSSHStartupCommand(
+            sshCommand: scriptBody,
+            shellFeatures: "",
+            remoteRelayPort: options.remoteRelayPort,
+            isShellSnippet: true,
+            controlPathPreflightShellFunction: controlPathPreflightShellFunction,
+            retryPTYAttachStatus: true
+        )
+    }
+
+    private func foregroundAuthThenSSHPTYAttachScriptBody(
+        options: SSHCommandOptions,
+        remoteShellCommand: String,
+        localCommandScript: String?
+    ) -> String {
         var authArguments = baseSSHArguments(options, localCommandScript: localCommandScript)
         authArguments += ["-T", options.destination, "true"]
         let authCommand = authArguments.map(shellQuote).joined(separator: " ")
         let attachScript = buildSSHPTYAttachScriptBody(
             remoteShellCommand: remoteShellCommand
         )
-        let scriptBody = [
+        return [
             "command \(authCommand) <&0",
             "cmux_auth_status=$?",
             "if [ \"$cmux_auth_status\" -ne 0 ]; then",
@@ -8407,14 +8448,6 @@ struct CMUXCLI {
             attachScript,
         ]
             .joined(separator: "\n")
-        return buildReusableSSHStartupCommand(
-            sshCommand: scriptBody,
-            shellFeatures: "",
-            remoteRelayPort: options.remoteRelayPort,
-            isShellSnippet: true,
-            controlPathPreflightShellFunction: controlPathPreflightShellFunction,
-            retryPTYAttachStatus: true
-        )
     }
 
     private func buildSSHPTYAttachScriptBody(

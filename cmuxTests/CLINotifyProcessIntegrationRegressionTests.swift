@@ -2250,9 +2250,10 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         let configureParams = try XCTUnwrap(params(for: "workspace.remote.configure", in: run.requests))
         let initialCommand = try XCTUnwrap(createParams["initial_command"] as? String)
         let terminalStartupCommand = try XCTUnwrap(configureParams["terminal_startup_command"] as? String)
-        let initialScript = try XCTUnwrap(decodedReusableStartupScript(from: initialCommand))
+        let initialScript = try XCTUnwrap(startupScriptBody(from: initialCommand))
         let terminalStartupScript = try XCTUnwrap(decodedReusableStartupScript(from: terminalStartupCommand))
 
+        XCTAssertNil(decodedReusableStartupScript(from: initialCommand), initialCommand)
         XCTAssertTrue(initialScript.contains("ssh-pty-attach"), initialScript)
         XCTAssertTrue(initialScript.contains("--wait"), initialScript)
         XCTAssertTrue(initialScript.contains("ssh-session-end"), initialScript)
@@ -7948,6 +7949,27 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return nil
         }
         return String(data: data, encoding: .utf8)
+    }
+
+    private func startupScriptBody(from command: String) -> String? {
+        if let decoded = decodedReusableStartupScript(from: command) {
+            return decoded
+        }
+        guard let path = shellSingleUnquoted(command),
+              FileManager.default.fileExists(atPath: path),
+              let body = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return nil
+        }
+        return body
+    }
+
+    private func shellSingleUnquoted(_ value: String) -> String? {
+        guard value.hasPrefix("'"), value.hasSuffix("'"), value.count >= 2 else {
+            return value.isEmpty ? nil : value
+        }
+        var inner = String(value.dropFirst().dropLast())
+        inner = inner.replacingOccurrences(of: "'\"'\"'", with: "'")
+        return inner
     }
 
     private func params(for method: String, in requests: [[String: Any]]) -> [String: Any]? {
