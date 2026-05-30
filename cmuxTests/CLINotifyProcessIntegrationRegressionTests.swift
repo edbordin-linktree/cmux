@@ -2271,6 +2271,8 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             initialScript.contains("ssh-$cmux_ssh_pty_workspace_id-$cmux_ssh_pty_surface_id"),
             initialScript
         )
+        XCTAssertTrue(initialScript.contains("CMUX_SSH_FOREGROUND_AUTH_TIMEOUT_SECONDS"), initialScript)
+        XCTAssertTrue(initialScript.contains("SSH foreground authentication timed out"), initialScript)
         XCTAssertTrue(initialScript.contains("254|255"), initialScript)
         XCTAssertFalse(initialScript.contains("ssh-pty-attach --wait --surface"), initialScript)
         XCTAssertFalse(initialScript.contains("ssh-pty-attach --surface"), initialScript)
@@ -2299,6 +2301,8 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             terminalStartupScript.contains("ssh-$cmux_ssh_pty_workspace_id-$cmux_ssh_pty_surface_id"),
             terminalStartupScript
         )
+        XCTAssertTrue(terminalStartupScript.contains("CMUX_SSH_FOREGROUND_AUTH_TIMEOUT_SECONDS"), terminalStartupScript)
+        XCTAssertTrue(terminalStartupScript.contains("SSH foreground authentication timed out"), terminalStartupScript)
         XCTAssertTrue(terminalStartupScript.contains("254|255"), terminalStartupScript)
         XCTAssertFalse(terminalStartupScript.contains("ssh-pty-attach --wait --surface"), terminalStartupScript)
         XCTAssertFalse(terminalStartupScript.contains("ssh-pty-attach --surface"), terminalStartupScript)
