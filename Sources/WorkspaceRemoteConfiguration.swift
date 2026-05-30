@@ -132,6 +132,14 @@ nonisolated enum SSHPTYAttachStartupCommandBuilder {
             "if [ -z \"$cmux_ssh_attach_cli\" ]; then printf '%s\\n' '[cmux] bundled CLI not found for SSH PTY attach.' >&2; exit 127; fi",
             "if [ -z \"${CMUX_SOCKET_PATH:-}\" ]; then printf '%s\\n' '[cmux] required configuration missing for SSH PTY attach.' >&2; exit 1; fi",
             "if [ -z \"${CMUX_WORKSPACE_ID:-}\" ]; then printf '%s\\n' '[cmux] required workspace context missing for SSH PTY attach.' >&2; exit 1; fi",
+            "cmux_ssh_attach_tty=\"$(tty 2>/dev/null || true)\"",
+            "cmux_ssh_attach_tty=\"${cmux_ssh_attach_tty##*/}\"",
+            "if [ -n \"$cmux_ssh_attach_tty\" ] && [ \"$cmux_ssh_attach_tty\" != \"not a tty\" ]; then",
+            "  cmux_ssh_attach_report_tty=\"{\\\"workspace_id\\\":\\\"$CMUX_WORKSPACE_ID\\\",\\\"tty_name\\\":\\\"$cmux_ssh_attach_tty\\\"}\"",
+            "  if [ -n \"${CMUX_SURFACE_ID:-}\" ]; then cmux_ssh_attach_report_tty=\"{\\\"workspace_id\\\":\\\"$CMUX_WORKSPACE_ID\\\",\\\"surface_id\\\":\\\"$CMUX_SURFACE_ID\\\",\\\"tty_name\\\":\\\"$cmux_ssh_attach_tty\\\"}\"; fi",
+            "  env -u CMUX_SOCKET \"$cmux_ssh_attach_cli\" --socket \"$CMUX_SOCKET_PATH\" rpc surface.report_tty \"$cmux_ssh_attach_report_tty\" >/dev/null 2>&1 || true",
+            "fi",
+            "unset cmux_ssh_attach_tty cmux_ssh_attach_report_tty",
         ]
         if let sessionID = normalized(sessionID) {
             lines.append("cmux_ssh_attach_session_id=\(shellQuote(sessionID))")

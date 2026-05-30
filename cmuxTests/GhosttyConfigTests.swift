@@ -2490,6 +2490,14 @@ final class BrowserPanelRemoteStoreTests: XCTestCase {
 }
 
 final class WorkspaceRemoteConfigurationTransportKeyTests: XCTestCase {
+    func testSSHPTYAttachStartupCommandReportsTTYForRestoredSurface() {
+        let command = SSHPTYAttachStartupCommandBuilder.command(sessionID: "sess-existing")
+
+        XCTAssertTrue(command.contains("rpc surface.report_tty"), command)
+        XCTAssertTrue(command.contains("CMUX_SURFACE_ID"), command)
+        XCTAssertTrue(command.contains("tty_name"), command)
+    }
+
     func testProxyBrokerTransportKeyIgnoresControlPath() {
         let first = WorkspaceRemoteConfiguration(
             destination: "cmux-macmini",
