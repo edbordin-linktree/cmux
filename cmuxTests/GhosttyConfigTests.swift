@@ -2527,7 +2527,7 @@ final class WorkspaceRemoteConfigurationTransportKeyTests: XCTestCase {
         XCTAssertEqual(first.proxyBrokerTransportKey, second.proxyBrokerTransportKey)
     }
 
-    func testPersistentPTYIdentityRequiresSameRelayPort() {
+    func testPersistentPTYIdentityIgnoresRelayTransport() {
         let first = WorkspaceRemoteConfiguration(
             destination: "cmux-macmini",
             port: 22,
@@ -2565,8 +2565,46 @@ final class WorkspaceRemoteConfigurationTransportKeyTests: XCTestCase {
             persistentDaemonSlot: "ssh-test-slot"
         )
 
-        XCTAssertFalse(first.hasSamePersistentPTYIdentity(as: second))
-        XCTAssertFalse(second.hasSamePersistentPTYIdentity(as: first))
+        XCTAssertTrue(first.hasSamePersistentPTYIdentity(as: second))
+        XCTAssertTrue(second.hasSamePersistentPTYIdentity(as: first))
+    }
+
+    func testRotatingPersistentRelayPortRefreshesRelayTransportOnly() throws {
+        let configuration = WorkspaceRemoteConfiguration(
+            destination: "cmux-macmini",
+            port: 22,
+            identityFile: "~/.ssh/id_ed25519",
+            sshOptions: [
+                "Compression=yes",
+                "ControlMaster=auto",
+                "ControlPersist=600",
+                "ControlPath=/tmp/cmux-ssh-501-64000-%C",
+            ],
+            localProxyPort: nil,
+            relayPort: 64000,
+            relayID: "relay-a",
+            relayToken: "token-a",
+            localSocketPath: "/tmp/cmux-a.sock",
+            terminalStartupCommand: "ssh cmux-macmini",
+            preserveAfterTerminalExit: true,
+            persistentDaemonSlot: "ssh-test-slot"
+        )
+
+        let rotated = try XCTUnwrap(configuration.rotatingPersistentRelayPort(to: 64001))
+
+        XCTAssertEqual(rotated.destination, configuration.destination)
+        XCTAssertEqual(rotated.port, configuration.port)
+        XCTAssertEqual(rotated.identityFile, ("~/.ssh/id_ed25519" as NSString).expandingTildeInPath)
+        XCTAssertEqual(rotated.persistentDaemonSlot, configuration.persistentDaemonSlot)
+        XCTAssertEqual(rotated.localSocketPath, configuration.localSocketPath)
+        XCTAssertEqual(rotated.relayPort, 64001)
+        XCTAssertNotEqual(rotated.relayID, configuration.relayID)
+        XCTAssertNotEqual(rotated.relayToken, configuration.relayToken)
+        XCTAssertTrue(rotated.hasSamePersistentPTYIdentity(as: configuration))
+        XCTAssertTrue(
+            rotated.sshOptions.contains("ControlPath=/tmp/cmux-ssh-\(getuid())-64001-%C"),
+            "expected rotated options to contain a control path scoped to the new relay port, got \(rotated.sshOptions)"
+        )
     }
 }
 

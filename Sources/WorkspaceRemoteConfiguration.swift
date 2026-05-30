@@ -490,7 +490,6 @@ struct WorkspaceRemoteConfiguration: Equatable {
             && destination.trimmingCharacters(in: .whitespacesAndNewlines)
                 == other.destination.trimmingCharacters(in: .whitespacesAndNewlines)
             && port == other.port
-            && relayPort == other.relayPort
             && WorkspaceRemoteSSHOptionFilter.normalizedIdentityPath(identityFile)
                 == WorkspaceRemoteSSHOptionFilter.normalizedIdentityPath(other.identityFile)
             && Self.proxyBrokerSSHOptions(sshOptions) == Self.proxyBrokerSSHOptions(other.sshOptions)
@@ -649,6 +648,26 @@ extension WorkspaceRemoteConfiguration {
         WorkspaceRemoteSSHOptionFilter.forkedWorkspaceOptions(options)
     }
 
+    func rotatingPersistentRelayPort(to requestedRelayPort: Int? = nil) -> WorkspaceRemoteConfiguration? {
+        guard preserveAfterTerminalExit,
+              let currentRelayPort = relayPort,
+              currentRelayPort > 0,
+              let localSocketPath = WorkspaceRemoteSSHOptionFilter.normalizedOptional(localSocketPath),
+              var snapshot = sessionSnapshot() else {
+            return nil
+        }
+
+        let nextRelayPort = requestedRelayPort.flatMap { (1...65535).contains($0) ? $0 : nil }
+            ?? Self.randomRelayPort(excluding: currentRelayPort)
+        snapshot.relayPort = nextRelayPort
+        snapshot.preferAutoConnectOnRestore = true
+        return snapshot.workspaceConfiguration(
+            localSocketPath: localSocketPath,
+            allowPersistentPTYRestore: true,
+            preserveSSHOptions: false
+        )
+    }
+
     func sessionSnapshot(sshOptionsOverride: [String]? = nil) -> SessionRemoteWorkspaceSnapshot? {
         guard transport == .ssh else { return nil }
         let normalizedDestination = destination.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -665,5 +684,15 @@ extension WorkspaceRemoteConfiguration {
             relayPort: preserveAfterTerminalExit ? relayPort : nil,
             persistentDaemonSlot: preserveAfterTerminalExit ? persistentDaemonSlot : nil
         )
+    }
+
+    private static func randomRelayPort(excluding excludedPort: Int) -> Int {
+        for _ in 0..<16 {
+            let candidate = Int.random(in: 49152...65535)
+            if candidate != excludedPort {
+                return candidate
+            }
+        }
+        return excludedPort == 65535 ? 49152 : excludedPort + 1
     }
 }

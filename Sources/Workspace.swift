@@ -6712,6 +6712,14 @@ final class WorkspaceRemoteSessionController {
                     scheduleReverseRelayRestartLocked(remotePath: remotePath, delay: retryDelay)
                     return
                 }
+                if Self.isRemoteForwardAllocationFailure(startupFailure) {
+                    requestRelayPortRotationLocked(
+                        failedRelayPort: relayPort,
+                        detail: startupFailure,
+                        retryDelay: retryDelay
+                    )
+                    return
+                }
                 publishDaemonStatus(
                     .error,
                     detail: "Remote SSH relay unavailable: \(startupFailure) (retry in \(retrySeconds)s)"
@@ -7163,6 +7171,27 @@ final class WorkspaceRemoteSessionController {
         return lowered.contains("remote port forwarding failed") ||
             lowered.contains("port forwarding failed") ||
             lowered.contains("remote forward failure")
+    }
+
+    private func requestRelayPortRotationLocked(failedRelayPort: Int, detail: String, retryDelay: TimeInterval) {
+        let retrySeconds = max(1, Int(retryDelay.rounded()))
+        debugLog(
+            "remote.relay.rotateRequested relayPort=\(failedRelayPort) " +
+            "error=\(detail)"
+        )
+        publishDaemonStatus(
+            .bootstrapping,
+            detail: "Remote SSH relay port \(failedRelayPort) is unavailable; rotating relay port (retry in \(retrySeconds)s)"
+        )
+        let controllerID = self.controllerID
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak workspace] in
+            guard let workspace else { return }
+            guard workspace.activeRemoteSessionControllerID == controllerID else { return }
+            workspace.rotateRemoteRelayPortAfterForwardAllocationFailure(
+                failedRelayPort: failedRelayPort,
+                detail: detail
+            )
+        }
     }
 
     private func stopReverseRelayViaControlMasterLocked() {
@@ -12901,6 +12930,22 @@ final class Workspace: Identifiable, ObservableObject {
     func reconnectRemoteConnection() {
         guard let configuration = remoteConfiguration else { return }
         configureRemoteConnection(configuration, autoConnect: true)
+    }
+
+    func rotateRemoteRelayPortAfterForwardAllocationFailure(failedRelayPort: Int, detail: String) {
+        guard let configuration = remoteConfiguration,
+              configuration.relayPort == failedRelayPort,
+              let rotatedConfiguration = configuration.rotatingPersistentRelayPort(),
+              rotatedConfiguration.relayPort != failedRelayPort else {
+            return
+        }
+
+        cmuxDebugLog(
+            "remote.relay.rotate workspace=\(id.uuidString) " +
+            "from=\(failedRelayPort) to=\(rotatedConfiguration.relayPort.map(String.init) ?? "nil") " +
+            "detail=\(detail)"
+        )
+        configureRemoteConnection(rotatedConfiguration, autoConnect: true)
     }
 
     private static func normalizedForegroundAuthToken(_ token: String?) -> String? {
