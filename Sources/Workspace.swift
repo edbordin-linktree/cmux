@@ -1078,28 +1078,10 @@ extension Workspace {
         case .pane(let pane):
             leaves.append(SessionPaneRestoreEntry(paneId: paneId, snapshot: pane))
         case .split(let split):
-            var anchorPanelId = bonsplitController
-                .tabs(inPane: paneId)
-                .compactMap { panelIdFromSurfaceId($0.id) }
-                .first
-
-            if anchorPanelId == nil {
-                anchorPanelId = newTerminalSurface(
-                    inPane: paneId,
-                    focus: false,
-                    inheritRemoteStartup: false
-                )?.id
-            }
-
-            guard let anchorPanelId,
-                  let newSplitPanel = newTerminalSplit(
-                    from: anchorPanelId,
-                    orientation: split.orientation.splitOrientation,
-                    insertFirst: false,
-                    focus: false,
-                    inheritRemoteStartup: false
-                  ),
-                  let secondPaneId = self.paneId(forPanelId: newSplitPanel.id) else {
+            guard let secondPaneId = bonsplitController.splitPane(
+                paneId,
+                orientation: split.orientation.splitOrientation
+            ) else {
                 leaves.append(
                     SessionPaneRestoreEntry(
                         paneId: paneId,
@@ -4927,7 +4909,8 @@ private final class WorkspaceRemoteCLIRelayServer {
             }
             defer { Darwin.close(fd) }
 
-            var timeout = timeval(tv_sec: 15, tv_usec: 0)
+            let timeoutSeconds = localSocketTimeoutSeconds(for: request)
+            var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
             withUnsafePointer(to: &timeout) { pointer in
                 _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, pointer, socklen_t(MemoryLayout<timeval>.size))
                 _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, pointer, socklen_t(MemoryLayout<timeval>.size))
@@ -5003,6 +4986,19 @@ private final class WorkspaceRemoteCLIRelayServer {
                 ])
             }
             return response
+        }
+
+        private static func localSocketTimeoutSeconds(for request: Data) -> Int {
+            guard let object = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
+                  let method = object["method"] as? String else {
+                return 15
+            }
+            switch method {
+            case "workspace.remote.snapshot_attach":
+                return 120
+            default:
+                return 15
+            }
         }
     }
 
@@ -10613,7 +10609,9 @@ final class Workspace: Identifiable, ObservableObject {
         configTemplate: CmuxSurfaceConfigTemplate? = nil,
         initialTerminalCommand: String? = nil,
         initialTerminalInput: String? = nil,
-        initialTerminalEnvironment: [String: String] = [:], initialDetachedSurface: DetachedSurfaceTransfer? = nil
+        initialTerminalEnvironment: [String: String] = [:],
+        initialDetachedSurface: DetachedSurfaceTransfer? = nil,
+        createInitialTerminal: Bool = true
     ) {
         self.id = id
         self.portOrdinal = portOrdinal
@@ -10678,7 +10676,7 @@ final class Workspace: Identifiable, ObservableObject {
                attachDetachedSurface(initialDetachedSurface, inPane: initialPaneId, focus: false) != nil {
                 initialTabId = surfaceIdFromPanelId(initialDetachedSurface.panelId)
             }
-        } else {
+        } else if createInitialTerminal {
             // Create initial terminal panel
             let terminalPanel = TerminalPanel(
                 workspaceId: id,

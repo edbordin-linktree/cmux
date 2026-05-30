@@ -66,6 +66,8 @@ type commandSpec struct {
 	paramKeyOverrides map[string]string
 	// defaultParams are applied before flags/env fallbacks.
 	defaultParams map[string]any
+	// timeout overrides the default v2 socket response timeout for long-running commands.
+	timeout time.Duration
 }
 
 type browserCommandSpec struct {
@@ -113,7 +115,7 @@ var commands = []commandSpec{
 	{name: "rename-tab", proto: protoV2, v2Method: "tab.action", flagKeys: []string{"workspace", "surface", "tab", "title"}, paramKeyOverrides: map[string]string{"tab": "surface_id"}, defaultParams: map[string]any{"action": "rename"}},
 	{name: "notify", proto: protoV2, v2Method: "notification.create", flagKeys: []string{"title", "body", "workspace"}},
 	{name: "refresh-surfaces", proto: protoV2, v2Method: "surface.refresh", noParams: true},
-	{name: "ssh-workspace-attach", proto: protoV2, v2Method: "workspace.remote.snapshot_attach", flagKeys: []string{"workspace-id", "host", "slot", "window"}},
+	{name: "ssh-workspace-attach", proto: protoV2, v2Method: "workspace.remote.snapshot_attach", flagKeys: []string{"workspace-id", "host", "slot", "window"}, timeout: 120 * time.Second},
 }
 
 var browserCommands = map[string]browserCommandSpec{
@@ -436,7 +438,7 @@ func execV2(socketPath string, spec *commandSpec, args []string, jsonOutput bool
 		return 1
 	}
 
-	resp, err := socketRoundTripV2(socketPath, spec.v2Method, params, refreshAddr)
+	resp, err := socketRoundTripV2WithTimeout(socketPath, spec.v2Method, params, refreshAddr, spec.timeout)
 	if err != nil {
 		if shouldTryHeadlessFallback(err) {
 			if code, handled := runHeadlessCLICommand(spec.name, spec.v2Method, params, jsonOutput, err); handled {

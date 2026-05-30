@@ -431,7 +431,8 @@ enum RemoteWorkspaceSnapshotAttachController {
             id: preferredWorkspaceID ?? UUID(),
             title: initialTitle,
             select: true,
-            autoWelcomeIfNeeded: false
+            autoWelcomeIfNeeded: false,
+            createInitialTerminal: false
         )
         do {
             let configuration = try workspaceConfiguration(for: record, slot: normalizedSlot)
