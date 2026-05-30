@@ -8632,7 +8632,11 @@ class TerminalController {
 
         var restoreResult: RemoteWorkspaceRestoreResult?
         v2MainSync {
-            restoreResult = target.restoreRemoteWorkspaceSnapshotV1(snapshot, remote: remoteSnapshot)
+            restoreResult = target.restoreRemoteWorkspaceSnapshotV1(
+                snapshot,
+                remote: remoteSnapshot,
+                preserveExistingRemoteConfiguration: true
+            )
             target.setCustomTitle(snapshot.title)
             if let owner = AppDelegate.shared?.tabManagerFor(tabId: target.id) {
                 owner.selectWorkspace(target)

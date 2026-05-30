@@ -1913,6 +1913,99 @@ final class TabManagerSessionSnapshotTests: XCTestCase {
         )
     }
 
+    func testRemoteSnapshotRestoreUsesExistingRemoteConfigurationWhenRequested() throws {
+        let workspace = TabManager().addWorkspace(
+            title: "Attach Target",
+            select: true,
+            autoWelcomeIfNeeded: false,
+            createInitialTerminal: false
+        )
+        let liveConfiguration = WorkspaceRemoteConfiguration(
+            destination: "dev@example.com",
+            port: 2222,
+            identityFile: nil,
+            sshOptions: [
+                "StrictHostKeyChecking=accept-new",
+            ],
+            localProxyPort: nil,
+            relayPort: 64103,
+            relayID: "live-relay",
+            relayToken: String(repeating: "c", count: 64),
+            localSocketPath: "/tmp/cmux-live-attach.sock",
+            terminalStartupCommand: SSHPTYAttachStartupCommandBuilder.command(),
+            foregroundAuthToken: "live-foreground-auth",
+            preserveAfterTerminalExit: true,
+            persistentDaemonSlot: "ssh-live-attach"
+        )
+        workspace.configureRemoteConnection(liveConfiguration, autoConnect: false)
+
+        let snapshotWorkspaceId = UUID()
+        let snapshotPanelId = UUID()
+        let sessionID = Workspace.defaultSSHPTYSessionID(
+            workspaceId: snapshotWorkspaceId,
+            panelId: snapshotPanelId
+        )
+        let snapshot = SessionWorkspaceSnapshot(
+            id: snapshotWorkspaceId,
+            processTitle: "Detached Task",
+            customTitle: "Detached Task",
+            customDescription: nil,
+            customColor: nil,
+            isPinned: false,
+            terminalScrollBarHidden: nil,
+            currentDirectory: "/home/dev/task",
+            focusedPanelId: snapshotPanelId,
+            layout: .pane(SessionPaneLayoutSnapshot(
+                panelIds: [snapshotPanelId],
+                selectedPanelId: snapshotPanelId
+            )),
+            panels: [
+                SessionPanelSnapshot(
+                    id: snapshotPanelId,
+                    type: .terminal,
+                    title: "agent",
+                    customTitle: "agent",
+                    directory: "/home/dev/task",
+                    isPinned: false,
+                    isManuallyUnread: false,
+                    gitBranch: nil,
+                    listeningPorts: [],
+                    ttyName: nil,
+                    terminal: SessionTerminalPanelSnapshot(
+                        workingDirectory: "/home/dev/task",
+                        isRemoteTerminal: true,
+                        remotePTYSessionID: sessionID
+                    ),
+                    browser: nil,
+                    markdown: nil,
+                    filePreview: nil,
+                    rightSidebarTool: nil
+                ),
+            ],
+            statusEntries: [],
+            logEntries: [],
+            progress: nil,
+            gitBranch: nil,
+            remote: nil
+        )
+
+        let restoredPanelIds = workspace.restoreSessionSnapshot(
+            snapshot,
+            restoreRemoteConfiguration: false
+        )
+
+        XCTAssertEqual(workspace.remoteConfiguration, liveConfiguration)
+        let restoredPanelId = try XCTUnwrap(restoredPanelIds[snapshotPanelId])
+        XCTAssertTrue(workspace.remotePTYSessionIDMatches(panelId: restoredPanelId, sessionID: sessionID))
+        let startupCommand = try XCTUnwrap(
+            workspace.terminalPanel(for: restoredPanelId)?.surface.debugInitialCommand()
+        )
+        XCTAssertTrue(startupCommand.contains("ssh-pty-attach"), startupCommand)
+        XCTAssertTrue(startupCommand.contains("--require-existing"), startupCommand)
+        XCTAssertTrue(startupCommand.contains(sessionID), startupCommand)
+        XCTAssertTrue(startupCommand.contains("live-foreground-auth"), startupCommand)
+    }
+
     func testPersistentSSHPTYRestoreRewritesStaleRemoteRelayContextIDs() throws {
         let manager = TabManager()
         let remoteWorkspace = manager.addWorkspace(select: true)

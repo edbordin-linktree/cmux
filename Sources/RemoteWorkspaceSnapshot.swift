@@ -605,7 +605,11 @@ enum RemoteWorkspaceSnapshotAttachController {
         into workspace: Workspace,
         remote: SessionRemoteWorkspaceSnapshot
     ) -> RemoteWorkspaceRestoreResult {
-        workspace.restoreRemoteWorkspaceSnapshotV1(snapshot, remote: remote)
+        workspace.restoreRemoteWorkspaceSnapshotV1(
+            snapshot,
+            remote: remote,
+            preserveExistingRemoteConfiguration: true
+        )
     }
 
     private static func sshOptionsWithDetachedWorkspaceRestoreDefaults(
@@ -749,10 +753,14 @@ extension Workspace {
     @discardableResult
     func restoreRemoteWorkspaceSnapshotV1(
         _ snapshot: RemoteWorkspaceSnapshotV1,
-        remote: SessionRemoteWorkspaceSnapshot
+        remote: SessionRemoteWorkspaceSnapshot,
+        preserveExistingRemoteConfiguration: Bool = false
     ) -> RemoteWorkspaceRestoreResult {
         let session = Self.sessionSnapshot(from: snapshot, remote: remote)
-        let panelIdMap = restoreSessionSnapshot(session)
+        let panelIdMap = restoreSessionSnapshot(
+            session,
+            restoreRemoteConfiguration: !preserveExistingRemoteConfiguration
+        )
         applyRemoteWorkspaceStatusEntries(snapshot.statusEntries)
         let restored = snapshot.panes.reduce(0) { count, pane in
             count + (panelIdMap[Self.panelId(from: pane)] == nil ? 0 : 1)

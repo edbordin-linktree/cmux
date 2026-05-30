@@ -258,7 +258,10 @@ extension Workspace {
     }
 
     @discardableResult
-    func restoreSessionSnapshot(_ snapshot: SessionWorkspaceSnapshot) -> [UUID: UUID] {
+    func restoreSessionSnapshot(
+        _ snapshot: SessionWorkspaceSnapshot,
+        restoreRemoteConfiguration: Bool = true
+    ) -> [UUID: UUID] {
         let previousSuppressClosedPanelHistory = suppressClosedPanelHistory
         suppressClosedPanelHistory = true
         defer { suppressClosedPanelHistory = previousSuppressClosedPanelHistory }
@@ -273,20 +276,22 @@ extension Workspace {
         invalidatedRestoredAgentFingerprintsByPanelId.removeAll(keepingCapacity: false)
         surfaceResumeBindingsByPanelId.removeAll(keepingCapacity: false)
 
-        let restoredRemoteConfiguration = snapshot.remote?.workspaceConfiguration(
-            localSocketPath: TerminalController.shared.currentSocketPathForRemoteRestore()
-        )
-        if let restoredRemoteConfiguration {
-            let shouldAutoConnect = Self.shouldAutoConnectRestoredRemote(
-                foregroundAuthToken: restoredRemoteConfiguration.foregroundAuthToken,
-                snapshot: snapshot
+        if restoreRemoteConfiguration {
+            let restoredRemoteConfiguration = snapshot.remote?.workspaceConfiguration(
+                localSocketPath: TerminalController.shared.currentSocketPathForRemoteRestore()
             )
-            configureRemoteConnection(
-                restoredRemoteConfiguration,
-                autoConnect: shouldAutoConnect
-            )
-        } else {
-            disconnectRemoteConnection(clearConfiguration: true)
+            if let restoredRemoteConfiguration {
+                let shouldAutoConnect = Self.shouldAutoConnectRestoredRemote(
+                    foregroundAuthToken: restoredRemoteConfiguration.foregroundAuthToken,
+                    snapshot: snapshot
+                )
+                configureRemoteConnection(
+                    restoredRemoteConfiguration,
+                    autoConnect: shouldAutoConnect
+                )
+            } else {
+                disconnectRemoteConnection(clearConfiguration: true)
+            }
         }
 
         let normalizedCurrentDirectory = snapshot.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
