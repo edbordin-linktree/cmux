@@ -471,7 +471,7 @@ enum RemoteWorkspaceSnapshotAttachController {
         )
         do {
             workspace.configureRemoteConnection(configuration, autoConnect: true)
-            try await waitForRemoteDaemonReady(workspace: workspace, timeout: 45)
+            try await waitForRemoteTransportReady(workspace: workspace, timeout: 45)
             let restoreResult = restoreSnapshot(
                 preparedSnapshot.snapshot,
                 into: workspace,
@@ -551,21 +551,25 @@ enum RemoteWorkspaceSnapshotAttachController {
     }
 
     @MainActor
-    private static func waitForRemoteDaemonReady(workspace: Workspace, timeout: TimeInterval) async throws {
+    private static func waitForRemoteTransportReady(workspace: Workspace, timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
-        var lastState = workspace.remoteDaemonStatus.state.rawValue
+        var lastConnectionState = workspace.remoteConnectionState.rawValue
+        var lastDaemonState = workspace.remoteDaemonStatus.state.rawValue
         var lastDetail = workspace.remoteDaemonStatus.detail ?? ""
         while Date() < deadline {
-            lastState = workspace.remoteDaemonStatus.state.rawValue
+            lastConnectionState = workspace.remoteConnectionState.rawValue
+            lastDaemonState = workspace.remoteDaemonStatus.state.rawValue
             lastDetail = workspace.remoteDaemonStatus.detail ?? ""
-            if workspace.remoteDaemonStatus.state == .ready {
+            if workspace.remoteDaemonStatus.state == .ready,
+               workspace.remoteConnectionState == .connected,
+               workspace.remoteProxyEndpoint != nil {
                 return
             }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
         let suffix = lastDetail.isEmpty ? "" : " detail=\(lastDetail)"
         throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
-            "remote daemon did not become ready before timeout (state=\(lastState)\(suffix))"
+            "remote transport did not become ready before timeout (connection=\(lastConnectionState) daemon=\(lastDaemonState)\(suffix))"
         )
     }
 
