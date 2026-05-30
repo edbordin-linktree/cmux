@@ -4947,7 +4947,8 @@ class TerminalController {
                 "pane_id": v2OrNull(paneUUID?.uuidString),
                 "pane_ref": v2Ref(kind: .pane, uuid: paneUUID),
                 "index_in_pane": v2OrNull(indexInPaneByPanelId[panel.id]),
-                "tty": v2OrNull(workspace.surfaceTTYNames[panel.id])
+                "tty": v2OrNull(workspace.surfaceTTYNames[panel.id]),
+                "metadata": workspace.surfaceMetadataEntries[panel.id] ?? [:]
             ]
 
             if panel.panelType == .browser, let browserPanel = panel as? BrowserPanel {
@@ -4997,6 +4998,7 @@ class TerminalController {
             "description": v2OrNull(workspace.customDescription),
             "selected": selected,
             "pinned": workspace.isPinned,
+            "metadata": workspace.metadataEntries,
             "panes": panes
         ]
     }
