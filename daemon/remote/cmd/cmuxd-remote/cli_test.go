@@ -1979,6 +1979,91 @@ func TestCLIAttachedCallerExplicitDetachedWorkspaceUsesHeadless(t *testing.T) {
 	}
 }
 
+func TestCLIAttachedCallerExplicitCurrentWorkspaceUUIDUsesSwiftRelay(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	surfaceID := "11111111-1111-4111-8111-111111111111"
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", strings.ToUpper(workspaceID))
+	t.Setenv("CMUX_SURFACE_ID", strings.ToUpper(surfaceID))
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+	callerSocket, requests := startMockV2SocketWithRequestCapture(t)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", callerSocket, "--json", "metadata", "set", "--workspace", strings.ToUpper(workspaceID), "craft:project-id", "llm-classification"})
+		if code != 0 {
+			t.Fatalf("metadata set returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"method":"metadata.set"`) {
+		t.Fatalf("expected relay JSON output, got %s", output)
+	}
+
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "metadata.set" {
+			t.Fatalf("method = %v, want metadata.set", got)
+		}
+		params, _ := req["params"].(map[string]any)
+		if got := params["workspace_id"]; got != strings.ToUpper(workspaceID) {
+			t.Fatalf("workspace_id = %v, want explicit current workspace UUID", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for caller relay request")
+	}
+
+	body := readHeadlessCLITestBody(t, root, slot)
+	metadata := headlessMetadataMap(body)
+	if got := metadata["craft:project-id"]; got != "" {
+		t.Fatalf("metadata unexpectedly mutated detached snapshot: %q", got)
+	}
+}
+
+func TestCLIAttachedCallerExplicitCurrentSurfaceMetadataUsesSwiftRelay(t *testing.T) {
+	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
+	surfaceID := "11111111-1111-4111-8111-111111111111"
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", workspaceID)
+	t.Setenv("CMUX_SURFACE_ID", surfaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", slot)
+	callerSocket, requests := startMockV2SocketWithRequestCapture(t)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", callerSocket, "--json", "surface", "metadata", "set", "--workspace", workspaceID, "--surface", surfaceID, "craft:semantic", "agent"})
+		if code != 0 {
+			t.Fatalf("surface metadata set returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"method":"surface.metadata.set"`) {
+		t.Fatalf("expected relay JSON output, got %s", output)
+	}
+
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "surface.metadata.set" {
+			t.Fatalf("method = %v, want surface.metadata.set", got)
+		}
+		params, _ := req["params"].(map[string]any)
+		if got := params["workspace_id"]; got != workspaceID {
+			t.Fatalf("workspace_id = %v, want %s", got, workspaceID)
+		}
+		if got := params["surface_id"]; got != surfaceID {
+			t.Fatalf("surface_id = %v, want %s", got, surfaceID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for caller relay request")
+	}
+
+	body := readHeadlessCLITestBody(t, root, slot)
+	panes := headlessPaneSnapshots(body)
+	if len(panes) != 1 {
+		t.Fatalf("pane snapshots = %d, want 1", len(panes))
+	}
+	metadata := headlessPaneMetadataMap(panes[0])
+	if got := metadata["craft:semantic"]; got != "" {
+		t.Fatalf("surface metadata unexpectedly mutated detached snapshot: %q", got)
+	}
+}
+
 func TestCLIHeadlessNewPaneAcceptsFocusFalse(t *testing.T) {
 	root, workspaceID, slot := writeHeadlessCLITestSnapshot(t)
 	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)

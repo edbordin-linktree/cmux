@@ -1495,6 +1495,10 @@ func routeForExplicitWorkspaceArg(workspaceArg string, fallback string) explicit
 	if workspaceID == "" || workspaceID == "current" {
 		return explicitWorkspaceRoute{socketPath: fallback}
 	}
+	envWorkspace := headlessNormalizeID(os.Getenv("CMUX_WORKSPACE_ID"))
+	if envWorkspace != "" && strings.EqualFold(workspaceID, envWorkspace) {
+		return explicitWorkspaceRoute{socketPath: fallback}
+	}
 	rootBase, err := headlessDaemonRoot()
 	if err != nil {
 		return explicitWorkspaceRoute{socketPath: fallback}
