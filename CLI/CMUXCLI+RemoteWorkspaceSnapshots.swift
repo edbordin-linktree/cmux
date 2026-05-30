@@ -345,7 +345,7 @@ extension CMUXCLI {
         let hostOpt = parsed.value("--host")
         let slotOpt = parsed.value("--slot")
         let windowOpt = parsed.value("--window")
-        guard let workspaceID = nonEmpty(workspaceIDOpt), UUID(uuidString: workspaceID) != nil else {
+        guard let workspaceID = canonicalDetachedWorkspaceID(workspaceIDOpt) else {
             throw CLIError(message: "ssh-workspace-attach requires --workspace-id <uuid>", exitCode: 1)
         }
 
@@ -416,13 +416,15 @@ extension CMUXCLI {
         let slotOpt = parsed.value("--slot")
         let force = parsed.bool("--force")
         let target: DetachedWorkspaceResolvedTarget
-        if let workspaceID = nonEmpty(workspaceIDOpt) {
+        if let workspaceID = canonicalDetachedWorkspaceID(workspaceIDOpt) {
             target = try resolveDetachedWorkspaceTarget(
                 workspaceID: workspaceID,
                 hostOpt: hostOpt,
                 slotOpt: slotOpt,
                 timeout: 5
             )
+        } else if nonEmpty(workspaceIDOpt) != nil {
+            throw CLIError(message: "ssh-workspace-snapshot-clear requires --workspace-id <uuid> or --host <h> --slot <s>")
         } else if nonEmpty(hostOpt) != nil, nonEmpty(slotOpt) != nil {
             target = try resolveDetachedWorkspaceTarget(
                 workspaceID: nil,
@@ -693,7 +695,7 @@ extension CMUXCLI {
             guard let host = hosts.first(where: { $0.host == result.host }) else {
                 continue
             }
-            for snapshot in result.snapshots where snapshot.workspaceID == workspaceID {
+            for snapshot in result.snapshots where detachedWorkspaceID(snapshot.workspaceID, matches: workspaceID) {
                 matches.append((host, snapshot))
             }
         }
@@ -1075,6 +1077,19 @@ extension CMUXCLI {
             return value!
         }
         return "detached"
+    }
+
+    private func canonicalDetachedWorkspaceID(_ value: String?) -> String? {
+        guard let raw = nonEmpty(value), let uuid = UUID(uuidString: raw) else { return nil }
+        return uuid.uuidString
+    }
+
+    private func detachedWorkspaceID(_ candidate: String?, matches requested: String) -> Bool {
+        guard let candidate = canonicalDetachedWorkspaceID(candidate),
+              let requested = canonicalDetachedWorkspaceID(requested) else {
+            return false
+        }
+        return candidate == requested
     }
 
     private func nonEmpty(_ value: String?) -> String? {
