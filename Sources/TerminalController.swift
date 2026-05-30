@@ -3466,6 +3466,8 @@ class TerminalController {
             return v2Result(id: id, self.v2WorkspaceRemoteSnapshotFindAttached(params: params))
         case "workspace.remote.snapshot_detach":
             return v2Result(id: id, self.v2WorkspaceRemoteSnapshotDetach(params: params))
+        case "workspace.remote.snapshot_attach":
+            return v2Result(id: id, self.v2WorkspaceRemoteSnapshotAttach(params: params))
         case "workspace.remote.snapshot_restore":
             return v2Result(id: id, self.v2WorkspaceRemoteSnapshotRestore(params: params))
         case "workspace.remote.snapshot_clear":
@@ -3909,6 +3911,7 @@ class TerminalController {
             "workspace.remote.disconnect",
             "workspace.remote.status",
             "workspace.remote.snapshot_detach",
+            "workspace.remote.snapshot_attach",
             "workspace.remote.snapshot_restore",
             "workspace.remote.snapshot_clear",
             "workspace.remote.pty_sessions",
@@ -8413,6 +8416,111 @@ class TerminalController {
             "detached_at": RemoteWorkspaceSnapshotCodec.iso8601String(capture.detachedAt),
             "panes": capture.paneCount,
         ])
+    }
+
+    private func v2WorkspaceRemoteSnapshotAttach(params: [String: Any]) -> V2CallResult {
+        guard let requestedWorkspaceID = v2UUID(params, "workspace_id") else {
+            return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
+        }
+
+        let timeout = v2DetachedWorkspaceLookupTimeout(params: params)
+        let hostRaw = v2RawString(params, "host")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let slotRaw = v2RawString(params, "slot")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target: V2DetachedWorkspaceSnapshotTarget
+        if let host = hostRaw, !host.isEmpty, let slot = slotRaw, !slot.isEmpty {
+            let registry = (try? DetachedWorkspaceHostRegistry.load()) ?? DetachedWorkspaceHostRegistryFile()
+            let record = registry.hosts.first(where: { $0.host == host }) ?? DetachedWorkspaceHostRegistryRecord(
+                host: host,
+                port: nil,
+                identityFile: nil,
+                sshOptions: [],
+                daemonBinPath: "~/.cmux/bin/cmuxd-remote",
+                addedAt: Date(),
+                lastSeenAt: Date()
+            )
+            target = V2DetachedWorkspaceSnapshotTarget(
+                host: record,
+                slot: slot,
+                workspaceID: requestedWorkspaceID,
+                title: nil,
+                detachedAt: nil,
+                updatedAt: nil,
+                status: RemoteWorkspaceSnapshotStatus.detached.rawValue,
+                bodyPresent: true
+            )
+        } else {
+            guard let resolved = v2DetachedWorkspaceSnapshotTarget(workspaceID: requestedWorkspaceID, timeout: timeout) else {
+                return .err(code: "not_found", message: "Detached workspace not found: \(requestedWorkspaceID.uuidString)", data: [
+                    "workspace_id": requestedWorkspaceID.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: requestedWorkspaceID),
+                ])
+            }
+            if let host = hostRaw, !host.isEmpty, resolved.host.host != host {
+                return .err(code: "not_found", message: "Detached workspace \(requestedWorkspaceID.uuidString) was found on \(resolved.host.host), not \(host)", data: nil)
+            }
+            if let slot = slotRaw, !slot.isEmpty, resolved.slot != slot {
+                return .err(code: "not_found", message: "Detached workspace \(requestedWorkspaceID.uuidString) was found on slot \(resolved.slot), not \(slot)", data: nil)
+            }
+            target = resolved
+        }
+
+        let requestedWindowID = v2UUID(params, "window_id")
+        let completion = DispatchSemaphore(value: 0)
+        final class AttachBox: @unchecked Sendable {
+            var result: Result<RemoteWorkspaceSnapshotAttachResult, Error>?
+        }
+        let box = AttachBox()
+        Task { @MainActor in
+            do {
+                let preferredWindow = requestedWindowID.flatMap { AppDelegate.shared?.windowForMainWindowId($0) }
+                let result = try await RemoteWorkspaceSnapshotAttachController.attach(
+                    host: target.host.host,
+                    slot: target.slot,
+                    title: target.title,
+                    preferredWorkspaceID: requestedWorkspaceID,
+                    preferredWindow: preferredWindow
+                )
+                box.result = .success(result)
+            } catch {
+                box.result = .failure(error)
+            }
+            completion.signal()
+        }
+
+        guard completion.wait(timeout: .now() + 90) == .success else {
+            return .err(code: "timeout", message: "Timed out attaching detached workspace \(requestedWorkspaceID.uuidString)", data: [
+                "workspace_id": requestedWorkspaceID.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: requestedWorkspaceID),
+                "host": target.host.host,
+                "persistent_daemon_slot": target.slot,
+            ])
+        }
+
+        switch box.result {
+        case .success(let attach):
+            return .ok([
+                "workspace_id": requestedWorkspaceID.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: requestedWorkspaceID),
+                "local_workspace_id": attach.localWorkspaceID.uuidString,
+                "local_workspace_ref": v2Ref(kind: .workspace, uuid: attach.localWorkspaceID),
+                "title": attach.title,
+                "host": attach.host,
+                "persistent_daemon_slot": attach.persistentDaemonSlot,
+                "panes_restored": attach.panesRestored,
+                "panes_lost": attach.panesLost,
+                "snapshot_sha256": attach.snapshotSHA256,
+                "already_attached": attach.alreadyAttached,
+            ])
+        case .failure(let error):
+            return .err(code: "attach_failed", message: error.localizedDescription, data: [
+                "workspace_id": requestedWorkspaceID.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: requestedWorkspaceID),
+                "host": target.host.host,
+                "persistent_daemon_slot": target.slot,
+            ])
+        case .none:
+            return .err(code: "attach_failed", message: "Detached workspace attach did not return a result", data: nil)
+        }
     }
 
     private func v2WorkspaceRemoteSnapshotRestore(params: [String: Any]) -> V2CallResult {

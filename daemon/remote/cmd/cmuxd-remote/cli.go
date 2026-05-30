@@ -113,6 +113,7 @@ var commands = []commandSpec{
 	{name: "rename-tab", proto: protoV2, v2Method: "tab.action", flagKeys: []string{"workspace", "surface", "tab", "title"}, paramKeyOverrides: map[string]string{"tab": "surface_id"}, defaultParams: map[string]any{"action": "rename"}},
 	{name: "notify", proto: protoV2, v2Method: "notification.create", flagKeys: []string{"title", "body", "workspace"}},
 	{name: "refresh-surfaces", proto: protoV2, v2Method: "surface.refresh", noParams: true},
+	{name: "ssh-workspace-attach", proto: protoV2, v2Method: "workspace.remote.snapshot_attach", flagKeys: []string{"workspace-id", "host", "slot", "window"}},
 }
 
 var browserCommands = map[string]browserCommandSpec{
@@ -1624,6 +1625,8 @@ func flagToParamKey(key string) string {
 	switch key {
 	case "workspace":
 		return "workspace_id"
+	case "workspace-id":
+		return "workspace_id"
 	case "surface":
 		return "surface_id"
 	case "panel":
@@ -2009,6 +2012,7 @@ func cliUsage() {
 	fmt.Fprintln(os.Stderr, "  new-window                Create a new window")
 	fmt.Fprintln(os.Stderr, "  new-workspace             Create a new workspace")
 	fmt.Fprintln(os.Stderr, "  ssh <host>                Create an SSH workspace; use --detached to force same-host detached creation")
+	fmt.Fprintln(os.Stderr, "  ssh-workspace-attach      Attach a detached remote workspace through the local Swift relay")
 	fmt.Fprintln(os.Stderr, "  new-surface               Create a new surface")
 	fmt.Fprintln(os.Stderr, "  new-split                 Split an existing surface")
 	fmt.Fprintln(os.Stderr, "  close-surface             Close a surface")

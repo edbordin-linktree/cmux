@@ -1547,6 +1547,32 @@ func TestCLISSHRoutesToSwiftWhenRelayAvailable(t *testing.T) {
 	}
 }
 
+func TestCLISSHWorkspaceAttachRoutesToSwiftRelay(t *testing.T) {
+	sockPath, requests := startMockV2SocketWithRequestCapture(t)
+	workspaceID := "04386828-34c1-4a6a-8baa-3ba869091006"
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", sockPath, "--json", "ssh-workspace-attach", "--workspace-id", workspaceID})
+		if code != 0 {
+			t.Fatalf("ssh-workspace-attach returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"method":"workspace.remote.snapshot_attach"`) {
+		t.Fatalf("attach output should come from Swift relay: %s", output)
+	}
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "workspace.remote.snapshot_attach" {
+			t.Fatalf("expected workspace.remote.snapshot_attach, got %v", got)
+		}
+		params, _ := req["params"].(map[string]any)
+		if got := params["workspace_id"]; got != workspaceID {
+			t.Fatalf("workspace_id = %v, want %s", got, workspaceID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for snapshot attach request")
+	}
+}
+
 func TestCLISSHSingleCommandArgIsNotShellQuoted(t *testing.T) {
 	sockPath, requests := startMockV2SocketWithRequestCapture(t)
 	command := "printf remote_wrapper_command_ok >/tmp/cmux-remote-wrapper-command-marker; exec bash -l"
