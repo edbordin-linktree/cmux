@@ -8399,7 +8399,11 @@ struct CMUXCLI {
         let scriptBody = [
             "command \(authCommand) <&0",
             "cmux_auth_status=$?",
-            "if [ \"$cmux_auth_status\" -ne 0 ]; then exit \"$cmux_auth_status\"; fi",
+            "if [ \"$cmux_auth_status\" -ne 0 ]; then",
+            "  printf '%s\\n' \"[cmux] SSH foreground authentication failed before remote PTY attach (ssh exit $cmux_auth_status).\" >&2",
+            "  if [ -n \"${SSH_AUTH_SOCK:-}\" ]; then printf '%s\\n' \"[cmux] SSH_AUTH_SOCK=$SSH_AUTH_SOCK\" >&2; else printf '%s\\n' '[cmux] SSH_AUTH_SOCK is not set for this cmux app process.' >&2; fi",
+            "  exit 253",
+            "fi",
             attachScript,
         ]
             .joined(separator: "\n")
