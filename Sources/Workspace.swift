@@ -12459,6 +12459,28 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     @MainActor
+    func canStoreLiveRemoteWorkspaceSnapshot() -> Bool {
+        guard remoteConfiguration?.preserveAfterTerminalExit == true else { return true }
+        guard activeRemoteTerminalSurfaceIds.isEmpty || activeRemoteTerminalSessionCount == 0 else {
+            return true
+        }
+
+        switch remoteConnectionState {
+        case .disconnected, .connecting, .reconnecting, .error:
+            return false
+        case .connected:
+            break
+        }
+
+        switch remoteDaemonStatus.state {
+        case .unavailable, .bootstrapping, .error:
+            return false
+        case .ready:
+            return true
+        }
+    }
+
+    @MainActor
     func uploadDroppedFilesForRemoteTerminal(
         _ fileURLs: [URL],
         operation: TerminalImageTransferOperation,

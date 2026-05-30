@@ -9830,6 +9830,7 @@ struct CMUXCLI {
             ) + "\n" + decoded
         }
         var bridgeReachedReady = false
+        var bridgeAllocated = false
         var attachFinished = false
         var attachmentToken = ""
         defer {
@@ -9841,7 +9842,7 @@ struct CMUXCLI {
                     sessionID: sessionID,
                     attachmentID: attachmentID,
                     attachmentToken: attachmentToken,
-                    clearLocalSurface: !bridgeReachedReady
+                    clearLocalSurface: bridgeAllocated && !bridgeReachedReady
                 )
             }
         }
@@ -9864,6 +9865,7 @@ struct CMUXCLI {
                 params: bridgeParams,
                 responseTimeout: waitForReady ? 185 : nil
             )
+            bridgeAllocated = true
         } catch {
             let message = userFacingRemotePTYErrorMessage(error)
             let exitCode: Int32 = message == "remote daemon is not ready" ? 254 : 1

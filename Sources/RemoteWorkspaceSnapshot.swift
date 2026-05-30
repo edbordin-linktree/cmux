@@ -954,6 +954,11 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
         restorableAgentIndex: RestorableAgentSessionIndex? = RestorableAgentSessionIndex.load(),
         requireCapability: Bool = true
     ) throws -> RemoteWorkspaceSnapshotSyncResult {
+        if status == .live, !workspace.canStoreLiveRemoteWorkspaceSnapshot() {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
+                "Live remote workspace snapshot sync suppressed while persistent remote terminal state is unhealthy."
+            )
+        }
         let upload = try workspace.prepareRemoteWorkspaceSnapshotUpload(
             capturedAt: Date(),
             restorableAgentIndex: restorableAgentIndex,
@@ -979,6 +984,12 @@ final class RemoteWorkspaceSnapshotSyncCoordinator: @unchecked Sendable {
     ) {
         let now = Date()
         for workspace in workspaces {
+            guard workspace.canStoreLiveRemoteWorkspaceSnapshot() else {
+#if DEBUG
+                cmuxDebugLog("remote.workspace.snapshot.sync.skipped_unhealthy workspace=\(workspace.id.uuidString)")
+#endif
+                continue
+            }
             guard let upload = try? workspace.prepareRemoteWorkspaceSnapshotUpload(
                 capturedAt: now,
                 restorableAgentIndex: restorableAgentIndex
