@@ -5920,7 +5920,7 @@ class TerminalController {
 
     private func v2DetachedWorkspaceSnapshotTarget(workspaceID: UUID, timeout: TimeInterval) -> V2DetachedWorkspaceSnapshotTarget? {
         v2DetachedWorkspaceSnapshotTargets(timeout: timeout).first {
-            $0.workspaceID == workspaceID && ($0.status ?? RemoteWorkspaceSnapshotStatus.detached.rawValue) == RemoteWorkspaceSnapshotStatus.detached.rawValue
+            $0.workspaceID == workspaceID
         }
     }
 
@@ -5960,7 +5960,6 @@ class TerminalController {
             from: output
         )
         return response.snapshots
-            .filter { ($0.status ?? RemoteWorkspaceSnapshotStatus.detached.rawValue) == RemoteWorkspaceSnapshotStatus.detached.rawValue }
             .map {
                 V2DetachedWorkspaceSnapshotTarget(
                     host: host,
@@ -10564,6 +10563,7 @@ class TerminalController {
         let initialCommand = v2OptionalTrimmedRawString(params, "initial_command")
         let tmuxStartCommand = v2OptionalTrimmedRawString(params, "tmux_start_command")
         let remotePTYSessionID = v2OptionalTrimmedRawString(params, "remote_pty_session_id")
+        let title = v2OptionalTrimmedRawString(params, "title")
         let startupEnvironment = v2TrimmedStringMap(params, keys: ["startup_environment", "initial_env"])
         let parsedInitialDivider = v2InitialDividerPosition(params)
         if let error = parsedInitialDivider.error {
@@ -10633,6 +10633,9 @@ class TerminalController {
             }
 
             if let newId {
+                if let title {
+                    ws.setPanelCustomTitle(panelId: newId, title: title)
+                }
                 if let commandError = v2QueueTerminalStartupInput(
                     workingDirectory: workingDirectory,
                     initialCommand: initialCommand,
@@ -10673,6 +10676,7 @@ class TerminalController {
         let initialCommand = v2OptionalTrimmedRawString(params, "initial_command")
         let tmuxStartCommand = v2OptionalTrimmedRawString(params, "tmux_start_command")
         let remotePTYSessionID = v2OptionalTrimmedRawString(params, "remote_pty_session_id")
+        let title = v2OptionalTrimmedRawString(params, "title")
         let startupEnvironment = v2TrimmedStringMap(params, keys: ["startup_environment", "initial_env"])
         if panelType == .browser, BrowserAvailabilitySettings.isDisabled() {
             return v2BrowserDisabledExternalOpenResult(rawURL: urlStr, url: url, tabManager: tabManager)
@@ -10728,6 +10732,9 @@ class TerminalController {
             guard let newPanelId else {
                 result = .err(code: "internal_error", message: "Failed to create surface", data: nil)
                 return
+            }
+            if let title {
+                ws.setPanelCustomTitle(panelId: newPanelId, title: title)
             }
             if let commandError = v2QueueTerminalStartupInput(
                 workingDirectory: workingDirectory,
@@ -12096,6 +12103,7 @@ class TerminalController {
         let workingDirectory = v2OptionalTrimmedRawString(params, "working_directory")
         let initialCommand = v2OptionalTrimmedRawString(params, "initial_command")
         let tmuxStartCommand = v2OptionalTrimmedRawString(params, "tmux_start_command")
+        let title = v2OptionalTrimmedRawString(params, "title")
         let startupEnvironment = v2TrimmedStringMap(params, keys: ["startup_environment", "initial_env"])
         if panelType == .browser, BrowserAvailabilitySettings.isDisabled() {
             return v2BrowserDisabledExternalOpenResult(rawURL: urlStr, url: url, tabManager: tabManager)
@@ -12157,6 +12165,9 @@ class TerminalController {
             guard let newPanelId else {
                 result = .err(code: "internal_error", message: "Failed to create pane", data: nil)
                 return
+            }
+            if let title {
+                ws.setPanelCustomTitle(panelId: newPanelId, title: title)
             }
             if let commandError = v2QueueTerminalStartupInput(
                 workingDirectory: workingDirectory,

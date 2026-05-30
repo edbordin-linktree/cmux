@@ -389,6 +389,11 @@ enum RemoteWorkspaceSnapshotDetachController {
 }
 
 enum RemoteWorkspaceSnapshotAttachController {
+    private struct PreparedSnapshot: Sendable {
+        var snapshot: RemoteWorkspaceSnapshotV1
+        var bodySHA256: String
+    }
+
     @MainActor
     static func attach(
         host: String,
@@ -431,12 +436,26 @@ enum RemoteWorkspaceSnapshotAttachController {
             host: normalizedHost,
             slot: normalizedSlot
         )
-        defer {
+        var isSnapshotSyncSuspended = true
+        func resumeSnapshotSyncIfNeeded() {
+            guard isSnapshotSyncSuspended else { return }
+            isSnapshotSyncSuspended = false
             RemoteWorkspaceSnapshotSyncCoordinator.shared.resume(key: suspensionKey)
         }
+        defer { resumeSnapshotSyncIfNeeded() }
 
         let initialTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlankForRemoteSnapshotAttach
             ?? "Detached \(String(normalizedSlot.prefix(8)))"
+        let configuration = try workspaceConfiguration(for: record, slot: normalizedSlot)
+        let remoteSnapshot = try configuration.sessionSnapshot()
+            .requiredForRemoteSnapshotAttach("Configured remote workspace cannot be snapshotted.")
+        let daemonPath = record.daemonBinPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "~/.cmux/bin/cmuxd-remote"
+            : record.daemonBinPath
+        let preparedSnapshot = try await Task.detached(priority: .utility) {
+            try fetchSnapshot(configuration: configuration, daemonPath: daemonPath)
+        }.value
+
         let workspace = owner.addWorkspace(
             id: workspaceID,
             title: initialTitle,
@@ -445,12 +464,14 @@ enum RemoteWorkspaceSnapshotAttachController {
             createInitialTerminal: false
         )
         do {
-            let configuration = try workspaceConfiguration(for: record, slot: normalizedSlot)
             workspace.configureRemoteConnection(configuration, autoConnect: true)
             try await waitForRemoteDaemonReady(workspace: workspace, timeout: 45)
-            let remoteSnapshot = try configuration.sessionSnapshot()
-                .requiredForRemoteSnapshotAttach("Configured remote workspace cannot be snapshotted.")
-            let (snapshot, restoreResult, snapshotSHA256) = try restoreSnapshot(into: workspace, remote: remoteSnapshot)
+            let restoreResult = restoreSnapshot(
+                preparedSnapshot.snapshot,
+                into: workspace,
+                remote: remoteSnapshot
+            )
+            let snapshot = preparedSnapshot.snapshot
             if !snapshot.panes.isEmpty, restoreResult.panesRestored == 0 {
                 throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
                     "Remote workspace snapshot restore produced no panes; preserving detached snapshot for retry."
@@ -458,12 +479,10 @@ enum RemoteWorkspaceSnapshotAttachController {
             }
             workspace.setCustomTitle(snapshot.title)
             owner.selectWorkspace(workspace)
-            _ = try? RemoteWorkspaceSnapshotSyncCoordinator.shared.storeNow(
-                workspace: workspace,
-                status: .live,
-                force: true,
-                requireCapability: false,
-                respectSuspension: false
+            resumeSnapshotSyncIfNeeded()
+            RemoteWorkspaceSnapshotSyncCoordinator.shared.scheduleLiveSync(
+                workspaces: [workspace],
+                force: true
             )
             NotificationCenter.default.post(name: .remoteWorkspaceHostManagerStateDidChange, object: workspace)
             try? DetachedWorkspaceHostRegistry.upsert(DetachedWorkspaceHostRegistryRecord(
@@ -483,7 +502,7 @@ enum RemoteWorkspaceSnapshotAttachController {
                 persistentDaemonSlot: normalizedSlot,
                 panesRestored: restoreResult.panesRestored,
                 panesLost: restoreResult.panesLost,
-                snapshotSHA256: snapshotSHA256
+                snapshotSHA256: preparedSnapshot.bodySHA256
             )
         } catch {
             if owner.tabs.contains(where: { $0.id == workspace.id }) {
@@ -544,12 +563,15 @@ enum RemoteWorkspaceSnapshotAttachController {
         )
     }
 
-    @MainActor
-    private static func restoreSnapshot(
-        into workspace: Workspace,
-        remote: SessionRemoteWorkspaceSnapshot
-    ) throws -> (RemoteWorkspaceSnapshotV1, RemoteWorkspaceRestoreResult, String) {
-        let fetch = try workspace.fetchRemoteWorkspaceSnapshot()
+    private static func fetchSnapshot(
+        configuration: WorkspaceRemoteConfiguration,
+        daemonPath: String
+    ) throws -> PreparedSnapshot {
+        let fetch = try Workspace.fetchPreparedRemoteWorkspaceSnapshot(
+            configuration: configuration,
+            daemonPath: daemonPath,
+            timeout: 45
+        )
         guard (fetch["exists"] as? Bool) == true else {
             throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
                 "Remote workspace snapshot is absent; use ssh-workspace-snapshot-clear if stale local state remains."
@@ -568,8 +590,16 @@ enum RemoteWorkspaceSnapshotAttachController {
             )
         }
         let snapshot = try RemoteWorkspaceSnapshotCodec.decodeString(body)
-        let result = workspace.restoreRemoteWorkspaceSnapshotV1(snapshot, remote: remote)
-        return (snapshot, result, bodySHA256)
+        return PreparedSnapshot(snapshot: snapshot, bodySHA256: bodySHA256)
+    }
+
+    @MainActor
+    private static func restoreSnapshot(
+        _ snapshot: RemoteWorkspaceSnapshotV1,
+        into workspace: Workspace,
+        remote: SessionRemoteWorkspaceSnapshot
+    ) -> RemoteWorkspaceRestoreResult {
+        workspace.restoreRemoteWorkspaceSnapshotV1(snapshot, remote: remote)
     }
 
     private static func sshOptionsWithDetachedWorkspaceRestoreDefaults(
@@ -581,7 +611,13 @@ enum RemoteWorkspaceSnapshotAttachController {
             .filter { !$0.isEmpty }
             .filter { option in
                 guard let key = sshOptionKey(option) else { return true }
-                return !["controlmaster", "controlpersist", "controlpath"].contains(key)
+                return ![
+                    "controlmaster",
+                    "controlpersist",
+                    "controlpath",
+                    "localcommand",
+                    "permitlocalcommand",
+                ].contains(key)
             }
         if !hasSSHOptionKey(merged, key: "StrictHostKeyChecking") {
             merged.append("StrictHostKeyChecking=accept-new")

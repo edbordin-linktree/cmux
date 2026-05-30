@@ -19,21 +19,28 @@ func headlessCreateSurface(params map[string]any, splitPane bool) (map[string]an
 		if panelType == "" {
 			panelType = "terminal"
 		}
+		title := strings.TrimSpace(stringFromAny(params["title"]))
 		var paneSnapshot map[string]any
 		if panelType == "browser" {
 			url := strings.TrimSpace(stringFromAny(params["url"]))
 			if url == "" {
 				url = "about:blank"
 			}
+			if title == "" {
+				title = url
+			}
 			paneSnapshot = map[string]any{
 				"type": "browser",
 				"browser": map[string]any{
 					"paneId":     surfaceID,
 					"currentURL": url,
-					"title":      url,
+					"title":      title,
 				},
 			}
 		} else {
+			if title == "" {
+				title = "Terminal"
+			}
 			sessionID := strings.TrimSpace(stringFromAny(params["remote_pty_session_id"]))
 			if sessionID == "" {
 				sessionID = "ssh-" + workspaceID + "-" + surfaceID
@@ -53,7 +60,7 @@ func headlessCreateSurface(params map[string]any, splitPane bool) (map[string]an
 				"terminal": map[string]any{
 					"paneId":             surfaceID,
 					"remotePTYSessionId": sessionID,
-					"title":              "Terminal",
+					"title":              title,
 					"cwdHint":            headlessWorkspaceCreateCWD(params),
 				},
 			}
