@@ -444,6 +444,7 @@
 		9C1BEA3D2E6F49709A71C020 /* TerminalControllerSocketWriteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C1BEA3D2E6F49709A71C021 /* TerminalControllerSocketWriteTests.swift */; };
 		C7A505000000000000000002 /* TerminalControllerTopSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A505000000000000000001 /* TerminalControllerTopSupport.swift */; };
 		C7A50B000000000000000002 /* TerminalControllerV2ParamParsingSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A50B000000000000000001 /* TerminalControllerV2ParamParsingSupport.swift */; };
+		8F3A4D5E6B7C8D9E0F1A2B3C /* TerminalControllerV2PreferredUUIDTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F708192A3B4C5 /* TerminalControllerV2PreferredUUIDTests.swift */; };
 		0D56BE882EAD4B67AC44F96D /* TerminalDirectoryOpenSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B8E2E03F4A64C61B729CF19 /* TerminalDirectoryOpenSupport.swift */; };
 		E5C0F1A0E5C0F1A0E5C0F1A0 /* TerminalFindEscapeRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C0F1A1E5C0F1A1E5C0F1A1 /* TerminalFindEscapeRouting.swift */; };
 		A5001542 /* TerminalImageTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001544 /* TerminalImageTransfer.swift */; };
@@ -1027,6 +1028,7 @@
 		9C1BEA3D2E6F49709A71C021 /* TerminalControllerSocketWriteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalControllerSocketWriteTests.swift; sourceTree = "<group>"; };
 		C7A505000000000000000001 /* TerminalControllerTopSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalControllerTopSupport.swift; sourceTree = "<group>"; };
 		C7A50B000000000000000001 /* TerminalControllerV2ParamParsingSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalControllerV2ParamParsingSupport.swift; sourceTree = "<group>"; };
+		1A2B3C4D5E6F708192A3B4C5 /* TerminalControllerV2PreferredUUIDTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalControllerV2PreferredUUIDTests.swift; sourceTree = "<group>"; };
 		6B8E2E03F4A64C61B729CF19 /* TerminalDirectoryOpenSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TerminalDirectoryOpenSupport.swift; sourceTree = "<group>"; };
 		E5C0F1A1E5C0F1A1E5C0F1A1 /* TerminalFindEscapeRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TerminalFindEscapeRouting.swift; sourceTree = "<group>"; };
 		A5001544 /* TerminalImageTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalImageTransfer.swift; sourceTree = "<group>"; };
@@ -1740,6 +1742,7 @@
 				C3677001000000000000002 /* CmuxSSHURLRequestTests.swift */,
 				491751CE2321474474F27DCF /* TerminalControllerSocketSecurityTests.swift */,
 				9C1BEA3D2E6F49709A71C021 /* TerminalControllerSocketWriteTests.swift */,
+				1A2B3C4D5E6F708192A3B4C5 /* TerminalControllerV2PreferredUUIDTests.swift */,
 				E7E000000000000000000004 /* CmuxEventBusTests.swift */,
 				A5A5A504A1B2C3D4E5F60718 /* TerminalNotificationQueueTests.swift */,
 				A5A5A508A1B2C3D4E5F60718 /* TerminalNotificationClearAllTests.swift */,
@@ -2562,6 +2565,7 @@
 				46F6AC15863EC84DCD3770A2 /* TerminalAndGhosttyTests.swift in Sources */,
 				8C4BBF2DEF6DF93F395A9EE7 /* TerminalControllerSocketSecurityTests.swift in Sources */,
 				9C1BEA3D2E6F49709A71C020 /* TerminalControllerSocketWriteTests.swift in Sources */,
+				8F3A4D5E6B7C8D9E0F1A2B3C /* TerminalControllerV2PreferredUUIDTests.swift in Sources */,
 					A5C41103A1B2C3D4E5F60718 /* TerminalNotificationCallerTests.swift in Sources */,
 				A5A5A507A1B2C3D4E5F60718 /* TerminalNotificationClearAllTests.swift in Sources */,
 					A5A5A505A1B2C3D4E5F60718 /* TerminalNotificationDirectInteractionTests.swift in Sources */,

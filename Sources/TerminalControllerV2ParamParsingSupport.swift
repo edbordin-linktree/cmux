@@ -152,6 +152,28 @@ extension TerminalController {
         return !(raw is NSNull)
     }
 
+    /// Validates that an optional "preferred UUID" param (e.g.
+    /// `preferred_workspace_id`) is a parseable UUID **when the caller
+    /// supplied it**. Returns:
+    /// - `nil` when the key is absent or its value is a valid UUID string.
+    /// - `.err(code: "invalid_params", ...)` when the key is present but the
+    ///   value is not a parseable UUID. This is the signal that lets callers
+    ///   reject the request instead of silently minting a fresh UUID — which
+    ///   would otherwise destroy the durable identity the caller intended to
+    ///   adopt across a snapshot detach/attach cycle.
+    nonisolated func v2ValidatePreferredUUIDParam(
+        _ params: [String: Any],
+        key: String
+    ) -> V2CallResult? {
+        // No-op stub. Replaced by the strict-validation implementation in a
+        // follow-up commit; the companion test in
+        // TerminalControllerV2PreferredUUIDTests asserts the strict behavior
+        // and is intended to go red on this commit.
+        _ = params
+        _ = key
+        return nil
+    }
+
     nonisolated func v2StrictInt(_ params: [String: Any], _ key: String) -> Int? {
         v2StrictIntAny(params[key])
     }
