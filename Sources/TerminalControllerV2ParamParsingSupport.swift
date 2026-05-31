@@ -155,7 +155,8 @@ extension TerminalController {
     /// Validates that an optional "preferred UUID" param (e.g.
     /// `preferred_workspace_id`) is a parseable UUID **when the caller
     /// supplied it**. Returns:
-    /// - `nil` when the key is absent or its value is a valid UUID string.
+    /// - `nil` when the key is absent (or set to `NSNull`) or its value is a
+    ///   valid UUID string.
     /// - `.err(code: "invalid_params", ...)` when the key is present but the
     ///   value is not a parseable UUID. This is the signal that lets callers
     ///   reject the request instead of silently minting a fresh UUID — which
@@ -165,13 +166,23 @@ extension TerminalController {
         _ params: [String: Any],
         key: String
     ) -> V2CallResult? {
-        // No-op stub. Replaced by the strict-validation implementation in a
-        // follow-up commit; the companion test in
-        // TerminalControllerV2PreferredUUIDTests asserts the strict behavior
-        // and is intended to go red on this commit.
-        _ = params
-        _ = key
-        return nil
+        guard v2HasNonNullParam(params, key) else { return nil }
+        guard let raw = params[key] as? String else {
+            return .err(
+                code: "invalid_params",
+                message: "\(key) must be a UUID string",
+                data: nil
+            )
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if UUID(uuidString: trimmed) != nil {
+            return nil
+        }
+        return .err(
+            code: "invalid_params",
+            message: "\(key) is not a valid UUID",
+            data: nil
+        )
     }
 
     nonisolated func v2StrictInt(_ params: [String: Any], _ key: String) -> Int? {

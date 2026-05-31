@@ -7101,6 +7101,13 @@ class TerminalController {
     }
 
     private func v2WorkspaceCreate(params: [String: Any]) -> V2CallResult {
+        // Validate the optional preferred_workspace_id shape before resolving
+        // the TabManager so a malformed UUID gets a typed `invalid_params`
+        // error instead of silently falling back to a freshly-minted UUID
+        // (which would destroy the caller's identity intent on snapshot attach).
+        if let err = v2ValidatePreferredUUIDParam(params, key: "preferred_workspace_id") {
+            return err
+        }
         guard let tabManager = v2ResolveTabManager(params: params) else {
             return .err(code: "unavailable", message: "TabManager not available", data: nil)
         }
