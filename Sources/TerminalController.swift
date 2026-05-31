@@ -8523,7 +8523,7 @@ class TerminalController {
                     host: target.host.host,
                     slot: target.slot,
                     title: target.title,
-                    preferredWorkspaceID: requestedWorkspaceID,
+                    workspaceID: requestedWorkspaceID,
                     preferredWindow: preferredWindow,
                     daemonPathOverride: v2DaemonPath(for: target)
                 )

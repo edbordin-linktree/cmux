@@ -229,6 +229,14 @@ final class HostManagerStore: ObservableObject {
 
     func attach(host: String, slot: String, workspaceID: UUID?, title: String?) {
         guard !isLoading else { return }
+        guard let workspaceID else {
+            lastError = String(
+                localized: "hostManager.attach.missingWorkspaceID",
+                defaultValue: "Cannot attach: snapshot at this slot has no workspace UUID."
+            )
+            NSSound.beep()
+            return
+        }
         isLoading = true
         lastError = nil
         Task {
@@ -237,8 +245,8 @@ final class HostManagerStore: ObservableObject {
                     host: host,
                     slot: slot,
                     title: title,
-                    preferredWorkspaceID: workspaceID,
-                preferredWindow: preferredWindow
+                    workspaceID: workspaceID,
+                    preferredWindow: preferredWindow
                 )
                 isLoading = false
                 scheduleRefresh(delay: 0.1)

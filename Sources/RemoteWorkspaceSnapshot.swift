@@ -397,12 +397,22 @@ enum RemoteWorkspaceSnapshotAttachController {
         var bodySHA256: String
     }
 
+    /// Attach a detached remote workspace snapshot into a new local Swift
+    /// workspace.
+    ///
+    /// - Parameter workspaceID: The durable UUID the caller intends to adopt.
+    ///   This must match the `workspaceId` recorded in the snapshot body at
+    ///   `host`/`slot`; a mismatch throws rather than silently re-stamping
+    ///   the snapshot with a new identity. The parameter is intentionally
+    ///   non-optional — the previous `UUID? = nil` default silently minted a
+    ///   fresh UUID and overwrote the snapshot's durable identity on the
+    ///   first sync, which is the bug this signature shape exists to prevent.
     @MainActor
     static func attach(
         host: String,
         slot: String,
         title: String?,
-        preferredWorkspaceID: UUID? = nil,
+        workspaceID: UUID,
         preferredWindow: NSWindow? = nil,
         daemonPathOverride: String? = nil
     ) async throws -> RemoteWorkspaceSnapshotAttachResult {
@@ -433,7 +443,6 @@ enum RemoteWorkspaceSnapshotAttachController {
             throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace("No cmux window is available for attaching the workspace.")
         }
 
-        let workspaceID = preferredWorkspaceID ?? UUID()
         let suspensionKey = RemoteWorkspaceSnapshotSyncCoordinator.shared.suspend(
             workspaceID: workspaceID,
             host: normalizedHost,
@@ -463,6 +472,17 @@ enum RemoteWorkspaceSnapshotAttachController {
         let preparedSnapshot = try await Task.detached(priority: .utility) {
             try fetchSnapshot(configuration: configuration, daemonPath: daemonPath)
         }.value
+
+        // The caller-supplied UUID must match the durable identity stored in
+        // the snapshot body. Mismatch indicates the caller is trying to attach
+        // the wrong workspace at this slot; reject instead of adopting the
+        // caller's UUID and overwriting the snapshot's original identity on
+        // the next sync.
+        guard preparedSnapshot.snapshot.workspaceId == workspaceID else {
+            throw RemoteWorkspaceSnapshotWorkspaceError.ineligibleWorkspace(
+                "Remote workspace snapshot identity mismatch: requested \(workspaceID) but snapshot at \(normalizedHost):\(normalizedSlot) is \(preparedSnapshot.snapshot.workspaceId)."
+            )
+        }
 
         let workspace = owner.addWorkspace(
             id: workspaceID,
