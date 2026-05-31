@@ -1286,14 +1286,25 @@ extension Workspace {
                     ? Self.sshPTYAttachStartupCommand(sessionID: sessionID)
                     : remotePTYAttachStartupCommand(sessionID: sessionID)
             }
-            let restoredRemotePTYAttachScript = restoredRemotePTYAttachCommand.flatMap {
-                SessionRestoredTerminalCommandStore.writeLauncherScript(
-                    command: $0,
+            let restoredRemotePTYAttachScript: URL?
+            if useExistingRemotePTYBridge {
+                restoredRemotePTYAttachScript = nil
+            } else if let restoredRemotePTYAttachCommand {
+                restoredRemotePTYAttachScript = SessionRestoredTerminalCommandStore.writeLauncherScript(
+                    command: restoredRemotePTYAttachCommand,
                     workingDirectory: nil
                 )
+            } else {
+                restoredRemotePTYAttachScript = nil
+            }
+            let restoredRemotePTYStartupCommand: String?
+            if useExistingRemotePTYBridge {
+                restoredRemotePTYStartupCommand = restoredRemotePTYAttachCommand
+            } else {
+                restoredRemotePTYStartupCommand = restoredRemotePTYAttachScript?.path
             }
             let restoredStartupCommand =
-                restoredRemotePTYAttachScript?.path
+                restoredRemotePTYStartupCommand
                 ?? restoredTmuxStartupScript?.path
                 ?? restoredBindingLaunch?.initialCommand
                 ?? restoredAgentResumeLaunch?.initialCommand
@@ -1339,6 +1350,19 @@ extension Workspace {
                     "replayScrollback=\(shouldReplayScrollback ? 1 : 0)"
                 )
             }
+            cmuxDebugLog(
+                "session.restore.remotePTY panel=\(snapshot.id.uuidString.prefix(5)) " +
+                "snapshotWorkspace=\((snapshotWorkspaceId ?? id).uuidString.prefix(5)) " +
+                "hasSnapshotSession=\(snapshot.terminal?.remotePTYSessionID?.isEmpty == false ? 1 : 0) " +
+                "isRemoteTerminal=\(snapshot.terminal?.isRemoteTerminal == true ? 1 : 0) " +
+                "hasRemoteConfig=\(remoteConfiguration == nil ? 0 : 1) " +
+                "persistent=\(remoteConfiguration?.preserveAfterTerminalExit == true ? 1 : 0) " +
+                "slot=\(remoteConfiguration?.persistentDaemonSlot ?? "nil") " +
+                "existingBridge=\(useExistingRemotePTYBridge ? 1 : 0) " +
+                "hasAttach=\(restoredRemotePTYAttachCommand == nil ? 0 : 1) " +
+                "script=\(restoredRemotePTYAttachScript == nil ? 0 : 1) " +
+                "startup=\(restoredRemotePTYAttachCommand != nil ? "remote_pty" : restoredStartupCommand == nil ? "none" : "other")"
+            )
 #endif
             let shouldReplayLocalScrollback = restoredRemotePTYAttachCommand == nil && shouldReplayScrollback
             let restoredScrollback = shouldReplayLocalScrollback ? snapshot.terminal?.scrollback : nil
@@ -1351,7 +1375,8 @@ extension Workspace {
                 tmuxStartCommand: restoredTmuxStartCommand,
                 initialInput: restoredStartupInput,
                 startupEnvironment: replayEnvironment,
-                remotePTYSessionID: restoredRemotePTYSessionID
+                remotePTYSessionID: restoredRemotePTYSessionID,
+                inheritRemoteStartup: restoredRemotePTYSessionID == nil
             ) else {
                 return nil
             }
