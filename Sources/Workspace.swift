@@ -1287,9 +1287,7 @@ extension Workspace {
                     : remotePTYAttachStartupCommand(sessionID: sessionID)
             }
             let restoredRemotePTYAttachScript: URL?
-            if useExistingRemotePTYBridge {
-                restoredRemotePTYAttachScript = nil
-            } else if let restoredRemotePTYAttachCommand {
+            if let restoredRemotePTYAttachCommand {
                 restoredRemotePTYAttachScript = SessionRestoredTerminalCommandStore.writeLauncherScript(
                     command: restoredRemotePTYAttachCommand,
                     workingDirectory: nil
@@ -1297,14 +1295,8 @@ extension Workspace {
             } else {
                 restoredRemotePTYAttachScript = nil
             }
-            let restoredRemotePTYStartupCommand: String?
-            if useExistingRemotePTYBridge {
-                restoredRemotePTYStartupCommand = restoredRemotePTYAttachCommand
-            } else {
-                restoredRemotePTYStartupCommand = restoredRemotePTYAttachScript?.path
-            }
             let restoredStartupCommand =
-                restoredRemotePTYStartupCommand
+                restoredRemotePTYAttachScript?.path
                 ?? restoredTmuxStartupScript?.path
                 ?? restoredBindingLaunch?.initialCommand
                 ?? restoredAgentResumeLaunch?.initialCommand
