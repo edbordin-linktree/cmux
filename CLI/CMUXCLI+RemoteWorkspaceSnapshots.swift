@@ -364,9 +364,8 @@ extension CMUXCLI {
             if jsonOutput {
                 print(jsonString(payload))
             } else {
-                let localWorkspaceID = (payload["local_workspace_id"] as? String) ?? "existing workspace"
                 let title = (payload["title"] as? String) ?? "workspace"
-                print("Workspace \(workspaceID) (\(title)) is already attached as \(localWorkspaceID) from \(target.host.host):\(target.slot)")
+                print("Workspace \(workspaceID) (\(title)) is already attached from \(target.host.host):\(target.slot)")
             }
             return
         }
@@ -798,9 +797,6 @@ extension CMUXCLI {
             "panes_lost": 0,
             "already_attached": true,
         ]
-        if let localWorkspaceID = (attached["local_workspace_id"] as? String) ?? (attached["workspace_id"] as? String) {
-            payload["local_workspace_id"] = localWorkspaceID
-        }
         if let title = attached["title"] as? String {
             payload["title"] = title
         } else if let title = target.snapshot?.title {

@@ -7837,8 +7837,6 @@ class TerminalController {
             "window_ref": v2Ref(kind: .window, uuid: windowId),
             "workspace_id": match.workspace.id.uuidString,
             "workspace_ref": v2Ref(kind: .workspace, uuid: match.workspace.id),
-            "local_workspace_id": match.workspace.id.uuidString,
-            "local_workspace_ref": v2Ref(kind: .workspace, uuid: match.workspace.id),
             "title": match.workspace.title,
             "host": configuration?.destination ?? fallbackHost,
             "persistent_daemon_slot": configuration?.persistentDaemonSlot ?? fallbackSlot,
@@ -8547,12 +8545,9 @@ class TerminalController {
 
         switch box.result {
         case .success(let attach):
-            let localWorkspaceRef = v2MainSync { v2Ref(kind: .workspace, uuid: attach.localWorkspaceID) }
             return .ok([
                 "workspace_id": requestedWorkspaceID.uuidString,
                 "workspace_ref": requestedWorkspaceRef,
-                "local_workspace_id": attach.localWorkspaceID.uuidString,
-                "local_workspace_ref": localWorkspaceRef,
                 "title": attach.title,
                 "host": attach.host,
                 "persistent_daemon_slot": attach.persistentDaemonSlot,
@@ -8674,8 +8669,6 @@ class TerminalController {
             "window_ref": v2Ref(kind: .window, uuid: windowId),
             "workspace_id": snapshot.workspaceId.uuidString,
             "workspace_ref": v2Ref(kind: .workspace, uuid: snapshot.workspaceId),
-            "local_workspace_id": target.id.uuidString,
-            "local_workspace_ref": v2Ref(kind: .workspace, uuid: target.id),
             "title": snapshot.title,
             "panes_restored": restoreResult?.panesRestored ?? 0,
             "panes_lost": restoreResult?.panesLost ?? 0,

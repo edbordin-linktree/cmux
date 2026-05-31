@@ -255,8 +255,11 @@ struct RemoteWorkspaceSnapshotDetachResult {
 }
 
 struct RemoteWorkspaceSnapshotAttachResult {
+    /// The durable workspace UUID. After strict-honor of preferred_workspace_id
+    /// this equals both the snapshot's `workspaceId` and the local Swift
+    /// `Workspace.id`; the previous separate `localWorkspaceID` field modeled
+    /// a bug (silent identity divergence on attach) and has been removed.
     var workspaceID: UUID
-    var localWorkspaceID: UUID
     var title: String
     var host: String
     var persistentDaemonSlot: String
@@ -413,7 +416,6 @@ enum RemoteWorkspaceSnapshotAttachController {
             let configuration = attached.workspace.remoteConfiguration
             return RemoteWorkspaceSnapshotAttachResult(
                 workspaceID: attached.workspace.id,
-                localWorkspaceID: attached.workspace.id,
                 title: attached.workspace.title,
                 host: configuration?.destination ?? normalizedHost,
                 persistentDaemonSlot: configuration?.persistentDaemonSlot ?? normalizedSlot,
@@ -502,7 +504,6 @@ enum RemoteWorkspaceSnapshotAttachController {
             ))
             return RemoteWorkspaceSnapshotAttachResult(
                 workspaceID: snapshot.workspaceId,
-                localWorkspaceID: workspace.id,
                 title: snapshot.title,
                 host: configuration.destination,
                 persistentDaemonSlot: normalizedSlot,
