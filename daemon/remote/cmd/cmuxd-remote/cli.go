@@ -1506,13 +1506,16 @@ func routeForExplicitWorkspaceArg(workspaceArg string, fallback string) explicit
 	if err != nil {
 		return explicitWorkspaceRoute{socketPath: fallback}
 	}
-	slot, err := findHeadlessSlotForWorkspace(rootBase, workspaceID)
+	paths, meta, err := findHeadlessSnapshotForWorkspace(rootBase, workspaceID)
 	if err != nil {
 		return explicitWorkspaceRoute{socketPath: fallback}
 	}
-	socketPath := headlessRelaySocketForSlot(slot)
-	if socketPath == "" {
+	if workspaceSnapshotStatusOrDetached(meta.Status) == "detached" {
 		return explicitWorkspaceRoute{socketPath: fallback, forceHeadless: true}
+	}
+	socketPath := headlessRelaySocketForSlot(paths.slot)
+	if socketPath == "" {
+		return explicitWorkspaceRoute{socketPath: fallback}
 	}
 	return explicitWorkspaceRoute{socketPath: socketPath}
 }

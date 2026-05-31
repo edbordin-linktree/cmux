@@ -239,11 +239,20 @@ func findHeadlessSlotForWorkspace(rootBase, workspaceID string) (string, error) 
 }
 
 func findHeadlessPathsForWorkspace(rootBase, workspaceID string) (persistentDaemonPaths, error) {
+	paths, _, err := findHeadlessSnapshotForWorkspace(rootBase, workspaceID)
+	return paths, err
+}
+
+func findHeadlessSnapshotForWorkspace(rootBase, workspaceID string) (persistentDaemonPaths, workspaceSnapshotMeta, error) {
 	slotRoots, err := headlessSnapshotSlotRoots(rootBase)
 	if err != nil {
-		return persistentDaemonPaths{}, err
+		return persistentDaemonPaths{}, workspaceSnapshotMeta{}, err
 	}
-	var matches []persistentDaemonPaths
+	type match struct {
+		paths persistentDaemonPaths
+		meta  workspaceSnapshotMeta
+	}
+	var matches []match
 	for _, slotRoot := range slotRoots {
 		data, err := os.ReadFile(filepath.Join(slotRoot.root, workspaceSnapshotMetaFile))
 		if err != nil {
@@ -251,16 +260,19 @@ func findHeadlessPathsForWorkspace(rootBase, workspaceID string) (persistentDaem
 		}
 		var meta workspaceSnapshotMeta
 		if json.Unmarshal(data, &meta) == nil && strings.EqualFold(meta.WorkspaceID, workspaceID) {
-			matches = append(matches, pathsForHeadlessSlotRoot(slotRoot.slot, slotRoot.root))
+			matches = append(matches, match{
+				paths: pathsForHeadlessSlotRoot(slotRoot.slot, slotRoot.root),
+				meta:  meta,
+			})
 		}
 	}
 	if len(matches) == 0 {
-		return persistentDaemonPaths{}, fmt.Errorf("no detached snapshot found for workspace %s", workspaceID)
+		return persistentDaemonPaths{}, workspaceSnapshotMeta{}, fmt.Errorf("no detached snapshot found for workspace %s", workspaceID)
 	}
 	if len(matches) > 1 {
-		return persistentDaemonPaths{}, fmt.Errorf("multiple detached snapshots found for workspace %s; set CMUX_REMOTE_DAEMON_SLOT", workspaceID)
+		return persistentDaemonPaths{}, workspaceSnapshotMeta{}, fmt.Errorf("multiple detached snapshots found for workspace %s; set CMUX_REMOTE_DAEMON_SLOT", workspaceID)
 	}
-	return matches[0], nil
+	return matches[0].paths, matches[0].meta, nil
 }
 
 type headlessSnapshotSlotRoot struct {

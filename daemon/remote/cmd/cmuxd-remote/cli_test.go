@@ -1898,6 +1898,7 @@ func TestCLIExplicitWorkspaceUsesTargetRelayBeforeHeadlessFallback(t *testing.T)
 	targetSlot := "slot-b"
 	targetSurfaceID := "22222222-2222-4222-8222-222222222222"
 	writeHeadlessCLITestSnapshotAt(t, root, targetWorkspaceID, targetSlot, "Target Workspace", targetSurfaceID)
+	setHeadlessCLITestSnapshotStatus(t, root, targetSlot, "live")
 	targetSocket, requests := startMockV2SocketWithRequestCapture(t)
 	if err := os.WriteFile(filepath.Join(root, targetSlot, "relay_socket"), []byte(targetSocket), 0o600); err != nil {
 		t.Fatalf("write relay socket: %v", err)
@@ -1936,6 +1937,90 @@ func TestCLIExplicitWorkspaceUsesTargetRelayBeforeHeadlessFallback(t *testing.T)
 	}
 	if got := len(headlessPaneSnapshots(targetBody)); got != 1 {
 		t.Fatalf("target pane snapshots = %d, want unchanged 1 because relay handled it", got)
+	}
+}
+
+func TestCLIAttachedCallerExplicitLiveWorkspaceUUIDUsesSwiftRelayForSurfaceLookup(t *testing.T) {
+	root, callerWorkspaceID, callerSlot := writeHeadlessCLITestSnapshot(t)
+	targetWorkspaceID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	targetSlot := "slot-b"
+	targetSurfaceID := "22222222-2222-4222-8222-222222222222"
+	writeHeadlessCLITestSnapshotAt(t, root, targetWorkspaceID, targetSlot, "Target Workspace", targetSurfaceID)
+	setHeadlessCLITestSnapshotStatus(t, root, targetSlot, "live")
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", callerWorkspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", callerSlot)
+	callerSocket, requests := startMockV2SocketWithRequestCapture(t)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", callerSocket, "--json", "surface", "lookup", "--workspace", targetWorkspaceID, "--metadata", "craft:semantic=agent"})
+		if code != 0 {
+			t.Fatalf("surface lookup returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"method":"surface.lookup"`) {
+		t.Fatalf("expected caller relay JSON output, got %s", output)
+	}
+
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "surface.lookup" {
+			t.Fatalf("method = %v, want surface.lookup", got)
+		}
+		params, _ := req["params"].(map[string]any)
+		if got := params["workspace_id"]; got != targetWorkspaceID {
+			t.Fatalf("workspace_id = %v, want %s", got, targetWorkspaceID)
+		}
+		metadata, _ := params["metadata"].(map[string]any)
+		if got := metadata["craft:semantic"]; got != "agent" {
+			t.Fatalf("metadata craft:semantic = %v, want agent", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for caller relay request")
+	}
+
+	targetBody := readHeadlessCLITestBody(t, root, targetSlot)
+	if got := len(headlessPaneSnapshots(targetBody)); got != 1 {
+		t.Fatalf("target pane snapshots = %d, want unchanged 1 because relay handled it", got)
+	}
+}
+
+func TestCLIAttachedCallerExplicitLiveWorkspaceUUIDUsesSwiftRelayForFocusSurface(t *testing.T) {
+	root, callerWorkspaceID, callerSlot := writeHeadlessCLITestSnapshot(t)
+	targetWorkspaceID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	targetSlot := "slot-b"
+	targetSurfaceID := "22222222-2222-4222-8222-222222222222"
+	writeHeadlessCLITestSnapshotAt(t, root, targetWorkspaceID, targetSlot, "Target Workspace", targetSurfaceID)
+	setHeadlessCLITestSnapshotStatus(t, root, targetSlot, "live")
+	t.Setenv("CMUX_REMOTE_DAEMON_ROOT", root)
+	t.Setenv("CMUX_WORKSPACE_ID", callerWorkspaceID)
+	t.Setenv("CMUX_REMOTE_DAEMON_SLOT", callerSlot)
+	callerSocket, requests := startMockV2SocketWithRequestCapture(t)
+
+	output := captureStdout(t, func() {
+		code := runCLI([]string{"--socket", callerSocket, "--json", "focus-surface", "--workspace", targetWorkspaceID, "--surface", targetSurfaceID})
+		if code != 0 {
+			t.Fatalf("focus-surface returned %d", code)
+		}
+	})
+	if !strings.Contains(output, `"method":"surface.focus"`) {
+		t.Fatalf("expected caller relay JSON output, got %s", output)
+	}
+
+	select {
+	case req := <-requests:
+		if got := req["method"]; got != "surface.focus" {
+			t.Fatalf("method = %v, want surface.focus", got)
+		}
+		params, _ := req["params"].(map[string]any)
+		if got := params["workspace_id"]; got != targetWorkspaceID {
+			t.Fatalf("workspace_id = %v, want %s", got, targetWorkspaceID)
+		}
+		if got := params["surface_id"]; got != targetSurfaceID {
+			t.Fatalf("surface_id = %v, want %s", got, targetSurfaceID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for caller relay request")
 	}
 }
 
@@ -2389,6 +2474,19 @@ func readHeadlessCLITestMeta(t *testing.T, root string, slot string) workspaceSn
 		t.Fatalf("decode meta: %v", err)
 	}
 	return meta
+}
+
+func setHeadlessCLITestSnapshotStatus(t *testing.T, root string, slot string, status string) {
+	t.Helper()
+	meta := readHeadlessCLITestMeta(t, root, slot)
+	meta.Status = status
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(headlessCLITestSlotRoot(root, slot), workspaceSnapshotMetaFile), data, 0o600); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
 }
 
 func headlessCLITestSlotRoot(root string, slot string) string {
