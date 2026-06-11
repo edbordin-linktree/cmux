@@ -931,7 +931,6 @@ extension CMUXCLI {
                 host: host.host,
                 scannedAt: response.scannedAt,
                 snapshots: response.snapshots
-                    .filter { snapshotStatus($0) == "detached" }
                     .sorted { $0.slot < $1.slot },
                 error: nil
             )
@@ -1010,6 +1009,7 @@ extension CMUXCLI {
                 rows.append([
                     result.host,
                     snapshot.slot,
+                    snapshotStatus(snapshot),
                     shortWorkspaceID(snapshot.workspaceID),
                     quotedTitle(snapshot.title),
                     DetachedWorkspaceDates.string(snapshot.detachedAt),
@@ -1020,7 +1020,7 @@ extension CMUXCLI {
         if rows.isEmpty {
             print("No detached workspaces")
         } else {
-            printTable(headers: ["HOST", "SLOT", "WORKSPACE", "TITLE", "DETACHED"], rows: rows)
+            printTable(headers: ["HOST", "SLOT", "STATUS", "WORKSPACE", "TITLE", "DETACHED"], rows: rows)
         }
         if !errors.isEmpty {
             FileHandle.standardError.write(Data(("\nUnreachable hosts:\n" + errors.map { "  \($0)" }.joined(separator: "\n") + "\n").utf8))
