@@ -5823,6 +5823,7 @@ class TerminalController {
 
         var matches: [[String: Any]] = []
         var attachedWorkspaceIDs = Set<UUID>()
+        var attachedMetadataIdentities = Set<String>()
         v2MainSync {
             guard let app = AppDelegate.shared else { return }
             let windows = app.listMainWindowSummaries()
@@ -5845,6 +5846,9 @@ class TerminalController {
                     payload["metadata"] = workspace.metadataEntries
                     matches.append(payload)
                     attachedWorkspaceIDs.insert(workspace.id)
+                    if let identity = v2WorkspaceLookupMetadataIdentity(workspace.metadataEntries) {
+                        attachedMetadataIdentities.insert(identity)
+                    }
                 }
             }
         }
@@ -5859,6 +5863,10 @@ class TerminalController {
                     let fetched = try v2FetchDetachedWorkspaceSnapshot(target: target)
                     let metadata = fetched.snapshot.metadataEntries ?? [:]
                     guard criteria.allSatisfy({ key, value in metadata[key] == value }) else {
+                        continue
+                    }
+                    if let identity = v2WorkspaceLookupMetadataIdentity(metadata),
+                       attachedMetadataIdentities.contains(identity) {
                         continue
                     }
                     matches.append(v2DetachedWorkspaceSummaryPayload(
@@ -5885,6 +5893,28 @@ class TerminalController {
             "workspace": matches.count == 1 ? matches[0] : NSNull(),
             "detached_errors": detachedErrors,
         ])
+    }
+
+    private func v2WorkspaceLookupMetadataIdentity(_ metadata: [String: String]) -> String? {
+        if let projectID = metadata["craft:project-id"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !projectID.isEmpty {
+            let taskID = metadata["craft:task-id"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return "craft:\(projectID)\u{0}\(taskID)"
+        }
+        let pairs = metadata
+            .map { key, value in
+                (
+                    key.trimmingCharacters(in: .whitespacesAndNewlines),
+                    value
+                )
+            }
+            .filter { !$0.0.isEmpty }
+            .sorted { lhs, rhs in
+                if lhs.0 != rhs.0 { return lhs.0 < rhs.0 }
+                return lhs.1 < rhs.1
+            }
+        guard !pairs.isEmpty else { return nil }
+        return pairs.map { "\($0.0)\u{0}\($0.1)" }.joined(separator: "\u{1}")
     }
 
     private func v2MetadataWorkspace(params: [String: Any]) -> Workspace? {
